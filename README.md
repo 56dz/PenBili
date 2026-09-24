@@ -93,9 +93,7 @@ adb 定位顺序：`$env:BILI_ADB` → PATH → 本机 `../env/adb` 布局）。
 ## 致谢
 
 - [SocialSisterYi/bilibili-API-collect](https://github.com/SocialSisterYi/bilibili-API-collect)：
-  B 站接口文档，**文档本身按 CC BY-NC 4.0 发布**。
-  本仓库代码为**独立实现**——未复制该文档的原文/表格，仅按公开的接口事实
-  （URL、参数名、proto 字段号）编写；文档版权归原作者。
+  B 站接口文档。
 - 有道 X5 社区既有项目（deepseek-x5 / video_player_x5 等）的 profile 与工具链经验。
 
 ## 免责声明
