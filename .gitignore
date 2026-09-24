@@ -1,0 +1,16 @@
+# 依赖与构建产物
+node_modules/
+.falcon_/
+.falcon_tmp/
+*.log
+
+# 本地工具（便携 git 等，不入库）
+.tools/
+
+# 运行时/本地状态（种子与设备状态，不含凭据，但不入库）
+.deploy/
+
+# 编辑器/系统
+.DS_Store
+Thumbs.db
+*.swp

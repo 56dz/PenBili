@@ -1,0 +1,42 @@
+{
+  "name": "bili-app-x5",
+  "appName": "PenBili",
+  "appid": "8002026091900004",
+  "version": "2.3.0",
+  "icon": "app_icon.png",
+  "description": "PenBili（有道 X5）：推荐/热门/视频搜索 + 点击播放 + 扫码登录 + 弹幕四档（烧帧零闪）+ 评论区",
+  "quickjs": {
+    "version": "20200705",
+    "bigNum": false
+  },
+  "simulator": {
+    "path": "",
+    "page": ""
+  },
+  "single-js-bundle": false,
+  "scripts": {
+    "build": "node ../env/node_modules/aiot-vue-cli/src/cli.js -q -p",
+    "build:dev": "node ../env/node_modules/aiot-vue-cli/src/cli.js",
+    "build:prod": "node ../env/node_modules/aiot-vue-cli/src/cli.js -c -q -p",
+    "native": "powershell -NoProfile -ExecutionPolicy Bypass -File native/build.ps1",
+    "test": "node test/run.js",
+    "icon": "python tools/make_icon_v2.py favicon.ico tools/icon_colors.json && node tools/make_icon_v2.js",
+    "deploy": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/deploy.ps1"
+  },
+  "keywords": [
+    "youdao",
+    "dictionary-pen",
+    "falcon",
+    "miniapp",
+    "bilibili",
+    "bili-app"
+  ],
+  "dependencies": {
+    "falcon-ui": "1.0.3"
+  },
+  "devDependencies": {
+    "@resvg/resvg-js": "^2.6.2",
+    "jsqr": "^1.4.0",
+    "qrcode": "^1.5.4"
+  }
+}

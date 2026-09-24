@@ -1,0 +1,63 @@
+{
+ "code": 0,
+ "message": "0",
+ "ttl": 1,
+ "data": {
+  "is_new": false,
+  "mid": 293793435,
+  "access_token": "AT_PLACEHOLDER",
+  "refresh_token": "RT_PLACEHOLDER",
+  "expires_in": 15552000,
+  "token_info": {
+   "mid": 293793435,
+   "access_token": "AT_PLACEHOLDER",
+   "refresh_token": "RT_PLACEHOLDER",
+   "expires_in": 15552000
+  },
+  "cookie_info": {
+   "cookies": [
+    {
+     "name": "SESSDATA",
+     "value": "SESS_PLACEHOLDER_222CHARS",
+     "http_only": 1,
+     "expires": 1790140171,
+     "secure": 0
+    },
+    {
+     "name": "bili_jct",
+     "value": "JCT_PLACEHOLDER",
+     "http_only": 0,
+     "expires": 1790140171,
+     "secure": 0
+    },
+    {
+     "name": "DedeUserID",
+     "value": "293793435",
+     "http_only": 0,
+     "expires": 1790140171,
+     "secure": 0
+    },
+    {
+     "name": "DedeUserID__ckMd5",
+     "value": "CKMD5_PLACEHOLDER",
+     "http_only": 0,
+     "expires": 1790140171,
+     "secure": 0
+    },
+    {
+     "name": "sid",
+     "value": "SID8CHAR",
+     "http_only": 0,
+     "expires": 1790140171,
+     "secure": 0
+    }
+   ],
+   "domains": [
+    ".bilibili.com"
+   ]
+  },
+  "sso": [
+   "https://passport.bilibili.com/api/v2/sso"
+  ]
+ }
+}

@@ -1,0 +1,81 @@
+{
+ "code": 0,
+ "data": {
+  "playurl_info": {
+   "playurl": {
+    "stream": [
+     {
+      "protocol_name": "http_stream",
+      "format": [
+       {
+        "format_name": "flv",
+        "codec": [
+         {
+          "codec_name": "avc",
+          "current_qn": 250,
+          "accept_qn": [
+           10000,
+           250
+          ],
+          "base_url": "/live-bvc/496641/live_pbv2oa_SInmRrK_wn1_2500.flv?",
+          "url_info": [
+           {
+            "host": "https://cn-hbwh-cm-01-01.bilivideo.com",
+            "extra": "deadline=PLACEHOLDER&upsig=PLACEHOLDER"
+           }
+          ],
+          "media_info": {
+           "width": 720,
+           "height": 1280
+          }
+         },
+         {
+          "codec_name": "hevc",
+          "current_qn": 400,
+          "base_url": "/live-bvc/360240/live_pbv2oa_SInmRrK_wn1_hevc.flv?",
+          "url_info": [
+           {
+            "host": "https://cn-cq-cm-01-05.bilivideo.com",
+            "extra": "deadline=PLACEHOLDER"
+           }
+          ],
+          "media_info": {
+           "width": 1080,
+           "height": 1920
+          }
+         }
+        ]
+       }
+      ]
+     },
+     {
+      "protocol_name": "http_hls",
+      "format": [
+       {
+        "format_name": "ts",
+        "codec": [
+         {
+          "codec_name": "avc",
+          "current_qn": 250,
+          "base_url": "/live-bvc/496641/live_pbv2oa_SInmRrK_wn1_2500.m3u8?",
+          "url_info": [
+           {
+            "host": "https://cn-hbwh-cm-01-01.bilivideo.com",
+            "extra": "deadline=PLACEHOLDER"
+           }
+          ],
+          "media_info": {
+           "width": 720,
+           "height": 1280
+          }
+         }
+        ]
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "live_status": 1
+ }
+}
