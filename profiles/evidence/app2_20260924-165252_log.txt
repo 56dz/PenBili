@@ -1,0 +1,52 @@
+﻿09-24 16:52:56.255651 ERROR  589:3070038032 (console.warn.0): [bili] autotest seeded → run
+
+09-24 16:52:56.256526 ERROR  589:3070038032 (console.warn.0): [bili] AUTOTEST start
+
+09-24 16:52:56.427802 ERROR  589:3070038032 (console.warn.0): [bili] load rcmd ok n=20
+
+09-24 16:52:56.840947 ERROR  589:3070038032 (console.warn.0): [bili] stream DASH qn=16 vb=654083 avc1.640033 ab=65755 host=upos-sz-mirrorcoso1.bilivideo.com
+
+09-24 16:52:56.982369 ERROR  589:3070038032 (console.warn.0): [bili] open ok out=254x452 fps=30 audio=44100 DASH
+
+09-24 16:52:56.996187 ERROR  589:3070038032 (console.warn.0): [bili] play start BV1hThi6AECh qn=16 dur=149440ms
+
+09-24 16:52:57.993331 ERROR  589:3070038032 (console.warn.0): [bili] poll tick frames=2 pos=66 ab=11224 ad=0 u=0 w=0 rd=0
+
+09-24 16:52:58.025048 ERROR  589:3070038032 (console.warn.0): [bili] AUTOTEST first frame 1003ms frames=3 pos=100
+
+09-24 16:52:58.026355 ERROR  589:3070038032 (console.warn.0): [bili] toggle → paused
+
+09-24 16:52:58.835787 ERROR  589:3070038032 (console.warn.0): [bili] toggle → playing
+
+09-24 16:53:00.560626 ERROR  589:3070038032 (console.warn.0): [bili] seek +20s → pos=20066ms
+
+09-24 16:53:00.600465 ERROR  589:3070038032 (console.warn.0): [bili] poll tick frames=0 pos=20066 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 16:53:01.600595 ERROR  589:3070038032 (console.warn.0): [bili] poll tick frames=0 pos=20066 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 16:53:03.951909 ERROR  589:3070038032 (console.warn.0): [bili] seek -20s → pos=66ms
+
+09-24 16:53:03.989169 ERROR  589:3070038032 (console.warn.0): [bili] poll tick frames=0 pos=66 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 16:53:04.962750 ERROR  589:3070038032 (console.warn.0): [bili] AUTOTEST seek recover 1003ms frames=14
+
+09-24 16:53:06.595654 ERROR  589:3070038032 (console.warn.0): [bili] back to browse
+
+09-24 16:53:06.997365 ERROR  589:3070038032 (console.warn.0): [bili] load hot ok n=20
+
+09-24 16:53:07.306293 ERROR  589:3070038032 (console.warn.0): [bili] hot page 2 +12 total=32
+
+09-24 16:53:07.565005 ERROR  589:3070038032 (console.warn.0): [bili] rcmd+hot 续底 +12 total=32 pn=1
+
+09-24 16:53:08.037964 ERROR  589:3070038032 (console.warn.0): [bili] load search ok n=17
+
+09-24 16:53:08.038843 ERROR  589:3070038032 (console.warn.0): [bili] AUTOTEST search n=17
+
+09-24 16:53:08.659790 ERROR  589:3070038032 (console.warn.0): [bili] qr generate ok size=45
+
+09-24 16:53:08.663033 ERROR  589:3070038032 (console.warn.0): [bili] AUTOTEST qr size=45 state=waiting
+
+09-24 16:53:08.663945 ERROR  589:3070038032 (console.warn.0): [bili] qr cancelled
+
+09-24 16:53:08.664952 ERROR  589:3070038032 (console.warn.0): [bili] AUTOTEST PASS frames=14 hot=32 search=17 hist=1 qr=ok
+

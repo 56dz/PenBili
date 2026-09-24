@@ -1,0 +1,9 @@
+{
+ "code": 0,
+ "message": "OK",
+ "ttl": 1,
+ "data": {
+  "url": "https://passport.bilibili.com/x/passport-tv-login/h5/qrcode/auth?auth_code=e792916e3f6f33b8d2496caef8d4c521",
+  "auth_code": "e792916e3f6f33b8d2496caef8d4c521"
+ }
+}

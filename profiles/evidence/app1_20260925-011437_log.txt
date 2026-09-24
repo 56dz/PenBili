@@ -1,0 +1,60 @@
+﻿09-25 01:14:40.236165 ERROR  586:3069866000 (console.warn.0): [bili] autotest seeded → run
+
+09-25 01:14:40.236915 ERROR  586:3069866000 (console.warn.0): [bili] AUTOTEST start
+
+09-25 01:14:40.378617 ERROR  586:3069866000 (console.warn.0): [bili] load rcmd ok n=20
+
+09-25 01:14:40.791481 ERROR  586:3069866000 (console.warn.0): [bili] stream DASH qn=16 vb=641753 avc1.64001E ab=66153 host=upos-sz-mirrorcoso1.bilivideo.com
+
+09-25 01:14:40.982652 ERROR  586:3069866000 (console.warn.0): [bili] open ok out=254x452 fps=30 audio=44100 DASH
+
+09-25 01:14:41.054907 ERROR  586:3069866000 (console.warn.0): [bili] danmaku engine idle (no data)
+
+09-25 01:14:41.059508 ERROR  586:3069866000 (console.warn.0): [bili] play start BV1nth46oEiC qn=16 dur=1775006ms
+
+09-25 01:14:43.608842 ERROR  586:3069866000 (console.warn.0): [bili] replies load n=3 count=1578
+
+09-25 01:14:43.612618 ERROR  586:3069866000 (console.warn.0): [bili] AUTOTEST first frame 2547ms frames=19 pos=633
+
+09-25 01:14:43.615014 ERROR  586:3069866000 (console.warn.0): [bili] toggle → paused
+
+09-25 01:14:43.616540 ERROR  586:3069866000 (console.warn.0): [bili] poll tick frames=19 pos=633 ab=1003520 ad=0 u=0 w=0 rd=0
+
+09-25 01:14:44.919379 ERROR  586:3069866000 (console.warn.0): [bili] toggle → playing
+
+09-25 01:14:48.384199 ERROR  586:3069866000 (console.warn.0): [bili] seek +20s → pos=20633ms
+
+09-25 01:14:48.388532 ERROR  586:3069866000 (console.warn.0): [bili] danmaku engine idle (no data)
+
+09-25 01:14:48.414382 ERROR  586:3069866000 (console.warn.0): [bili] poll tick frames=0 pos=20633 ab=0 ad=0 u=0 w=0 rd=0
+
+09-25 01:14:50.456127 ERROR  586:3069866000 (console.warn.0): [bili] poll tick frames=9 pos=20933 ab=919196 ad=0 u=0 w=0 rd=0
+
+09-25 01:14:53.886168 ERROR  586:3069866000 (console.warn.0): [bili] seek -20s → pos=933ms
+
+09-25 01:14:53.917138 ERROR  586:3069866000 (console.warn.0): [bili] danmaku engine idle (no data)
+
+09-25 01:14:57.991384 ERROR  586:3069866000 (console.warn.0): [bili] poll tick frames=47 pos=2499 ab=1297692 ad=0 u=0 w=0 rd=0
+
+09-25 01:14:57.994489 ERROR  586:3069866000 (console.warn.0): [bili] AUTOTEST seek recover 4074ms frames=47
+
+09-25 01:15:01.340792 ERROR  586:3069866000 (console.warn.0): [bili] back to browse
+
+09-25 01:15:01.540948 ERROR  586:3069866000 (console.warn.0): [bili] load hot ok n=20
+
+09-25 01:15:02.444837 ERROR  586:3069866000 (console.warn.0): [bili] hot page 2 +12 total=32
+
+09-25 01:15:02.691332 ERROR  586:3069866000 (console.warn.0): [bili] rcmd+hot 续底 +12 total=32 pn=1
+
+09-25 01:15:03.064146 ERROR  586:3069866000 (console.warn.0): [bili] load search ok n=17
+
+09-25 01:15:03.065467 ERROR  586:3069866000 (console.warn.0): [bili] AUTOTEST search n=17
+
+09-25 01:15:03.682496 ERROR  586:3069866000 (console.warn.0): [bili] qr generate ok size=45
+
+09-25 01:15:03.685738 ERROR  586:3069866000 (console.warn.0): [bili] AUTOTEST qr size=45 state=waiting
+
+09-25 01:15:03.686605 ERROR  586:3069866000 (console.warn.0): [bili] qr cancelled
+
+09-25 01:15:03.687647 ERROR  586:3069866000 (console.warn.0): [bili] AUTOTEST PASS frames=47 hot=32 search=17 hist=1 qr=ok
+

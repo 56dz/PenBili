@@ -1,0 +1,80 @@
+﻿09-24 22:37:41.097021 ERROR  582:3069628432 (console.warn.0): [bili] poll tick frames=0 pos=66 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 22:37:43.746660 ERROR  582:3069628432 (console.warn.0): [bili] AUTOTEST seek recover 2701ms frames=33
+
+09-24 22:37:47.029843 ERROR  582:3069628432 (console.warn.0): [bili] back to browse
+
+09-24 22:37:47.184235 ERROR  582:3069628432 (console.warn.0): [bili] load hot ok n=20
+
+09-24 22:37:47.985826 ERROR  582:3069628432 (console.warn.0): [bili] hot page 2 +12 total=32
+
+09-24 22:37:48.145617 ERROR  582:3069628432 (console.warn.0): [bili] rcmd+hot 续底 +12 total=32 pn=1
+
+09-24 22:37:48.665920 ERROR  582:3069628432 (console.warn.0): [bili] load search ok n=17
+
+09-24 22:37:48.666781 ERROR  582:3069628432 (console.warn.0): [bili] AUTOTEST search n=17
+
+09-24 22:37:49.293431 ERROR  582:3069628432 (console.warn.0): [bili] qr generate ok size=45
+
+09-24 22:37:49.296623 ERROR  582:3069628432 (console.warn.0): [bili] AUTOTEST qr size=45 state=waiting
+
+09-24 22:37:49.297508 ERROR  582:3069628432 (console.warn.0): [bili] qr cancelled
+
+09-24 22:37:49.298610 ERROR  582:3069628432 (console.warn.0): [bili] AUTOTEST PASS frames=33 hot=32 search=17 hist=1 qr=ok
+
+09-24 22:39:57.109263 ERROR  582:3069628432 (console.warn.0): [bili] autotest seeded → run
+
+09-24 22:39:57.113050 ERROR  582:3069628432 (console.warn.0): [bili] AUTOTEST start
+
+09-24 22:39:57.280883 ERROR  582:3069628432 (console.warn.0): [bili] load rcmd ok n=20
+
+09-24 22:39:57.693858 ERROR  582:3069628432 (console.warn.0): [bili] stream DASH qn=16 vb=256858 avc1.64001E ab=65756 host=upos-sz-mirrorhw.bilivideo.com
+
+09-24 22:39:57.916115 ERROR  582:3069628432 (console.warn.0): [bili] open ok out=254x452 fps=30 audio=44100 DASH
+
+09-24 22:39:57.973768 ERROR  582:3069628432 (console.warn.0): [bili] play start BV1Vtht62ErP qn=16 dur=84352ms
+
+09-24 22:39:58.712568 ERROR  582:3069628432 (console.warn.0): [bili] replies load n=3 count=85
+
+09-24 22:39:58.974540 ERROR  582:3069628432 (console.warn.0): [bili] poll tick frames=1 pos=33 ab=773620 ad=0 u=0 w=0 rd=0
+
+09-24 22:39:59.238609 ERROR  582:3069628432 (console.warn.0): [bili] AUTOTEST first frame 1255ms frames=8 pos=266
+
+09-24 22:39:59.239926 ERROR  582:3069628432 (console.warn.0): [bili] toggle → paused
+
+09-24 22:39:59.975201 ERROR  582:3069628432 (console.warn.0): [bili] poll tick frames=8 pos=266 ab=822772 ad=0 u=0 w=0 rd=0
+
+09-24 22:40:00.064939 ERROR  582:3069628432 (console.warn.0): [bili] toggle → playing
+
+09-24 22:40:03.550191 ERROR  582:3069628432 (console.warn.0): [bili] seek +20s → pos=20266ms
+
+09-24 22:40:03.592106 ERROR  582:3069628432 (console.warn.0): [bili] poll tick frames=0 pos=20266 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 22:40:04.593592 ERROR  582:3069628432 (console.warn.0): [bili] poll tick frames=0 pos=20266 ab=723484 ad=0 u=0 w=0 rd=0
+
+09-24 22:40:08.221813 ERROR  582:3069628432 (console.warn.0): [bili] seek -20s → pos=266ms
+
+09-24 22:40:08.283892 ERROR  582:3069628432 (console.warn.0): [bili] poll tick frames=0 pos=266 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 22:40:10.983698 ERROR  582:3069628432 (console.warn.0): [bili] AUTOTEST seek recover 2759ms frames=35
+
+09-24 22:40:14.319978 ERROR  582:3069628432 (console.warn.0): [bili] back to browse
+
+09-24 22:40:14.486954 ERROR  582:3069628432 (console.warn.0): [bili] load hot ok n=20
+
+09-24 22:40:15.295579 ERROR  582:3069628432 (console.warn.0): [bili] hot page 2 +12 total=32
+
+09-24 22:40:15.740268 ERROR  582:3069628432 (console.warn.0): [bili] rcmd+hot 续底 +12 total=32 pn=1
+
+09-24 22:40:15.952996 ERROR  582:3069628432 (console.warn.0): [bili] load search ok n=20
+
+09-24 22:40:15.953908 ERROR  582:3069628432 (console.warn.0): [bili] AUTOTEST search n=20
+
+09-24 22:40:16.875388 ERROR  582:3069628432 (console.warn.0): [bili] qr generate ok size=45
+
+09-24 22:40:16.878735 ERROR  582:3069628432 (console.warn.0): [bili] AUTOTEST qr size=45 state=waiting
+
+09-24 22:40:16.879705 ERROR  582:3069628432 (console.warn.0): [bili] qr cancelled
+
+09-24 22:40:16.880642 ERROR  582:3069628432 (console.warn.0): [bili] AUTOTEST PASS frames=35 hot=32 search=20 hist=1 qr=ok
+

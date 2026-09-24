@@ -1,0 +1,120 @@
+﻿09-23 22:17:46.744325 ERROR  582:3069923344 (console.warn.0): [bili] AUTOTEST PASS frames=8 hot=24 live=10 hist=10 qr=ok
+
+09-23 22:18:50.212394 ERROR  582:3069923344 (console.warn.0): [bili] logout; rcmd cache invalidated
+
+09-23 22:18:57.851186 ERROR  582:3069923344 (console.warn.0): [bili] profile refresh fail: unauthorized
+
+09-23 22:20:11.638212 ERROR  582:3069923344 (console.warn.0): [bili] load rcmd ok n=20
+
+09-23 22:32:33.918721 ERROR  582:3069923344 (console.warn.0): [bili] autotest seeded → run
+
+09-23 22:32:33.919730 ERROR  582:3069923344 (console.warn.0): [bili] AUTOTEST start
+
+09-23 22:32:34.263682 ERROR  582:3069923344 (console.warn.0): [bili] load rcmd ok n=20
+
+09-23 22:32:35.184899 ERROR  582:3069923344 (console.warn.0): [bili] stream qn=16 499c host=upos-sz-estgoss.bilivideo.com
+
+09-23 22:32:35.355285 ERROR  582:3069923344 (console.warn.0): [bili] open ok out=254x452 fps=30
+
+09-23 22:32:35.359785 ERROR  582:3069923344 (console.warn.0): [bili] play start BV1HbhB6dEbc qn=16 dur=2119000ms
+
+09-23 22:32:36.362831 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0
+
+09-23 22:32:40.885359 ERROR  582:3069923344 (console.warn.0): [bili] AUTOTEST first frame 5520ms frames=10 pos=333
+
+09-23 22:32:40.888304 ERROR  582:3069923344 (console.warn.0): [bili] toggle → paused
+
+09-23 22:32:41.699210 ERROR  582:3069923344 (console.warn.0): [bili] toggle → playing
+
+09-23 22:32:43.630619 ERROR  582:3069923344 (console.warn.0): [bili] seek +20s → pos=20333ms
+
+09-23 22:32:46.556065 ERROR  582:3069923344 (console.warn.0): [bili] seek -20s → pos=333ms
+
+09-23 22:32:51.983074 ERROR  582:3069923344 (console.warn.0): [bili] AUTOTEST seek recover 5425ms frames=7
+
+09-23 22:32:53.710819 ERROR  582:3069923344 (console.warn.0): [bili] back to browse
+
+09-23 22:32:54.086439 ERROR  582:3069923344 (console.warn.0): [bili] load hot ok n=20
+
+09-23 22:32:54.396333 ERROR  582:3069923344 (console.warn.0): [bili] hot page 2 +12 total=32
+
+09-23 22:32:54.808017 ERROR  582:3069923344 (console.warn.0): [bili] rcmd+hot 续底 +12 total=32 pn=1
+
+09-23 22:32:55.752822 ERROR  582:3069923344 (console.warn.0): [bili] load search ok n=17
+
+09-23 22:32:55.753781 ERROR  582:3069923344 (console.warn.0): [bili] AUTOTEST search n=17
+
+09-23 22:32:56.696522 ERROR  582:3069923344 (console.warn.0): [bili] qr generate ok size=45
+
+09-23 22:32:56.700324 ERROR  582:3069923344 (console.warn.0): [bili] AUTOTEST qr size=45 state=waiting
+
+09-23 22:32:56.701195 ERROR  582:3069923344 (console.warn.0): [bili] qr cancelled
+
+09-23 22:32:56.702148 ERROR  582:3069923344 (console.warn.0): [bili] AUTOTEST PASS frames=7 hot=32 search=17 hist=1 qr=ok
+
+09-23 22:36:40.838358 ERROR  582:3069923344 (console.warn.0): [bili] load rcmd ok n=20
+
+09-23 22:39:45.846464 ERROR  582:3069923344 (console.warn.0): [bili] load rcmd ok n=20
+
+09-23 22:39:57.136381 ERROR  582:3069923344 (console.warn.0): [bili] qr generate ok size=45
+
+09-23 22:40:13.893354 ERROR  582:3069923344 (console.warn.0): [bili] rcmd cache invalidated (login state changed)
+
+09-23 22:40:14.202874 ERROR  582:3069923344 (console.warn.0): [bili] login ok mid=1015677450 uname=56dz lv=5
+
+09-23 22:40:24.703985 ERROR  582:3069923344 (console.warn.0): [bili] load rcmd ok n=20
+
+09-23 22:40:32.798163 ERROR  582:3069923344 (console.warn.0): [bili] rcmd+hot 续底 +12 total=32 pn=1
+
+09-23 22:40:37.931820 ERROR  582:3069923344 (console.warn.0): [bili] refresh rcmd
+
+09-23 22:40:38.532635 ERROR  582:3069923344 (console.warn.0): [bili] load rcmd ok n=20
+
+09-23 22:40:42.543588 ERROR  582:3069923344 (console.warn.0): [bili] load hot ok n=20
+
+09-23 22:50:36.566307 ERROR  582:3069923344 (console.warn.0): [bili] autotest seeded → run
+
+09-23 22:50:36.567362 ERROR  582:3069923344 (console.warn.0): [bili] AUTOTEST start
+
+09-23 22:50:36.928696 ERROR  582:3069923344 (console.warn.0): [bili] load rcmd ok n=20
+
+09-23 22:50:37.754659 ERROR  582:3069923344 (console.warn.0): [bili] stream qn=16 496c host=upos-sz-estghw.bilivideo.com
+
+09-23 22:50:37.945626 ERROR  582:3069923344 (console.warn.0): [bili] open ok out=254x452 fps=30
+
+09-23 22:50:37.950224 ERROR  582:3069923344 (console.warn.0): [bili] play start BV1q8ea6rEEt qn=16 dur=5150000ms
+
+09-23 22:50:38.952254 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0
+
+09-23 22:50:45.981720 ERROR  582:3069923344 (console.warn.0): [bili] AUTOTEST first frame 8026ms frames=8 pos=266
+
+09-23 22:50:45.983710 ERROR  582:3069923344 (console.warn.0): [bili] toggle → paused
+
+09-23 22:50:47.001680 ERROR  582:3069923344 (console.warn.0): [bili] toggle → playing
+
+09-23 22:50:48.881564 ERROR  582:3069923344 (console.warn.0): [bili] seek +20s → pos=20233ms
+
+09-23 22:50:51.811176 ERROR  582:3069923344 (console.warn.0): [bili] seek -20s → pos=233ms
+
+09-23 22:50:59.846014 ERROR  582:3069923344 (console.warn.0): [bili] AUTOTEST seek recover 8021ms frames=6
+
+09-23 22:51:01.628212 ERROR  582:3069923344 (console.warn.0): [bili] back to browse
+
+09-23 22:51:01.936542 ERROR  582:3069923344 (console.warn.0): [bili] load hot ok n=20
+
+09-23 22:51:02.781097 ERROR  582:3069923344 (console.warn.0): [bili] hot page 2 +12 total=32
+
+09-23 22:51:03.095091 ERROR  582:3069923344 (console.warn.0): [bili] rcmd+hot 续底 +12 total=32 pn=1
+
+09-23 22:51:04.280440 ERROR  582:3069923344 (console.warn.0): [bili] load search ok n=17
+
+09-23 22:51:04.281471 ERROR  582:3069923344 (console.warn.0): [bili] AUTOTEST search n=17
+
+09-23 22:51:05.057859 ERROR  582:3069923344 (console.warn.0): [bili] qr generate ok size=45
+
+09-23 22:51:05.062641 ERROR  582:3069923344 (console.warn.0): [bili] AUTOTEST qr size=45 state=waiting
+
+09-23 22:51:05.063507 ERROR  582:3069923344 (console.warn.0): [bili] qr cancelled
+
+09-23 22:51:05.064481 ERROR  582:3069923344 (console.warn.0): [bili] AUTOTEST PASS frames=6 hot=32 search=17 hist=1 qr=ok
+

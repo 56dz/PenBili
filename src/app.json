@@ -1,0 +1,13 @@
+{
+  "pages": {
+    "index": "pages/index/index.js",
+    "diag": "pages/diag/diag.js"
+  },
+  "options": {
+    "style": {
+      "lessPaths": ["styles"],
+      "theme": "theme-dark"
+    },
+    "alias": {}
+  }
+}

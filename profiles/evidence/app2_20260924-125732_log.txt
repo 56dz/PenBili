@@ -1,0 +1,80 @@
+﻿09-24 12:58:43.720054 ERROR  582:3069923344 (console.warn.0): [bili] stream DASH qn=32 vb=849723 avc1.640033 ab=65687 host=xy113x207x104x13xy.mcdn.bilivideo.cn:8082
+
+09-24 12:58:43.938252 ERROR  582:3069923344 (console.warn.0): [bili] open ok out=254x452 fps=30 audio=48000(BT) DASH
+
+09-24 12:58:43.955280 ERROR  582:3069923344 (console.warn.0): [bili] play start BV13Bez6JEbf qn=32 dur=88677ms
+
+09-24 12:58:44.953042 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 12:58:45.952922 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 12:58:46.952892 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 12:58:47.952981 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 12:58:48.955420 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 12:58:49.955375 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 12:58:50.955444 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 12:58:51.955499 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 12:58:52.955534 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 12:58:53.956476 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 12:58:54.956207 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 12:58:55.980963 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 12:58:56.980795 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 12:58:57.981379 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 12:58:58.982341 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 12:58:59.981685 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 12:59:00.997968 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 12:59:01.984196 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 12:59:02.984466 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 12:59:03.984854 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 12:59:04.984428 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 12:59:05.984406 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 12:59:06.984348 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 12:59:07.983582 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 12:59:08.984831 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 12:59:09.984337 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 12:59:10.983948 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 12:59:11.983930 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 12:59:12.984158 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 12:59:13.984284 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 12:59:14.983956 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 12:59:15.985292 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 12:59:16.985366 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 12:59:17.985300 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 12:59:18.985639 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 12:59:19.985536 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0 ab=0 ad=0 u=0 w=0 rd=0
+
+09-24 12:59:20.986300 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0 ab=0 ad=0 u=0 w=0 rd=0
+

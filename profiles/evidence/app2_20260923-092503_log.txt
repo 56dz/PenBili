@@ -1,0 +1,80 @@
+﻿09-23 09:08:42.600961 ERROR  581:3069296656 (console.warn.0): [bili] load live ok n=10
+
+09-23 09:08:42.609315 ERROR  581:3069296656 (console.warn.0): [bili] live tap room=1741667419 → 直播源仅 720p（本机软解 0.76x 不实时），暂只浏览
+
+09-23 09:08:42.614618 ERROR  581:3069296656 (console.warn.0): [bili] AUTOTEST PASS frames=0 hot=24 live=10 hist=1
+
+09-23 09:11:49.172311 ERROR  581:3069296656 (console.warn.0): [bili] autotest seeded → run
+
+09-23 09:11:49.173543 ERROR  581:3069296656 (console.warn.0): [bili] AUTOTEST start
+
+09-23 09:11:49.404714 ERROR  581:3069296656 (console.warn.0): [bili] load rcmd ok n=20
+
+09-23 09:11:49.656240 ERROR  581:3069296656 (console.warn.0): [bili] stream qn=16 515c host=cn-gddg-ct-01-11.bilivideo.com
+
+09-23 09:11:49.804686 ERROR  581:3069296656 (console.warn.0): [bili] open ok out=254x452 fps=30
+
+09-23 09:11:49.814785 ERROR  581:3069296656 (console.warn.0): [bili] play start BV1nKev6REim qn=16 dur=92000ms
+
+09-23 09:11:50.809210 ERROR  581:3069296656 (console.warn.0): [bili] poll tick frames=13 pos=433
+
+09-23 09:11:53.325528 ERROR  581:3069296656 (console.warn.0): [bili] AUTOTEST frames=83 pos=2766
+
+09-23 09:11:53.327962 ERROR  581:3069296656 (console.warn.0): [bili] toggle → paused
+
+09-23 09:11:54.135799 ERROR  581:3069296656 (console.warn.0): [bili] toggle → playing
+
+09-23 09:11:56.359833 ERROR  581:3069296656 (console.warn.0): [bili] seek +20s → pos=22766ms
+
+09-23 09:11:59.382633 ERROR  581:3069296656 (console.warn.0): [bili] seek -20s → pos=2766ms
+
+09-23 09:12:00.706674 ERROR  581:3069296656 (console.warn.0): [bili] AUTOTEST FAIL: seek 后回读失败: playing
+
+09-23 09:15:14.921009 ERROR  581:3069296656 (console.warn.0): [bili] load hot ok n=12
+
+09-23 09:15:16.858634 ERROR  581:3069296656 (console.warn.0): [bili] load live ok n=10
+
+09-23 09:15:30.433061 ERROR  581:3069296656 (console.warn.0): [bili] stream qn=16 515c host=cn-sccd-ct-02-21.bilivideo.com
+
+09-23 09:15:30.579759 ERROR  581:3069296656 (console.warn.0): [bili] open ok out=254x452 fps=30
+
+09-23 09:15:30.587701 ERROR  581:3069296656 (console.warn.0): [bili] play start BV1Pqeg6tEpq qn=16 dur=1061000ms
+
+09-23 09:15:31.585206 ERROR  581:3069296656 (console.warn.0): [bili] poll tick frames=0 pos=0
+
+09-23 09:25:06.040367 ERROR  581:3069296656 (console.warn.0): [bili] autotest seeded → run
+
+09-23 09:25:06.041596 ERROR  581:3069296656 (console.warn.0): [bili] AUTOTEST start
+
+09-23 09:25:06.304920 ERROR  581:3069296656 (console.warn.0): [bili] load rcmd ok n=20
+
+09-23 09:25:06.563569 ERROR  581:3069296656 (console.warn.0): [bili] stream qn=16 515c host=cn-gddg-ct-01-11.bilivideo.com
+
+09-23 09:25:06.707116 ERROR  581:3069296656 (console.warn.0): [bili] open ok out=254x452 fps=30
+
+09-23 09:25:06.722296 ERROR  581:3069296656 (console.warn.0): [bili] play start BV1SShi6YEyx qn=16 dur=36000ms
+
+09-23 09:25:07.718179 ERROR  581:3069296656 (console.warn.0): [bili] poll tick frames=13 pos=433
+
+09-23 09:25:10.232941 ERROR  581:3069296656 (console.warn.0): [bili] AUTOTEST frames=69 pos=2300
+
+09-23 09:25:10.239661 ERROR  581:3069296656 (console.warn.0): [bili] toggle → paused
+
+09-23 09:25:11.044641 ERROR  581:3069296656 (console.warn.0): [bili] toggle → playing
+
+09-23 09:25:13.225858 ERROR  581:3069296656 (console.warn.0): [bili] seek +20s → pos=22300ms
+
+09-23 09:25:16.250297 ERROR  581:3069296656 (console.warn.0): [bili] seek -20s → pos=2300ms
+
+09-23 09:25:21.026708 ERROR  581:3069296656 (console.warn.0): [bili] back to browse
+
+09-23 09:25:21.212593 ERROR  581:3069296656 (console.warn.0): [bili] load hot ok n=12
+
+09-23 09:25:21.356997 ERROR  581:3069296656 (console.warn.0): [bili] hot page 2 +12 total=24
+
+09-23 09:25:21.507103 ERROR  581:3069296656 (console.warn.0): [bili] load live ok n=10
+
+09-23 09:25:21.508638 ERROR  581:3069296656 (console.warn.0): [bili] live tap room=1777485312 → 直播源仅 720p（本机软解 0.76x 不实时），暂只浏览
+
+09-23 09:25:21.510143 ERROR  581:3069296656 (console.warn.0): [bili] AUTOTEST PASS frames=23 hot=24 live=10 hist=1
+

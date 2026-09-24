@@ -1,0 +1,15 @@
+# 二进制文件永不参与行尾转换（amr/so/png/ico/proto 样本）
+*.amr binary
+*.so binary
+*.png binary
+*.ico binary
+*.bin binary
+
+* text=auto
+*.js text eol=lf
+*.json text eol=lf
+*.vue text eol=lf
+*.less text eol=lf
+*.md text eol=lf
+*.ps1 text eol=crlf
+*.c text eol=lf

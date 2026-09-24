@@ -1,0 +1,120 @@
+﻿09-25 07:14:27.332646 ERROR  586:3069866000 (console.warn.0): [bili] poll tick frames=83 pos=2766 ab=1142784 ad=0 u=0 w=0 rd=0
+
+09-25 07:14:28.333304 ERROR  586:3069866000 (console.warn.0): [bili] poll tick frames=118 pos=3933 ab=1314816 ad=0 u=0 w=0 rd=0
+
+09-25 07:14:29.333448 ERROR  586:3069866000 (console.warn.0): [bili] poll tick frames=153 pos=5100 ab=1495040 ad=0 u=0 w=0 rd=0
+
+09-25 07:14:30.335428 ERROR  586:3069866000 (console.warn.0): [bili] poll tick frames=187 pos=6233 ab=1675264 ad=0 u=0 w=0 rd=0
+
+09-25 07:14:31.335740 ERROR  586:3069866000 (console.warn.0): [bili] poll tick frames=223 pos=7433 ab=1847296 ad=0 u=0 w=0 rd=0
+
+09-25 07:14:32.118998 ERROR  586:3069866000 (console.warn.0): [bili] danmaku mode -> 关
+
+09-25 07:14:32.123451 ERROR  586:3069866000 (console.warn.0): [bili] danmaku off
+
+09-25 07:14:32.337808 ERROR  586:3069866000 (console.warn.0): [bili] poll tick frames=253 pos=8433 ab=2019328 ad=0 u=0 w=0 rd=0
+
+09-25 07:14:32.970025 ERROR  586:3069866000 (console.warn.0): [bili] danmaku mode -> 1/4屏
+
+09-25 07:14:32.973463 ERROR  586:3069866000 (console.warn.0): [bili] danmaku engine start mode=1 lanes=87 dur=162075
+
+09-25 07:14:33.336268 ERROR  586:3069866000 (console.warn.0): [bili] poll tick frames=284 pos=9466 ab=2199552 ad=0 u=0 w=0 rd=0
+
+09-25 07:14:34.338643 ERROR  586:3069866000 (console.warn.0): [bili] poll tick frames=314 pos=10466 ab=2379776 ad=0 u=0 w=0 rd=0
+
+09-25 07:14:35.337600 ERROR  586:3069866000 (console.warn.0): [bili] poll tick frames=344 pos=11466 ab=2551808 ad=0 u=0 w=0 rd=0
+
+09-25 07:14:36.337631 ERROR  586:3069866000 (console.warn.0): [bili] poll tick frames=374 pos=12466 ab=2732032 ad=0 u=0 w=0 rd=0
+
+09-25 07:14:37.337780 ERROR  586:3069866000 (console.warn.0): [bili] poll tick frames=405 pos=13500 ab=2912256 ad=0 u=0 w=0 rd=0
+
+09-25 07:14:38.337433 ERROR  586:3069866000 (console.warn.0): [bili] poll tick frames=434 pos=14466 ab=3084288 ad=0 u=0 w=0 rd=0
+
+09-25 07:14:39.338913 ERROR  586:3069866000 (console.warn.0): [bili] poll tick frames=465 pos=15500 ab=3264512 ad=0 u=0 w=0 rd=0
+
+09-25 07:14:40.337792 ERROR  586:3069866000 (console.warn.0): [bili] poll tick frames=494 pos=16466 ab=3436544 ad=0 u=0 w=0 rd=0
+
+09-25 07:14:41.338697 ERROR  586:3069866000 (console.warn.0): [bili] poll tick frames=525 pos=17500 ab=3616768 ad=0 u=0 w=0 rd=0
+
+09-25 07:14:42.339461 ERROR  586:3069866000 (console.warn.0): [bili] poll tick frames=554 pos=18466 ab=3788800 ad=0 u=0 w=0 rd=0
+
+09-25 07:14:43.339358 ERROR  586:3069866000 (console.warn.0): [bili] poll tick frames=585 pos=19500 ab=3969024 ad=0 u=0 w=0 rd=0
+
+09-25 07:14:44.339862 ERROR  586:3069866000 (console.warn.0): [bili] poll tick frames=614 pos=20466 ab=4141056 ad=0 u=0 w=0 rd=0
+
+09-25 07:14:45.339963 ERROR  586:3069866000 (console.warn.0): [bili] poll tick frames=645 pos=21500 ab=4321280 ad=0 u=0 w=0 rd=0
+
+09-25 07:14:46.339715 ERROR  586:3069866000 (console.warn.0): [bili] poll tick frames=674 pos=22466 ab=4493312 ad=0 u=0 w=0 rd=0
+
+09-25 07:14:47.340586 ERROR  586:3069866000 (console.warn.0): [bili] poll tick frames=704 pos=23466 ab=4673536 ad=0 u=0 w=0 rd=0
+
+09-25 07:14:48.340362 ERROR  586:3069866000 (console.warn.0): [bili] poll tick frames=734 pos=24466 ab=4845568 ad=0 u=0 w=0 rd=0
+
+09-25 07:14:52.393913 ERROR  586:3069866000 (console.warn.0): [bili] back to browse
+
+09-25 07:40:37.519100 ERROR  586:3069866000 (console.warn.0): [bili] autotest seeded → run
+
+09-25 07:40:37.519861 ERROR  586:3069866000 (console.warn.0): [bili] AUTOTEST start
+
+09-25 07:40:37.665856 ERROR  586:3069866000 (console.warn.0): [bili] load rcmd ok n=20
+
+09-25 07:40:38.039150 ERROR  586:3069866000 (console.warn.0): [bili] stream DASH qn=16 vb=339494 avc1.640033 ab=65695 host=upos-sz-mirrorcoso1.bilivideo.com
+
+09-25 07:40:38.245023 ERROR  586:3069866000 (console.warn.0): [bili] open ok out=254x452 fps=30 audio=44100 DASH
+
+09-25 07:40:38.321344 ERROR  586:3069866000 (console.warn.0): [bili] danmaku engine idle (no data)
+
+09-25 07:40:38.324834 ERROR  586:3069866000 (console.warn.0): [bili] play start BV1hvh86SEoy qn=16 dur=614016ms
+
+09-25 07:40:39.405578 ERROR  586:3069866000 (console.warn.0): [bili] replies load n=3 count=469
+
+09-25 07:40:39.425045 ERROR  586:3069866000 (console.warn.0): [bili] poll tick frames=0 pos=0 ab=732660 ad=0 u=1 w=0 rd=0
+
+09-25 07:40:39.729719 ERROR  586:3069866000 (console.warn.0): [bili] danmaku real n=145/145 pkgs=2 span=994..528179
+
+09-25 07:40:39.732870 ERROR  586:3069866000 (console.warn.0): [bili] danmaku engine start mode=2 lanes=145 dur=614016
+
+09-25 07:40:39.910784 ERROR  586:3069866000 (console.warn.0): [bili] AUTOTEST first frame 1580ms frames=10 pos=333
+
+09-25 07:40:39.913076 ERROR  586:3069866000 (console.warn.0): [bili] toggle → paused
+
+09-25 07:40:40.410795 ERROR  586:3069866000 (console.warn.0): [bili] poll tick frames=10 pos=333 ab=830964 ad=0 u=1 w=0 rd=0
+
+09-25 07:40:40.737706 ERROR  586:3069866000 (console.warn.0): [bili] toggle → playing
+
+09-25 07:40:44.215941 ERROR  586:3069866000 (console.warn.0): [bili] seek +20s → pos=20333ms
+
+09-25 07:40:44.254530 ERROR  586:3069866000 (console.warn.0): [bili] danmaku engine start mode=2 lanes=145 dur=614016
+
+09-25 07:40:44.288197 ERROR  586:3069866000 (console.warn.0): [bili] poll tick frames=0 pos=20333 ab=0 ad=0 u=0 w=0 rd=0
+
+09-25 07:40:45.288299 ERROR  586:3069866000 (console.warn.0): [bili] poll tick frames=0 pos=20333 ab=681328 ad=0 u=0 w=0 rd=0
+
+09-25 07:40:48.869924 ERROR  586:3069866000 (console.warn.0): [bili] seek -20s → pos=333ms
+
+09-25 07:40:48.921610 ERROR  586:3069866000 (console.warn.0): [bili] danmaku engine start mode=2 lanes=145 dur=614016
+
+09-25 07:40:48.943129 ERROR  586:3069866000 (console.warn.0): [bili] poll tick frames=0 pos=333 ab=0 ad=0 u=0 w=0 rd=0
+
+09-25 07:40:50.808268 ERROR  586:3069866000 (console.warn.0): [bili] AUTOTEST seek recover 1882ms frames=12
+
+09-25 07:40:54.053162 ERROR  586:3069866000 (console.warn.0): [bili] back to browse
+
+09-25 07:40:54.204585 ERROR  586:3069866000 (console.warn.0): [bili] load hot ok n=20
+
+09-25 07:40:54.347543 ERROR  586:3069866000 (console.warn.0): [bili] hot page 2 +12 total=32
+
+09-25 07:40:54.497095 ERROR  586:3069866000 (console.warn.0): [bili] rcmd+hot 续底 +12 total=32 pn=1
+
+09-25 07:40:55.047847 ERROR  586:3069866000 (console.warn.0): [bili] load search ok n=18
+
+09-25 07:40:55.048781 ERROR  586:3069866000 (console.warn.0): [bili] AUTOTEST search n=18
+
+09-25 07:40:56.856000 ERROR  586:3069866000 (console.warn.0): [bili] qr generate ok size=45
+
+09-25 07:40:56.859465 ERROR  586:3069866000 (console.warn.0): [bili] AUTOTEST qr size=45 state=waiting
+
+09-25 07:40:56.860325 ERROR  586:3069866000 (console.warn.0): [bili] qr cancelled
+
+09-25 07:40:56.861453 ERROR  586:3069866000 (console.warn.0): [bili] AUTOTEST PASS frames=12 hot=32 search=18 hist=1 qr=ok
+

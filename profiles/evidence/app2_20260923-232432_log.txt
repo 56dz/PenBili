@@ -1,0 +1,80 @@
+﻿09-23 23:15:12.864290 ERROR  582:3069923344 (console.warn.0): [bili] AUTOTEST search n=17
+
+09-23 23:15:14.096026 ERROR  582:3069923344 (console.warn.0): [bili] qr generate ok size=45
+
+09-23 23:15:14.099397 ERROR  582:3069923344 (console.warn.0): [bili] AUTOTEST qr size=45 state=waiting
+
+09-23 23:15:14.100368 ERROR  582:3069923344 (console.warn.0): [bili] qr cancelled
+
+09-23 23:15:14.101436 ERROR  582:3069923344 (console.warn.0): [bili] AUTOTEST PASS frames=30 hot=32 search=17 hist=1 qr=ok
+
+09-23 23:18:08.922144 ERROR  582:3069923344 (console.warn.0): [bili] load rcmd 首次失败(parse)，1s 后重试: 响应不是 JSON
+
+09-23 23:18:19.928861 ERROR  582:3069923344 (console.warn.0): [bili] load rcmd fail: 响应不是 JSON
+
+09-23 23:20:14.850547 ERROR  582:3069923344 (console.warn.0): [bili] load rcmd ok n=20
+
+09-23 23:20:20.814958 ERROR  582:3069923344 (console.warn.0): [bili] onHide during IM session → skip teardown
+
+09-23 23:20:25.845167 ERROR  582:3069923344 (console.warn.0): [bili] input confirmed=true kwLen=3
+
+09-23 23:20:41.348427 ERROR  582:3069923344 (console.warn.0): [bili] load search 首次失败(wbi)，1s 后重试: WBI 密钥获取失败
+
+09-23 23:20:43.069450 ERROR  582:3069923344 (console.warn.0): [bili] load search ok n=20
+
+09-23 23:20:47.315638 ERROR  582:3069923344 (console.warn.0): [bili] stream qn=16 507c host=upos-sz-mirrorcoso1.bilivideo.com
+
+09-23 23:20:47.534957 ERROR  582:3069923344 (console.warn.0): [bili] open ok out=254x452 fps=30 audio=48000(BT)
+
+09-23 23:20:47.550517 ERROR  582:3069923344 (console.warn.0): [bili] play start BV1h8hq6KECk qn=16 dur=770000ms
+
+09-23 23:20:48.546516 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0
+
+09-23 23:23:15.850140 ERROR  582:3069923344 (console.warn.0): [bili] back to browse
+
+09-23 23:24:36.874695 ERROR  582:3069923344 (console.warn.0): [bili] autotest seeded → run
+
+09-23 23:24:36.875466 ERROR  582:3069923344 (console.warn.0): [bili] AUTOTEST start
+
+09-23 23:24:37.195393 ERROR  582:3069923344 (console.warn.0): [bili] load rcmd ok n=20
+
+09-23 23:24:38.087438 ERROR  582:3069923344 (console.warn.0): [bili] stream qn=16 500c host=upos-sz-estghw.bilivideo.com
+
+09-23 23:24:38.324022 ERROR  582:3069923344 (console.warn.0): [bili] open ok out=254x452 fps=30 audio=48000(BT)
+
+09-23 23:24:38.340387 ERROR  582:3069923344 (console.warn.0): [bili] play start BV1SkeT64EP2 qn=16 dur=744000ms
+
+09-23 23:24:39.336364 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0 ab=0 ad=0
+
+09-23 23:24:44.363465 ERROR  582:3069923344 (console.warn.0): [bili] AUTOTEST first frame 6011ms frames=8 pos=266
+
+09-23 23:24:44.364921 ERROR  582:3069923344 (console.warn.0): [bili] toggle → paused
+
+09-23 23:24:45.518795 ERROR  582:3069923344 (console.warn.0): [bili] toggle → playing
+
+09-23 23:24:47.230554 ERROR  582:3069923344 (console.warn.0): [bili] seek +20s → pos=20266ms
+
+09-23 23:24:50.421095 ERROR  582:3069923344 (console.warn.0): [bili] seek -20s → pos=266ms
+
+09-23 23:24:52.935082 ERROR  582:3069923344 (console.warn.0): [bili] AUTOTEST seek recover 2512ms frames=10
+
+09-23 23:24:54.495970 ERROR  582:3069923344 (console.warn.0): [bili] back to browse
+
+09-23 23:24:54.824532 ERROR  582:3069923344 (console.warn.0): [bili] load hot ok n=20
+
+09-23 23:24:55.145761 ERROR  582:3069923344 (console.warn.0): [bili] hot page 2 +12 total=32
+
+09-23 23:24:55.467977 ERROR  582:3069923344 (console.warn.0): [bili] rcmd+hot 续底 +12 total=32 pn=1
+
+09-23 23:24:56.087712 ERROR  582:3069923344 (console.warn.0): [bili] load search ok n=17
+
+09-23 23:24:56.088618 ERROR  582:3069923344 (console.warn.0): [bili] AUTOTEST search n=17
+
+09-23 23:24:57.017151 ERROR  582:3069923344 (console.warn.0): [bili] qr generate ok size=45
+
+09-23 23:24:57.020617 ERROR  582:3069923344 (console.warn.0): [bili] AUTOTEST qr size=45 state=waiting
+
+09-23 23:24:57.021552 ERROR  582:3069923344 (console.warn.0): [bili] qr cancelled
+
+09-23 23:24:57.022585 ERROR  582:3069923344 (console.warn.0): [bili] AUTOTEST PASS frames=10 hot=32 search=17 hist=1 qr=ok
+

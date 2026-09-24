@@ -1,0 +1,120 @@
+﻿09-23 11:17:24.140291 ERROR  582:3069923344 (console.warn.0): [bili] hot page 7 +12 total=60
+
+09-23 11:17:24.945883 ERROR  582:3069923344 (console.warn.0): [bili] hot page 8 +12 total=60
+
+09-23 11:17:25.923225 ERROR  582:3069923344 (console.warn.0): [bili] hot page 9 +12 total=60
+
+09-23 11:17:26.493233 ERROR  582:3069923344 (console.warn.0): [bili] hot page 10 +12 total=60
+
+09-23 11:17:26.726532 ERROR  582:3069923344 (console.warn.0): [bili] hot page 11 +12 total=60
+
+09-23 11:17:26.858054 ERROR  582:3069923344 (console.warn.0): [bili] hot page 12 +12 total=60
+
+09-23 11:17:27.273831 ERROR  582:3069923344 (console.warn.0): [bili] hot page 13 +12 total=60
+
+09-23 11:17:39.972333 ERROR  582:3069923344 (console.warn.0): [bili] stream qn=16 514c host=cn-jsnt-ct-01-02.bilivideo.com
+
+09-23 11:17:40.097595 ERROR  582:3069923344 (console.warn.0): [bili] open ok out=254x452 fps=30
+
+09-23 11:17:40.109401 ERROR  582:3069923344 (console.warn.0): [bili] play start BV1LDeQ6fEeB qn=16 dur=329000ms
+
+09-23 11:17:41.105729 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0
+
+09-23 11:17:46.521119 ERROR  582:3069923344 (console.warn.0): [bili] back to browse
+
+09-23 11:22:51.492906 ERROR  582:3069923344 (console.warn.0): [bili] load rcmd ok n=20
+
+09-23 11:23:06.735238 ERROR  582:3069923344 (console.warn.0): [bili] stream qn=16 514c host=cn-hbyc-ct-01-05.bilivideo.com
+
+09-23 11:23:06.867476 ERROR  582:3069923344 (console.warn.0): [bili] open ok out=254x452 fps=30
+
+09-23 11:23:06.883291 ERROR  582:3069923344 (console.warn.0): [bili] play start BV1eAhB6CE5A qn=16 dur=15384000ms
+
+09-23 11:23:07.879762 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0
+
+09-23 11:23:10.000387 ERROR  582:3069923344 (console.warn.0): [bili] back to browse
+
+09-23 11:23:27.660235 ERROR  582:3069923344 (console.warn.0): [bili] stream qn=16 514c host=cn-jsnt-ct-01-01.bilivideo.com
+
+09-23 11:23:27.774387 ERROR  582:3069923344 (console.warn.0): [bili] open ok out=254x452 fps=30
+
+09-23 11:23:27.793573 ERROR  582:3069923344 (console.warn.0): [bili] play start BV1Naeb6CEPz qn=16 dur=181000ms
+
+09-23 11:23:28.789365 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=1 pos=33
+
+09-23 11:24:06.890595 ERROR  582:3069923344 (console.warn.0): [bili] back to browse
+
+09-23 11:56:44.750571 ERROR  582:3069923344 (console.warn.0): [bili] load rcmd ok n=20
+
+09-23 11:56:48.772299 ERROR  582:3069923344 (console.warn.0): [bili] qr generate ok size=49
+
+09-23 11:57:25.283162 ERROR  582:3069923344 (console.warn.0): [bili] qr scanned → 等待确认
+
+09-23 11:57:27.504692 ERROR  582:3069923344 (console.warn.0): [bili] qr poll error: 成功响应缺少 SESSDATA（no_SESSDATA keys=ticket,gourl,first_domain）
+
+09-23 12:03:09.613932 ERROR  582:3069923344 (console.warn.0): [bili] qr cancelled
+
+09-23 12:03:12.694326 ERROR  582:3069923344 (console.warn.0): [bili] qr generate ok size=49
+
+09-23 12:03:17.445126 ERROR  582:3069923344 (console.warn.0): [bili] qr poll error: 成功响应缺少 SESSDATA（no_SESSDATA keys=ticket,gourl,first_domain）
+
+09-23 12:03:28.322643 ERROR  582:3069923344 (console.warn.0): [bili] load rcmd ok n=20
+
+09-23 12:03:32.801367 ERROR  582:3069923344 (console.warn.0): [bili] load rcmd ok n=20
+
+09-23 12:03:36.179319 ERROR  582:3069923344 (console.warn.0): [bili] qr generate ok size=49
+
+09-23 12:03:40.911458 ERROR  582:3069923344 (console.warn.0): [bili] qr poll error: 成功响应缺少 SESSDATA（no_SESSDATA keys=ticket,gourl,first_domain）
+
+09-23 12:05:36.501926 ERROR  582:3069923344 (console.warn.0): [bili] qr cancelled
+
+09-23 12:05:38.753949 ERROR  582:3069923344 (console.warn.0): [bili] qr generate ok size=49
+
+09-23 12:05:43.643412 ERROR  582:3069923344 (console.warn.0): [bili] qr scanned → 等待确认
+
+09-23 12:05:45.958277 ERROR  582:3069923344 (console.warn.0): [bili] qr poll error: 成功响应缺少 SESSDATA（no_SESSDATA keys=ticket,gourl,first_domain）
+
+09-23 12:08:55.018412 ERROR  582:3069923344 (console.warn.0): [bili] qr cancelled
+
+09-23 12:08:57.291116 ERROR  582:3069923344 (console.warn.0): [bili] qr generate ok size=49
+
+09-23 12:08:59.779995 ERROR  582:3069923344 (console.warn.0): [bili] qr scanned → 等待确认
+
+09-23 12:09:02.012404 ERROR  582:3069923344 (console.warn.0): [bili] qr poll error: 成功响应缺少 SESSDATA（no_SESSDATA keys=ticket,gourl,first_domain）
+
+09-23 12:26:37.955137 ERROR  582:3069923344 (console.warn.0): [bili] load rcmd ok n=20
+
+09-23 12:35:49.124246 ERROR  582:3069923344 (console.warn.0): [bili] autotest seeded → run
+
+09-23 12:35:49.125123 ERROR  582:3069923344 (console.warn.0): [bili] AUTOTEST start
+
+09-23 12:35:49.672212 ERROR  582:3069923344 (console.warn.0): [bili] load rcmd ok n=20
+
+09-23 12:35:50.562078 ERROR  582:3069923344 (console.warn.0): [bili] stream qn=16 513c host=cn-gddg-cm-01-04.bilivideo.com
+
+09-23 12:35:50.784815 ERROR  582:3069923344 (console.warn.0): [bili] open ok out=254x452 fps=30
+
+09-23 12:35:50.799301 ERROR  582:3069923344 (console.warn.0): [bili] play start BV1bdei6gEG2 qn=16 dur=331000ms
+
+09-23 12:35:51.797094 ERROR  582:3069923344 (console.warn.0): [bili] poll tick frames=0 pos=0
+
+09-23 12:35:52.317096 ERROR  582:3069923344 (console.warn.0): [bili] AUTOTEST first frame 1505ms frames=7 pos=233
+
+09-23 12:35:52.318607 ERROR  582:3069923344 (console.warn.0): [bili] toggle → paused
+
+09-23 12:35:53.127801 ERROR  582:3069923344 (console.warn.0): [bili] toggle → playing
+
+09-23 12:35:54.979239 ERROR  582:3069923344 (console.warn.0): [bili] seek +20s → pos=20233ms
+
+09-23 12:35:57.885918 ERROR  582:3069923344 (console.warn.0): [bili] seek -20s → pos=233ms
+
+09-23 12:36:02.620770 ERROR  582:3069923344 (console.warn.0): [bili] back to browse
+
+09-23 12:36:02.916916 ERROR  582:3069923344 (console.warn.0): [bili] load hot ok n=12
+
+09-23 12:36:03.202667 ERROR  582:3069923344 (console.warn.0): [bili] hot page 2 +12 total=24
+
+09-23 12:36:08.308628 ERROR  582:3069923344 (console.warn.0): [bili] load live fail: 响应不是 JSON
+
+09-23 12:36:08.309638 ERROR  582:3069923344 (console.warn.0): [bili] AUTOTEST FAIL: 直播列表为空
+
