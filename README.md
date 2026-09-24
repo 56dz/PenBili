@@ -92,8 +92,7 @@ adb 定位顺序：`$env:BILI_ADB` → PATH → 本机 `../env/adb` 布局）。
 
 ## 致谢
 
-- [xieren58/bilibili-API-collect](https://github.com/xieren58/bilibili-API-collect)
-  （上游 [SocialSisterYi/bilibili-API-collect](https://github.com/SocialSisterYi/bilibili-API-collect)）：
+- [SocialSisterYi/bilibili-API-collect](https://github.com/SocialSisterYi/bilibili-API-collect)：
   B 站接口文档，**文档本身按 CC BY-NC 4.0 发布**。
   本仓库代码为**独立实现**——未复制该文档的原文/表格，仅按公开的接口事实
   （URL、参数名、proto 字段号）编写；文档版权归原作者。
