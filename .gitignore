@@ -7,6 +7,9 @@ node_modules/
 # 本地工具（便携 git 等，不入库）
 .tools/
 
+# Release 附件的本地副本（附件挂在 GitHub Release 页）
+PenBili.zip
+
 # 运行时/本地状态（种子与设备状态，不含凭据，但不入库）
 .deploy/
 
