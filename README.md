@@ -94,7 +94,7 @@ adb 定位顺序：`$env:BILI_ADB` → PATH → 本机 `../env/adb` 布局）。
 
 - [SocialSisterYi/bilibili-API-collect](https://github.com/SocialSisterYi/bilibili-API-collect)：
   B 站接口文档。
-- 有道 X5 社区既有项目（deepseek-x5 / video_player_x5 等）的 profile 与工具链经验。
+- 有道 X5 社区既有项目（deepseek-x5 / video_player_x5 等）的 profile 与工具链经验。  
 - DeepSeek Harness：本项目的开发环境与 Agent 工具链。
 - DeepSeek v4.1flash、小米 MiMo-v2.6-flash：本项目的代码协作与排障模型。
 
