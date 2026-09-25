@@ -9,6 +9,20 @@
 ![version](https://img.shields.io/badge/version-2.3.0-blue)
 ![license](https://img.shields.io/badge/license-GPL--3.0-green)
 
+## 截图
+
+**主页（推荐流）**
+
+![主页](docs/screenshots/home.png)
+
+**播放中（弹幕烧进视频帧）**
+
+![播放中](docs/screenshots/playing.png)
+
+**评论区**
+
+![评论区](docs/screenshots/comments.png)
+
 ## 功能
 
 - **播放**：DASH 分离流（视频 avc1 + 独立音轨）、按真实宽高信箱适配（竖屏/宽银幕不变形不越列）、±20s seek、播放历史
