@@ -360,4 +360,20 @@ DASH 双输入(fast域 443, 640x360 avc1 + 66k audio) → ffmpeg(-threads 3, pro
     即败无回落）——仅影响 shell 探针，native/jsapi 不受影响。
 - **未登录提示文案（收官）**：我的页扫码行下 `未登录时视频可能无法正常显示，登录后体验更完整`；
   评论面板写评论旁 `未登录 · 评论可能显示不全，登录后可发表评论`（hasLogin=nav 档案为准）。
-- 版本链终态：**2.3.0**（native player v1.7.0 + **httpjson getBinary** + AMR 解包核对/断言全过）。
+- 版本链终态：**2.3.0**（native player **v1.7.1** + **httpjson getBinary** + AMR 解包核对/断言全过）。
+
+## A/V 起播门与一致性巡检（native v1.7.1，2026-09-25）
+
+- **问题**：弱网下音频（66kbps 低码率）先缓冲完先出声，画面（高码率+probe）数秒后才来 = 先声后画。
+- **起播门**：`audio_writer_thread` 在**视频首帧产出前不开写**——门期内 ring 蓄水（2.7s 上限）、
+  视频 pipe 堵塞在 1MB 缓冲（ffmpeg 反压），均无损等待。
+  - **首帧免钟豁免**：`frames==0` 跳过 `writer_bytes` 时钟等待直接落屏——否则"门等首帧、
+    首帧等 writer 时钟"互锁（writer 不开写则 apos 恒 start_ms 永远追不上 due）。
+  - **15s 超时放行**（极弱网先出声），放行时顺延 `last_blit` 基准（防刚放行就被巡检打断）。
+  - 真机判决：`A/V gate wait=1043ms`（音频与首帧 1666ms 同刻开播）、AUTOTEST PASS、零误触。
+- **运行时巡检**：status 导出 `videoStallMs`（playing 态距最近帧毫秒）与 `gateActive`（门进行中，
+  巡检让位防 8~15s 区间误判打断门）；JS 每秒判 `playing && !gateActive && stall>8000 &&
+  audioBytes 增长 && !评论面板` → `seek(pos+1)` 重启双进程——**重开必经起播门 = 音画成对重启**；
+  45s 冷却防弱网打转，恢复期提示"音画不同步，正在恢复…"。
+- **部署教训（本轮实测踩坑）**：deploy 的 AMR 查找 `PenBili*.amr` 优先——打包后必须**立即换名**
+  并做包内校验，否则会**静默部署旧包**（表象：gate 日志缺失、以为代码没生效；根因是设备跑旧版）。

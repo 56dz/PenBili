@@ -1,0 +1,120 @@
+﻿09-25 10:26:37.242822 ERROR  577:3070050320 (console.warn.0): [bili] stream DASH qn=16 vb=133577 avc1.640033 ab=66384 host=upos-sz-mirror08c.bilivideo.com
+
+09-25 10:26:37.445872 ERROR  577:3070050320 (console.warn.0): [bili] open ok out=254x452 fps=30 audio=44100 DASH
+
+09-25 10:26:37.505638 ERROR  577:3070050320 (console.warn.0): [bili] danmaku engine idle (no data)
+
+09-25 10:26:37.506880 ERROR  577:3070050320 (console.warn.0): [bili] play start BV1D4tN6TEGT qn=16 dur=64319ms
+
+09-25 10:26:42.252042 ERROR  577:3070050320 (console.warn.0): [bili] poll tick frames=2 pos=66 ab=1404928 ad=0 u=0 w=0 rd=0
+
+09-25 10:26:42.491552 ERROR  577:3070050320 (console.warn.0): [bili] replies load n=10 count=73
+
+09-25 10:26:42.499047 ERROR  577:3070050320 (console.warn.0): [bili] danmaku real n=4/4 pkgs=1 span=634..49659
+
+09-25 10:26:42.500566 ERROR  577:3070050320 (console.warn.0): [bili] danmaku engine start mode=2 lanes=4 dur=64319
+
+09-25 10:26:43.250972 ERROR  577:3070050320 (console.warn.0): [bili] poll tick frames=28 pos=933 ab=1585152 ad=0 u=0 w=0 rd=0
+
+09-25 10:26:44.250679 ERROR  577:3070050320 (console.warn.0): [bili] poll tick frames=56 pos=1866 ab=1757184 ad=0 u=0 w=0 rd=0
+
+09-25 10:26:45.251252 ERROR  577:3070050320 (console.warn.0): [bili] poll tick frames=87 pos=2900 ab=1937408 ad=0 u=0 w=0 rd=0
+
+09-25 10:26:46.251595 ERROR  577:3070050320 (console.warn.0): [bili] poll tick frames=94 pos=3133 ab=2109440 ad=0 u=0 w=0 rd=0
+
+09-25 10:26:47.251618 ERROR  577:3070050320 (console.warn.0): [bili] poll tick frames=94 pos=3133 ab=2289664 ad=0 u=0 w=0 rd=0
+
+09-25 10:26:48.251540 ERROR  577:3070050320 (console.warn.0): [bili] poll tick frames=94 pos=3133 ab=2461696 ad=0 u=0 w=0 rd=0
+
+09-25 10:26:49.253608 ERROR  577:3070050320 (console.warn.0): [bili] poll tick frames=97 pos=3233 ab=2641920 ad=0 u=0 w=0 rd=0
+
+09-25 10:26:50.253142 ERROR  577:3070050320 (console.warn.0): [bili] poll tick frames=125 pos=4166 ab=2813952 ad=0 u=0 w=0 rd=0
+
+09-25 10:26:51.254441 ERROR  577:3070050320 (console.warn.0): [bili] poll tick frames=152 pos=5066 ab=2994176 ad=0 u=0 w=0 rd=0
+
+09-25 10:26:52.254948 ERROR  577:3070050320 (console.warn.0): [bili] poll tick frames=184 pos=6133 ab=3166208 ad=0 u=0 w=0 rd=0
+
+09-25 10:26:53.256163 ERROR  577:3070050320 (console.warn.0): [bili] poll tick frames=214 pos=7133 ab=3346432 ad=0 u=0 w=0 rd=0
+
+09-25 10:26:53.399764 ERROR  577:3070050320 (console.warn.0): [bili] toggle → paused
+
+09-25 10:26:54.122372 ERROR  577:3070050320 (console.warn.0): [bili] toggle → playing
+
+09-25 10:26:54.255405 ERROR  577:3070050320 (console.warn.0): [bili] poll tick frames=221 pos=7366 ab=3420160 ad=0 u=0 w=0 rd=0
+
+09-25 10:26:55.254379 ERROR  577:3070050320 (console.warn.0): [bili] poll tick frames=253 pos=8433 ab=3600384 ad=0 u=0 w=0 rd=0
+
+09-25 10:26:56.254919 ERROR  577:3070050320 (console.warn.0): [bili] poll tick frames=286 pos=9533 ab=3772416 ad=0 u=0 w=0 rd=0
+
+09-25 10:26:57.255178 ERROR  577:3070050320 (console.warn.0): [bili] poll tick frames=319 pos=10633 ab=3952640 ad=0 u=0 w=0 rd=0
+
+09-25 10:26:58.254609 ERROR  577:3070050320 (console.warn.0): [bili] poll tick frames=351 pos=11700 ab=4124672 ad=0 u=0 w=0 rd=0
+
+09-25 10:27:02.418879 ERROR  577:3070050320 (console.warn.0): [bili] back to browse
+
+09-25 10:54:37.856090 ERROR  577:3070050320 (console.warn.0): [bili] autotest seeded → run
+
+09-25 10:54:37.858922 ERROR  577:3070050320 (console.warn.0): [bili] AUTOTEST start
+
+09-25 10:54:38.404804 ERROR  577:3070050320 (console.warn.0): [bili] load rcmd ok n=20
+
+09-25 10:54:39.357886 ERROR  577:3070050320 (console.warn.0): [bili] stream DASH qn=16 vb=268184 avc1.640033 ab=65754 host=upos-sz-mirrorcoso1.bilivideo.com
+
+09-25 10:54:39.555843 ERROR  577:3070050320 (console.warn.0): [bili] open ok out=254x452 fps=30 audio=44100 DASH
+
+09-25 10:54:39.600992 ERROR  577:3070050320 (console.warn.0): [bili] danmaku engine idle (no data)
+
+09-25 10:54:39.602376 ERROR  577:3070050320 (console.warn.0): [bili] play start BV1YQeB6QERn qn=16 dur=149034ms
+
+09-25 10:54:40.977114 ERROR  577:3070050320 (console.warn.0): [bili] replies load n=3 count=915
+
+09-25 10:54:40.979251 ERROR  577:3070050320 (console.warn.0): [bili] poll tick frames=4 pos=133 ab=797760 ad=0 u=0 w=0 rd=0
+
+09-25 10:54:40.985626 ERROR  577:3070050320 (console.warn.0): [bili] AUTOTEST first frame 1366ms frames=4 pos=133
+
+09-25 10:54:40.987969 ERROR  577:3070050320 (console.warn.0): [bili] toggle → paused
+
+09-25 10:54:40.993376 ERROR  577:3070050320 (console.warn.0): [bili] danmaku real n=242/242 pkgs=1 span=0..148690
+
+09-25 10:54:40.994716 ERROR  577:3070050320 (console.warn.0): [bili] danmaku engine start mode=2 lanes=242 dur=149034
+
+09-25 10:54:41.800441 ERROR  577:3070050320 (console.warn.0): [bili] toggle → playing
+
+09-25 10:54:45.190872 ERROR  577:3070050320 (console.warn.0): [bili] seek +20s → pos=20133ms
+
+09-25 10:54:45.201733 ERROR  577:3070050320 (console.warn.0): [bili] danmaku engine start mode=2 lanes=242 dur=149034
+
+09-25 10:54:45.244068 ERROR  577:3070050320 (console.warn.0): [bili] poll tick frames=0 pos=20133 ab=0 ad=0 u=0 w=0 rd=0
+
+09-25 10:54:46.244056 ERROR  577:3070050320 (console.warn.0): [bili] poll tick frames=0 pos=20133 ab=0 ad=0 u=0 w=0 rd=0
+
+09-25 10:54:49.842406 ERROR  577:3070050320 (console.warn.0): [bili] seek -20s → pos=133ms
+
+09-25 10:54:49.852713 ERROR  577:3070050320 (console.warn.0): [bili] danmaku engine start mode=2 lanes=242 dur=149034
+
+09-25 10:54:49.895152 ERROR  577:3070050320 (console.warn.0): [bili] poll tick frames=0 pos=133 ab=0 ad=0 u=0 w=0 rd=0
+
+09-25 10:54:50.894346 ERROR  577:3070050320 (console.warn.0): [bili] poll tick frames=0 pos=133 ab=713628 ad=0 u=1 w=0 rd=0
+
+09-25 10:54:51.322441 ERROR  577:3070050320 (console.warn.0): [bili] AUTOTEST seek recover 1458ms frames=4
+
+09-25 10:54:54.619249 ERROR  577:3070050320 (console.warn.0): [bili] back to browse
+
+09-25 10:54:54.965085 ERROR  577:3070050320 (console.warn.0): [bili] load hot ok n=20
+
+09-25 10:54:55.555101 ERROR  577:3070050320 (console.warn.0): [bili] hot page 2 +12 total=32
+
+09-25 10:54:56.201700 ERROR  577:3070050320 (console.warn.0): [bili] rcmd+hot 续底 +12 total=32 pn=1
+
+09-25 10:54:57.515095 ERROR  577:3070050320 (console.warn.0): [bili] load search ok n=17
+
+09-25 10:54:57.516103 ERROR  577:3070050320 (console.warn.0): [bili] AUTOTEST search n=17
+
+09-25 10:54:58.433760 ERROR  577:3070050320 (console.warn.0): [bili] qr generate ok size=45
+
+09-25 10:54:58.437064 ERROR  577:3070050320 (console.warn.0): [bili] AUTOTEST qr size=45 state=waiting
+
+09-25 10:54:58.437962 ERROR  577:3070050320 (console.warn.0): [bili] qr cancelled
+
+09-25 10:54:58.438893 ERROR  577:3070050320 (console.warn.0): [bili] AUTOTEST PASS frames=4 hot=32 search=17 hist=1 qr=ok
+

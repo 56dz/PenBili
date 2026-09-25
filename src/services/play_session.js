@@ -276,7 +276,12 @@ export async function readStatus(ctx) {
     audioUnderruns: Number(st.audioUnderruns) || 0,
     audioWrErrors: Number(st.audioWrErrors) || 0,
     audioRingDrops: Number(st.audioRingDrops) || 0,
-    audioDead: !!st.audioDead
+    audioDead: !!st.audioDead,
+    /* A/V 巡检（v1.7.1）：playing 态距最近帧的毫秒（>8000=视频停帧）；gateWaitMs=起播门时长；
+     * gateActive=门进行中（此时巡检让位，防弱网首帧期被误判打断） */
+    videoStallMs: Number(st.videoStallMs) || 0,
+    gateWaitMs: Number(st.gateWaitMs) || 0,
+    gateActive: !!st.gateActive
   };
 }
 

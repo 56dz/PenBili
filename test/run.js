@@ -1133,9 +1133,20 @@ async function main() {
   });
   test('play_session: readStatus 错误翻译 + closeSession 幂等连打', async () => {
     const w = fakePlayDeps();
+    w.player.status = async () => ({
+      ok: true,
+      state: 'playing',
+      frames: 10,
+      audioBytes: 777,
+      videoStallMs: 9001,
+      gateWaitMs: 1500
+    });
     const ok1 = await readStatus(w);
     assert.strictEqual(ok1.ok, true);
     assert.strictEqual(ok1.frames, 10);
+    assert.strictEqual(ok1.audioBytes, 777);
+    assert.strictEqual(ok1.videoStallMs, 9001, 'A/V 巡检字段透传');
+    assert.strictEqual(ok1.gateWaitMs, 1500, '起播门时长透传');
     w.player.status = async () => ({ ok: true, state: 'error', error: 'HTTP error 403 Forbidden', frames: 0 });
     const bad = await readStatus(w);
     assert.strictEqual(bad.ok, false);
