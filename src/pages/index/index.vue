@@ -849,6 +849,38 @@ export default {
           this.play.note = '无声：蓝牙耳机可能被其他应用占用（请关闭音乐播放器后重试）';
           logWarn('[bili] audio chain dead → 蓝牙设备可能被其他应用占用');
         }
+        // 起播门诊断（v1.7.1）：音频等待视频首帧的时长（正常=首帧耗时；15000=超时放行）
+        if (st.gateWaitMs > 400 && st.gateWaitMs !== this._lastGateMs) {
+          this._lastGateMs = st.gateWaitMs;
+          logWarn('[bili] A/V gate wait=' + st.gateWaitMs + 'ms（音频等视频首帧后同步开播）');
+        }
+        // A/V 一致性巡检（v1.7.1）：视频 8s 无新帧而音频仍在写 → seek(pos+1) 重启对齐。
+        // 重开必经起播门 → 音画成对重启；门期(音频未开写, audioBytes 不变)天然不触发；
+        // 评论面板遮挡(commentsOpen)是用户主动暂停画面，跳过；45s 冷却防弱网打转。
+        if (
+          st.state === 'playing' &&
+          !st.gateActive &&
+          st.videoStallMs > 8000 &&
+          st.audioBytes > 0 &&
+          st.audioBytes !== (this._lastAvAudioBytes || 0) &&
+          !this.commentsOpen
+        ) {
+          const now = Date.now();
+          if (!this._avRecoverAt || now - this._avRecoverAt > 45000) {
+            this._avRecoverAt = now;
+            logWarn('[bili] A/V stall: video ' + st.videoStallMs + 'ms 无新帧但音频在播 → seek 恢复 pos=' + st.positionMs);
+            this.play.note = '音画不同步，正在恢复…';
+            this.onSeek(0.001) /* = seek(pos+1)：重启双进程并重新过起播门 */
+              .catch(function (e) {
+                logWarn('[bili] A/V recover seek: ' + (e && e.message));
+              });
+          }
+        }
+        this._lastAvAudioBytes = st.audioBytes;
+        // 起播门期提示（首帧/音频都未到 → 缓冲中；不覆盖恢复/无声等后续提示）
+        if (st.state === 'playing' && st.frames === 0 && st.positionMs === 0 && !st.audioBytes) {
+          this.play.note = '缓冲中…';
+        }
         this.play.positionMs = st.positionMs;
         this.play.frames = st.frames;
         if (st.state === 'ended') {

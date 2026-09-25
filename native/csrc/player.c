@@ -296,6 +296,10 @@ struct session {
     long writer_bytes; /* writer 实际写出量 = 真实播放时钟（拆进程后音画同步的锚） */
     int audio_alive;   /* 音频产出存活（音频进程死后=0 → 视频转墙钟节拍降级） */
     volatile int render_paused; /* 暂停 fb 输出（评论面板/系统UI覆盖时交出显示权；解码与音频照常） */
+    volatile int video_first_frame; /* A/V 起播门（v1.7.1）：视频首帧已产出 → writer 放行开写 */
+    volatile int gate_passed;    /* 门等待已结束（正常开/15s超时放行都置1）→ gateActive=!passed */
+    double last_blit_at;        /* 最近一帧产出的墙钟秒（巡检基准 → status.videoStallMs） */
+    double gate_wait_ms;        /* 起播门实际等待时长（诊断 → status.gateWaitMs） */
     long underruns;             /* writer 等水位/空环轮次（≥1 即发生过欠载等待） */
     long wr_errors;             /* aplay 写失败次数（设备崩溃/断流） */
     long ring_drops;            /* 环满被丢弃的字节数（蓝牙消费慢的直接证据） */
@@ -844,10 +848,12 @@ static void *video_thread(void *arg) {
             if (s->stop_flag) break;
         } else if (s->audio_input[0] && s->audio_enabled) {
             /* v1.6.0 拆进程后的音画同步：以真实播放位置（writer 写出量）为时钟。
-             * 视频超前 → 等到帧到时；音频进程死/时钟停滞 8s → 转墙钟节拍（画面继续，声音降级）。 */
+             * 视频超前 → 等到帧到时；音频进程死/时钟停滞 8s → 转墙钟节拍（画面继续，声音降级）。
+             * v1.7.1 首帧免钟：frames==0 时跳过等待直接落屏——起播门等首帧、首帧等 writer
+             * 时钟会互锁（writer 不开写则 apos 恒 start_ms，永远追不上 due）。 */
             long long due = s->start_ms + (long long)((double)(s->frames + 1) * 1000.0 / (double)s->fps);
             int waited = 0;
-            while (!s->stop_flag && s->audio_alive) {
+            while (!s->stop_flag && s->audio_alive && s->frames > 0) {
                 double bytes_per_ms = ((double)(s->audio_rate > 0 ? s->audio_rate : 44100)) * 4.0 / 1000.0;
                 long long apos = s->start_ms + (long long)((double)s->writer_bytes / bytes_per_ms);
                 if (apos >= due) break;
@@ -856,11 +862,15 @@ static void *video_thread(void *arg) {
                 if (waited > 8000) break;
             }
             if (s->stop_flag) break;
-            if (!s->audio_alive || waited > 8000) s->paced = 1; /* 音频时钟不可用 → 墙钟接管 */
+            if (s->frames > 0 && (!s->audio_alive || waited > 8000)) s->paced = 1; /* 音频时钟不可用 → 墙钟接管 */
         }
         s->frames++;
         s->position_ms = s->start_ms + (long)((double)s->frames * 1000.0 / (double)s->fps);
         s->frame_valid = 1;
+        /* 帧已产出：放行音频起播门 + 刷新巡检基准（render_paused 时画面被盖但帧流未断，
+         * 巡检的 commentsOpen 条件在 JS 侧兜住用户主动遮挡的场景）。 */
+        s->video_first_frame = 1;
+        s->last_blit_at = now_seconds();
         /* render_paused：评论面板/系统UI覆盖时暂停 fb 输出（解码/位置/音频照常）。
          * 根因（2026-09-24 真机三现象钉死）：视频矩形像素归 blit（33ms 写两块）专属，
          * 任何 UI 覆盖都会与其交替抢帧（弹幕层/评论面板/下拉控制中心均闪；暂停后不闪=blit 停）。 */
@@ -1019,6 +1029,19 @@ static void *audio_writer_thread(void *arg) {
     size_t start_level = rate_bytes * RING_START_MS / 1000;
     if (start_level > high_level) start_level = high_level;
     while (!s->stop_flag && s->rlen < start_level) usleep(20000);
+    /* A/V 起播门（v1.7.1）：视频首帧产出前不开写——弱网下音频(66kbps)常先缓冲完先出声，
+     * 画面几秒后才来（先声后画）。门期内 ring 继续蓄（上限 2.7s 无损）、视频 pipe 堵塞
+     * 在 1MB 缓冲（ffmpeg 反压等待）。15s 超时放行（网络极差先出声再由 JS 巡检 seek 对齐），
+     * 放行时顺延 last_blit 基准，避免"刚放行就被巡检判停帧"的抖动。 */
+    {
+        double gate_t0 = now_seconds();
+        while (!s->stop_flag && !s->video_first_frame && now_seconds() - gate_t0 < 15.0) {
+            usleep(20000);
+        }
+        s->gate_wait_ms = (now_seconds() - gate_t0) * 1000.0;
+        if (!s->video_first_frame) s->last_blit_at = now_seconds();
+        s->gate_passed = 1; /* 门结束（放行即判据切换）：巡检从此刻起才有裁决权 */
+    }
     int held = 0; /* 滞回状态：0=放行中 1=蓄水暂停中 */
     while (!s->stop_flag) {
         size_t n;
@@ -1155,6 +1178,11 @@ static int session_start(struct session *s, long start_ms, int with_audio, const
         s->audio_rate = 44100;
     }
     clock_gettime(CLOCK_MONOTONIC, &s->started_at);
+    /* A/V 起播门基准：每次 open/seek 重启复位（必须早于 video_thread 创建） */
+    s->video_first_frame = 0;
+    s->gate_passed = 0;
+    s->last_blit_at = now_seconds();
+    s->gate_wait_ms = 0;
 
     /* DASH（有第二输入音频轨）→ 音频走独立进程，视频进程只需单输出；
      * durl 回退（单文件，音视频同文件）→ 保持原双输出同进程模式 */
@@ -1525,6 +1553,12 @@ static JSValue js_status(JSContext *ctx, JSValueConst this_val, int argc, JSValu
     /* 已请求音频但产出链已断（aplay 打开失败/写失败——实测主因：bluealsa 被其他应用
      * （网易云 SoundPlayer）独占 → "Device or resource busy"）→ JS 侧提示用户 */
     mk_bool(ctx, "audioDead", s->audio_enabled && s->audio_alive == 0, res);
+    /* A/V 巡检（v1.7.1）：playing 态距最近一帧产出的毫秒数（JS 侧 >8000 且音频仍在走 →
+     * seek 重开恢复，重开必经起播门保证音画成对重启）；gateWaitMs=起播门等待时长（诊断）。 */
+    mk_int(ctx, "videoStallMs", s->state == ST_PLAYING ? (int)((now_seconds() - s->last_blit_at) * 1000.0) : 0, res);
+    mk_int(ctx, "gateWaitMs", (int)s->gate_wait_ms, res);
+    /* 门进行中（等首帧/未放行）→ JS 巡检让位，防弱网首帧 8~15s 区间被误判停帧打断门 */
+    mk_bool(ctx, "gateActive", s->audio_enabled && !s->gate_passed, res);
     mk_bool(ctx, "audioIsBt", s->audio_is_bt, res);
     mk_str(ctx, "audioDevice", s->audio_dev[0] ? s->audio_dev : NULL, res);
     mk_bool(ctx, "frameValid", s->frame_valid, res);
