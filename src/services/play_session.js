@@ -12,6 +12,10 @@ import { playVideoRects } from './screen.js';
 
 export const SEEK_STEP_MS = 20000;
 
+// 解码预算（v2.6.0）：实测 640×360(230K px) 软解吞吐 1.1~1.9x（4×A53，无弹幕）；2 倍像素即
+// CPU 100% 吞吐 93%（2026-10-01 soak 实证）。预算卡 310K（≈640×480 / 480×640 竖屏），超出 → durl。
+export const MAX_DECODE_PIXELS = 310000;
+
 // WBI 密钥会话级缓存（约每日轮换，单次 app 会话内复用安全）
 export async function ensureMixin(ctx) {
   if (ctx.mixinMemo && ctx.mixinMemo.key) return ctx.mixinMemo.key;
@@ -80,6 +84,18 @@ export async function resolveVideoUrl(ctx, item) {
       if (ctx.log) ctx.log('[bili] dash 尝试失败 qn' + qn + ': URL ' + vv.reason);
       continue;
     }
+    // 解码预算硬校验（v2.6.0）：实测 230K 像素(360p) 软解吞吐 1.1~1.9x；部分稿件 rendition
+    // 实为 720p/1080p（High@L5.1，真机 CPU 100% 吞吐仅 93% 实证）→ 按实际像素拒载，
+    // 落到 durl 真 360p 单文件路径（DASH_QN_LADDER 走完后自然回退）。
+    const px = (parsed.width || 0) * (parsed.height || 0);
+    if (px > MAX_DECODE_PIXELS) {
+      last = { stage: 'playurl', message: 'DASH 分辨率超解码预算' };
+      if (ctx.log) {
+        ctx.log('[bili] dash qn' + parsed.qn + ' ' + parsed.width + 'x' + parsed.height +
+          ' (' + px + 'px > ' + MAX_DECODE_PIXELS + ') 超解码预算 → 回退 durl 360p');
+      }
+      continue;
+    }
     let audioUrl = parsed.audioUrl || '';
     if (audioUrl) {
       const av = validateStreamUrl(audioUrl);
@@ -91,7 +107,8 @@ export async function resolveVideoUrl(ctx, item) {
     }
     if (ctx.log) {
       ctx.log(
-        '[bili] stream DASH qn=' + parsed.qn + ' vb=' + parsed.bandwidth + ' ' + parsed.codecs +
+        '[bili] stream DASH qn=' + parsed.qn + ' ' + (parsed.width || '?') + 'x' + (parsed.height || '?') +
+          ' vb=' + parsed.bandwidth + ' ' + parsed.codecs +
           ' ab=' + parsed.audioBandwidth + ' host=' + vv.host
       );
     }
@@ -281,7 +298,15 @@ export async function readStatus(ctx) {
      * gateActive=门进行中（此时巡检让位，防弱网首帧期被误判打断） */
     videoStallMs: Number(st.videoStallMs) || 0,
     gateWaitMs: Number(st.gateWaitMs) || 0,
-    gateActive: !!st.gateActive
+    gateActive: !!st.gateActive,
+    /* v1.8.0 音画对齐诊断：videoSkips=丢帧快进计数（追音频钟）；avDriftMs=可闻音频位置−画面位置
+     * （正=声音超前；修复后应稳定在 ±100ms 内，持续增长=软解吞吐贴实时线）
+     * v1.9.0：audioBufMs=可闻锚修正量（aplay 管道+ALSA 缓冲，恒定即正常）
+     * v1.9.3：videoRestarts=视频断流重启次数（>0=发生过 CDN 断流，表现为短暂追赶后恢复） */
+    videoSkips: Number(st.videoSkips) || 0,
+    avDriftMs: Number(st.avDriftMs) || 0,
+    audioBufMs: Number(st.audioBufMs) || 0,
+    videoRestarts: Number(st.videoRestarts) || 0
   };
 }
 

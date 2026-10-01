@@ -186,12 +186,6 @@ export async function resumeRender() {
   return call('resumeRender', []);
 }
 
-// writeDm(lane 0..3, text)：写弹幕泳道（textfile reload 即时生效；空串=清空该泳道）
-export async function writeDm(lane, text) {
-  await getPlayerModule();
-  return call('writeDm', [Math.max(0, Math.min(3, Math.round(lane || 0))), typeof text === 'string' ? text : '']);
-}
-
 export async function redraw() {
   await getPlayerModule();
   return call('redraw', []);

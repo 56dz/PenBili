@@ -209,10 +209,8 @@
     <div v-if="mode === 'play' && !commentsOpen" class="info-col">
       <text class="info-title">{{ infoTitle }}</text>
       <text class="info-up">{{ infoUp }}</text>
-      <!-- 右栏按钮：弹幕开关（默认开）+ 评论区入口（容器 flex 居中，数字变长也不偏） -->
-      <div class="info-ctrl" @click="toggleDanmaku">
-        <text class="info-ctrl-text">弹幕：{{ danmakuLabel }}</text>
-      </div>
+      <!-- 右栏按钮：评论区入口（容器 flex 居中，数字变长也不偏）。弹幕功能已于 v2.7.0 移除
+           （drawtext×4 逐帧渲染占解码预算 ~20%，弱稿件软解跌破实时 → 卡顿，用户决策移除） -->
       <div class="info-ctrl" @click="openComments">
         <text class="info-ctrl-text">评论区{{ replyCount ? ' · ' + replyCount : '' }}</text>
       </div>
@@ -220,8 +218,6 @@
       <text class="info-state">{{ play.note }}</text>
       <text class="info-hint">左侧：暂停/开始 · ±{{ seekStepSec }}s</text>
     </div>
-
-    <!-- 弹幕已迁至 native drawtext（v1.7.0 烧进视频帧：与 blit 同源，与 UI 永不互踩） -->
   </div>
 </template>
 
@@ -252,7 +248,6 @@ import {
 } from '../../services/bili/qrlogin.js';
 import { cancelNativePosts } from '../../services/net.js';
 import { fetchReplies, addReply, fetchSubReplies } from '../../services/bili/reply.js';
-import { segUrl, segCount, toBytes, isDanmakuBytes, parseDanmakuSeg } from '../../services/bili/danmaku.js';
 import { encodeQr, rowRuns } from '../../services/bili/qrcode.js';
 import { saveSession } from '../../services/storage.js';
 import { input } from '../../services/input.js';
@@ -367,11 +362,7 @@ export default {
       replyCount: 0,
       // 展开中的子楼（单实例：root=0 收起）
       replyOpen: { root: 0, items: [], shown: 0, page: 1, noMore: false, loading: false },
-      // 弹幕（默认开）+ 评论面板
-      /* 弹幕档位：0=关 1=1/4屏 2=1/2屏(默认) 3=全屏 —— 持久化 */
-      danmakuMode: 2,
-      dmList: [], /* 真实弹幕时间轴（seg.so；接口失败=空，无种子兜底） */
-      dmError: '', /* 非空=接口错误，弹幕按钮显示"弹幕：接口错误"（切档时自动重试） */
+      // 评论面板（弹幕功能已于 v2.7.0 移除：drawtext 烧帧拖垮弱稿软解）
       commentsOpen: false
     };
   },
@@ -414,11 +405,6 @@ export default {
       if (this.tab === 'rcmd') return this.moreNoMore ? '没有更多了' : '加载更多';
       if (this.tab === 'search') return this.searchNoMore ? '没有更多了' : '加载更多';
       return this.hotNoMore ? '没有更多了' : '加载更多';
-    },
-    danmakuLabel() {
-      if (this.dmError) return '接口错误';
-      const labels = ['关', '1/4屏', '1/2屏', '全屏'];
-      return labels[this.danmakuMode] || '关';
     },
     // 已登录判定（以 nav 验证过的档案为准：过期 cookie 等同未登录，提示文案一致）
     hasLogin() {
@@ -487,14 +473,6 @@ export default {
     async loadLocal() {
       const h = await loadHistory();
       this.history = h.items;
-      // 弹幕档位偏好（默认 1/2 屏；四档切换持久化，新视频/新会话沿用上次设置）
-      try {
-        const pref = await getJson(KEYS.settings, null);
-        const m = pref && typeof pref.danmakuMode === 'number' && pref.danmakuMode >= 0 && pref.danmakuMode <= 3 ? pref.danmakuMode : 2;
-        this.danmakuMode = m;
-      } catch (e) {
-        this.danmakuMode = 2;
-      }
       const sess = await loadSession();
       this.session = sess;
       if (sess.buvid3) {
@@ -518,8 +496,9 @@ export default {
       }
       const at = await getJson(KEYS.autotest, null);
       if (at && (at === true || at.enabled === true)) {
-        logWarn('[bili] autotest seeded → run');
-        this.runAutotest(); // 自检内部自带首屏加载（避免与这里并发双 load 竞态）
+        const soakSec = at && typeof at === 'object' ? Number(at.soak) || 0 : 0;
+        logWarn('[bili] autotest seeded → run' + (soakSec > 0 ? ' soak=' + soakSec + 's' : ''));
+        this.runAutotest(soakSec); // 自检内部自带首屏加载（避免与这里并发双 load 竞态）
       } else {
         await this.selectTab('rcmd'); // 首屏加载：此刻登录 Cookie 已就位 → 个性化推荐
       }
@@ -748,8 +727,6 @@ export default {
       this.replyCount = 0;
       this.commentsOpen = false;
       this.replyOpen = { root: 0, items: [], shown: 0, page: 1, noMore: false, loading: false };
-      this.dmError = '';
-      this.dmList = [];
       this.play = {
         state: 'loading',
         session: {
@@ -799,9 +776,6 @@ export default {
       ).items;
       saveHistory({ version: 1, items: this.history });
       this.loadReplies(r.session.aid || 0); // 评论首屏（不阻塞播放；无 aid 内部直接返回）
-      // 弹幕：先用种子秒开，真实弹幕（protobuf 分包）异步到达即接管（失败保留种子）
-      this.startDanmaku(r.session.durationMs || 0);
-      this.loadDanmaku(r.session.aid || 0, r.session.cid || 0, r.session.durationMs || 0, myGen);
       this.startPoll(myGen);
       logWarn('[bili] play start ' + r.session.bvid + ' qn=' + r.session.qn + ' dur=' + r.session.durationMs + 'ms');
     },
@@ -837,12 +811,30 @@ export default {
           return;
         }
         // 每秒采样（v1.3.0 音频重写证据链）：ab/ad/u(欠载)w(写失败)rd(环满丢弃)
+        // v1.8.0 追加 skip(丢帧快进)/drift(可闻音频−画面,正=声音超前)：修复后 drift 应稳在 ±100ms
+        // v1.9.0 追加 buf(可闻锚修正量=管道+ALSA缓冲,恒定即正常)
+        // v1.9.3 追加 rst(视频断流重启次数)
         logWarn(
           '[bili] poll tick frames=' + st.frames + ' pos=' + st.positionMs +
           ' ab=' + st.audioBytes + ' ad=' + st.audioDropped +
           ' u=' + st.audioUnderruns + ' w=' + st.audioWrErrors + ' rd=' + st.audioRingDrops +
+          ' skip=' + (st.videoSkips || 0) + ' drift=' + (st.avDriftMs || 0) + 'ms' +
+          ' buf=' + (st.audioBufMs || 0) + 'ms' +
+          ' rst=' + (st.videoRestarts || 0) +
           (st.audioDead ? ' DEAD' : '')
         );
+        // 画面大滞后提示（v1.9.3）：生产端（网络/解码）跟不上时丢帧追钟会造成可见滞后期，
+        // 给用户一个"在自愈"的信号，避免误以为卡死；恢复后自动清除。
+        if (st.state === 'playing' && (st.avDriftMs || 0) > 1200) {
+          if (!this._syncNoteOn) {
+            this._syncNoteOn = true;
+            this.play.note = '网络波动，画面正在同步…';
+            logWarn('[bili] sync lag: drift=' + st.avDriftMs + 'ms skips=' + st.videoSkips + ' → 提示用户');
+          }
+        } else if (this._syncNoteOn && (st.avDriftMs || 0) < 400) {
+          this._syncNoteOn = false;
+          if (this.play.note === '网络波动，画面正在同步…') this.play.note = '';
+        }
         // 音频链已断（实测主因：蓝牙被其他应用独占——网易云 SoundPlayer 正在用 bluealsa）
         if (st.audioDead && !this._audioDeadWarned) {
           this._audioDeadWarned = true;
@@ -874,6 +866,26 @@ export default {
               .catch(function (e) {
                 logWarn('[bili] A/V recover seek: ' + (e && e.message));
               });
+          }
+        }
+        // 僵尸涓流看门狗（v2.6.1）：视频停帧 ≥25s 且音频字节也不再增长 = 双链路假死
+        // （TCP 涓流让 rw_timeout 永不触发，实测可冻结 60s+）。主动 seek(pos+1) 双重启：
+        // 网络恢复即瞬回，仍断网则按冷却重试（优于无限冻结）。25s 冷却防弱网风暴。
+        if (
+          st.state === 'playing' &&
+          !st.gateActive &&
+          st.videoStallMs > 25000 &&
+          st.audioBytes === (this._lastAvAudioBytes || 0) &&
+          !this.commentsOpen
+        ) {
+          const now2 = Date.now();
+          if (!this._hardStallAt || now2 - this._hardStallAt > 25000) {
+            this._hardStallAt = now2;
+            logWarn('[bili] hard stall: video ' + st.videoStallMs + 'ms 无帧且音频冻结 → 双重启');
+            this.play.note = '网络不稳定，正在重连…';
+            this.onSeek(0.001).catch(function (e) {
+              logWarn('[bili] hard stall restart: ' + (e && e.message));
+            });
           }
         }
         this._lastAvAudioBytes = st.audioBytes;
@@ -941,176 +953,6 @@ export default {
       this.play.positionMs = r.positionMs;
       this.play.note = '';
       logWarn('[bili] seek ' + (deltaSec > 0 ? '+' : '') + deltaSec + 's → pos=' + r.positionMs + 'ms');
-      /* seek 后重启弹幕引擎（泳道基线对齐新位置） */
-      this.startDanmaku(this.play.session ? this.play.session.durationMs : 0);
-    },
-    /* ---------- 真实弹幕（protobuf seg.so；collect 契约：**oid=cid**、6min/包、半匿名） ----------
-     * 逐包异步拉取+解码（大包让帧不冻结 UI）；失败/二进制被破坏 → 保留种子弹幕不空屏。
-     * 成功 → 替换 dmList 并重启引擎（泳道基线按真实时间轴重排）。 */
-    async loadDanmaku(aid, cid, durationMs, myGen) {
-      if (!(aid > 0) || !(cid > 0)) return;
-      const total = segCount(durationMs);
-      const cap = Math.min(total, 20); /* 最多20包=2h 稿件 */
-      const all = [];
-      for (let i = 1; i <= cap; i++) {
-        if (this.gen !== myGen) return;
-        const res = await this.client.getBinary(segUrl(cid, aid, i));
-        if (this.gen !== myGen) return;
-        if (!res.ok) {
-          if (i === 1) logWarn('[bili] danmaku fetch fail: ' + res.stage + ' ' + res.message);
-          this.dmError = '接口错误';
-          break;
-        }
-        const bytes = toBytes(res.body);
-        if (!isDanmakuBytes(bytes)) {
-          logWarn('[bili] danmaku not-protobuf: len=' + (bytes ? bytes.length : 0) + ' seg=' + i);
-          this.dmError = '接口错误';
-          break; /* 非 proto → 按钮显示接口错误（取证史已归档 profile） */
-        }
-        const parsed = parseDanmakuSeg(bytes);
-        if (!parsed.ok) {
-          logWarn('[bili] danmaku decode fail: ' + parsed.reason + ' (keep prev ' + all.length + ')');
-          this.dmError = '接口错误';
-          break;
-        }
-        if (!parsed.items.length) logWarn('[bili] danmaku seg ' + i + ' empty → next'); /* 空段自动续下一段 */
-        all.push.apply(all, parsed.items);
-        if (all.length > 30000) break; /* 内存护栏：3 万条足够全片采样 */
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      }
-      if (this.gen !== myGen) return;
-      if (all.length) {
-        all.sort((x, y) => x.p - y.p);
-        /* 服务端分包边界可能重叠 → 按 p+text 去重（同毫秒同文本=同一条） */
-        const seen = {};
-        const dedup = [];
-        for (const it of all) {
-          const key = it.p + '\u0001' + it.text;
-          if (seen[key]) continue;
-          seen[key] = 1;
-          dedup.push(it);
-        }
-        this.dmList = dedup;
-        this.dmError = '';
-        logWarn('[bili] danmaku real n=' + dedup.length + '/' + all.length + ' pkgs=' + cap + ' span=' + (dedup[0] ? dedup[0].p : 0) + '..' + (dedup[dedup.length - 1] ? dedup[dedup.length - 1].p : 0));
-        this.startDanmaku(durationMs); /* 重启引擎：游标按真实时间轴重排 */
-      } else {
-        if (!this.dmError) this.dmError = '接口错误'; /* 全部段为空 → 按钮显示错误 */
-        logWarn('[bili] danmaku empty → dmError shown on button');
-      }
-    },
-
-    /* ---------- 弹幕引擎（native drawtext 4泳道：writeDm 换文本，reload=1 即时生效） ----------
-     * UI 叠层方案已判死：视频矩形归 blit 专属，任何覆盖层都与其交替抢帧（一帧弹幕一帧画面）。
-     * 烧进视频帧 = 与 blit 同源 → 永不互踩。x 表达式固定周期滚动，JS 按 positionMs 把
-     * 弹幕分派进 4 条泳道（展示期 4.5s 后该泳道可接下一条）。 */
-    /* 泳道分派基线：统一游标定位到当前播放位（不回退已播；seek 后对齐新位置） */
-    resetDmBaseline() {
-      this._dmCursor = this.findDmIndex(this.dmList, Math.max(0, this.play.positionMs || 0));
-      this._dmFree = [0, 0, 0, 0];
-      this._dmExpire = [0, 0, 0, 0];
-      this._dmTextAt = {}; /* 文案冷却表（按播放位时间戳） */
-    },
-    findDmIndex(list, p) {
-      let i = 0;
-      while (i < list.length && list[i].p < p) i++;
-      return i;
-    },
-    stopDanmaku() {
-      if (this._dmTimer) {
-        clearInterval(this._dmTimer);
-        this._intervals.delete(this._dmTimer);
-        this._dmTimer = 0;
-      }
-      /* 关/换台清空 4 条泳道（空文本=drawtext 不再绘制） */
-      for (let i = 0; i < 4; i++) {
-        player.writeDm(i, '').catch(function () {});
-      }
-    },
-    startDanmaku(durationMs) {
-      this.stopDanmaku(); /* 清 4 泳道旧文本（换档/换台都先清干净） */
-      if (this.danmakuMode === 0) {
-        logWarn('[bili] danmaku off');
-        return;
-      }
-      if (!this.dmList.length) {
-        logWarn('[bili] danmaku engine idle (no data' + (this.dmError ? ', error on button' : '') + ')');
-        return; /* 接口失败/无弹幕：不启 timer；错误态由弹幕按钮展示 */
-      }
-      this.resetDmBaseline();
-      /* 四泳道滚动速度（px/s）——必须与 native vf 的 mod(t*S,…) 一一对应，改这里须同步 player.c */
-      const SPD = [110, 142, 90, 166];
-      const t = setInterval(() => {
-        if (this.mode !== 'play') {
-          this.stopDanmaku();
-          return;
-        }
-        const pos = this.play.positionMs;
-        const now = Date.now();
-        /* 档位→活跃泳道（y：lane0=8 顶 / lane1=72 / lane2=136 / lane3=200 底）
-         * 区域从顶部算（用户指定）：1/4屏=lane0 顶部单条 · 1/2屏=lane0+1 上半双条 · 全屏=四条 */
-        const active = this.danmakuMode === 3 ? [0, 1, 2, 3] : this.danmakuMode === 2 ? [0, 1] : [0];
-        for (let k = 0; k < active.length; k++) {
-          const l = active[k];
-          /* 单程滚完 → 清空泳道：native x=w-mod(t*S,…) 是**周期循环**（短文本一轮仅 3~5s），
-           * 不清理则同一条滚过去又被 mod 从右边放回第二遍（"还是有点重复"的真凶） */
-          if (this._dmExpire[l] && now >= this._dmExpire[l]) {
-            player.writeDm(l, '').catch(function () {});
-            this._dmExpire[l] = 0;
-          }
-          if (now < this._dmFree[l]) continue; /* 该泳道仍在展示期 */
-          /* 统一分派游标：全泳道共享同一消费序列，消费即前进 → 同一条永不再进第二个泳道 */
-          let cursor = this._dmCursor || 0;
-          while (cursor < this.dmList.length && this.dmList[cursor].p < pos - 800) cursor++; /* 过期跳过 */
-          this._dmCursor = cursor;
-          if (cursor >= this.dmList.length) break;
-          const dm = this.dmList[cursor];
-          if (dm.p > pos + 300) break; /* 未到点：后续条目更晚（250ms 轮询粒度） */
-          /* 同文案 15s 冷却：真实弹幕同文本短时密集（"哈哈哈"等）观感即重复 → 跳过 */
-          const lastAt = this._dmTextAt[dm.text];
-          if (lastAt !== undefined && pos - lastAt < 15000) {
-            this._dmCursor = cursor + 1;
-            continue;
-          }
-          player.writeDm(l, dm.text).catch(function (e) {
-            logWarn('[bili] writeDm: ' + (e && e.message));
-          });
-          if (Object.keys(this._dmTextAt).length > 400) this._dmTextAt = {}; /* 冷却表内存护栏 */
-          this._dmTextAt[dm.text] = pos;
-          this._dmCursor = cursor + 1;
-          /* 展示期 = 单程滚完（17px/字符估宽；偏宽多留无害——出屏后不可见） */
-          const periodMs = Math.ceil(((452 + 17 * dm.text.length) / SPD[l]) * 1000);
-          this._dmFree[l] = now + periodMs;
-          this._dmExpire[l] = now + periodMs;
-        }
-      }, 250);
-      this._dmTimer = t;
-      this._intervals.add(t);
-      logWarn('[bili] danmaku engine start mode=' + this.danmakuMode + ' lanes=' + (this.dmList ? this.dmList.length : 0) + ' dur=' + durationMs);
-    },
-    toggleDanmaku() {
-      this.danmakuMode = (this.danmakuMode + 1) % 4; /* 关→1/4→1/2→全屏→关 */
-      this.saveDanmakuPref();
-      logWarn('[bili] danmaku mode -> ' + this.danmakuLabel);
-      if (this.mode === 'play') {
-        /* 错误态：切档同时自动重试接口（成功后 loadDanmaku 内部重启引擎接管） */
-        if (this.dmError && this.play.session && this.play.session.aid > 0) {
-          this.dmError = '';
-          const s = this.play.session;
-          this.loadDanmaku(s.aid || 0, s.cid || 0, s.durationMs || 0, this.gen);
-        }
-        this.startDanmaku(this.play.session ? this.play.session.durationMs : 0);
-      }
-    },
-    async saveDanmakuPref() {
-      try {
-        const s = (await getJson(KEYS.settings, null)) || {};
-        s.version = s.version || 1;
-        s.danmakuMode = this.danmakuMode;
-        await setJson(KEYS.settings, s);
-      } catch (e) {
-        logWarn('[bili] save danmaku pref: ' + (e && e.message));
-      }
     },
     /* 评论面板显示权交接：打开=暂停 fb 输出（解码/音频照常）→ UI 独占无闪；关闭恢复 */
     openComments() {
@@ -1293,7 +1135,6 @@ export default {
     async onBack() {
       const myGen = ++this.gen;
       this.stopPoll();
-      this.stopDanmaku();
       this.closeComments();
       await closeSession(this.makeCtx(myGen));
       this.mode = 'browse';
@@ -1489,7 +1330,7 @@ export default {
 
     /* ---------- 真机自检（storage 预置 bili_autotest 触发；
          全部复用按钮同一代码路径 —— 设备无触摸注入的替代取证） ---------- */
-    async runAutotest() {
+    async runAutotest(soakSec) {
       const ensure = (cond, msg) => {
         if (!cond) throw new Error(msg);
       };
@@ -1571,6 +1412,47 @@ export default {
           ' hist=' + this.history.length +
           ' qr=ok'
         );
+
+        /* —— v2.4.0 音画对齐长播验证（seed soak 秒，缺省 0=跳过）：复播推荐第一个视频持续播放。
+         * poll tick 每秒带 skip=/drift= 落设备日志；这里每 5s 采样，每 30s 打一条检查点，
+         * 结束输出漂移上界。通过线 |drift|≤300ms（丢帧快进稳态 ±100ms + 起播/供给波动裕量）。 */
+        if (soakSec > 0) {
+          await this.onPlayItem(this.rcmdItems[0]);
+          ensure(this.play.state === 'playing', 'soak 起播失败: ' + this.play.note);
+          const wsf = await this.waitForFrames(12000);
+          ensure(wsf.st.ok && wsf.st.frames > 0, 'soak 12s 内无帧: ' + (wsf.st.message || wsf.st.state));
+          logWarn('[bili] AUTOTEST SOAK start ' + soakSec + 's bv=' + (this.play.bvid || ''));
+          const t0 = Date.now();
+          let maxDrift = 0;
+          let minDrift = 0;
+          let skipBase = -1;
+          let skipEnd = 0;
+          let n = 0;
+          while (Date.now() - t0 < soakSec * 1000 && this.mode === 'play' && this.play.state === 'playing') {
+            await this.sleep(5000);
+            if (this.mode !== 'play' || this.play.state !== 'playing') break;
+            const st = await readStatus(this.makeCtx(this.gen));
+            if (!st.ok || st.state !== 'playing') continue;
+            const d = st.avDriftMs || 0;
+            if (d > maxDrift) maxDrift = d;
+            if (d < minDrift) minDrift = d;
+            if (skipBase < 0) skipBase = st.videoSkips || 0;
+            skipEnd = st.videoSkips || 0;
+            n++;
+            const el = Math.round((Date.now() - t0) / 1000);
+            if (el % 30 < 5) {
+              logWarn('[bili] SOAK t=' + el + 's pos=' + st.positionMs + ' drift=' + d + 'ms skips=' + st.videoSkips);
+            }
+          }
+          const over = Math.max(Math.abs(maxDrift), Math.abs(minDrift)) > 300;
+          logWarn(
+            '[bili] AUTOTEST SOAK ' + (over ? 'FAIL' : 'PASS') +
+            ' n=' + n + ' drift=[' + minDrift + ',' + maxDrift + ']ms' +
+            ' skips=+' + (skipEnd - (skipBase < 0 ? skipEnd : skipBase)) +
+            (over ? '（|drift| 超 ±300ms）' : '')
+          );
+          if (this.mode === 'play') await this.onBack();
+        }
       } catch (e) {
         logWarn('[bili] AUTOTEST FAIL: ' + ((e && e.message) || e));
         this.gen++; // 停掉在途操作

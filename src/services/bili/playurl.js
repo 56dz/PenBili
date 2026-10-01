@@ -10,11 +10,15 @@ import { buildSignedQuery } from './wbi.js';
 //   dash 的 qn 语义不同：id32 = **852x480(480p)**、id16 = 640x360(360p) —— 与 html5 的
 //   qn32=640x360 不同！真机实测（2h 长片）：dash 取 480p 源让 A53 全线滑行 0.7x 实时
 //   （pos/ab/frames 统一 70%、aplay underrun 1.4s 循环 = "一直卡"）→ **DASH 只走 id16**。
-export const QN_LADDER = [32, 16];
+//   v2.6.1：durl 阶梯同样只走 16——qn32 durl 实测 852×480(409K px) 超解码预算(310K)，
+//   会把软解再次压到 1x 以下；qn16 durl = 640×360 真标清，稳。
+export const QN_LADDER = [16];
 export const DASH_QN_LADDER = [16];
 
-// html5 单文件实测输出帧率（30fps；设备观测 90 帧 / 3 秒）
-export const HTML5_FPS = 30;
+// 播放节拍帧率。html5 时代实测源 30fps；v2.5.1 降为 24：带弹幕（drawtext×4 逐帧渲染文字）
+// 的视频在 4×A53 上软解吞吐只有 ~88% 实时（2026-10-01 soak 实测 drift +107ms/s），
+// 24fps 把节拍需求降到 80%，余量转正。输出 -r 24 由 ffmpeg CFR 统一，音画对齐不受影响。
+export const HTML5_FPS = 24;
 
 export const MAX_STREAM_URL_LEN = 1000;
 
@@ -187,8 +191,14 @@ export function parseDashResponse(res, wantQn) {
   let pool = qn ? vids.filter((x) => Number(x.id) === qn) : [];
   if (!pool.length) pool = vids.slice();
   const byBw = (a, b) => (Number(a.bandwidth) || 0) - (Number(b.bandwidth) || 0);
+  /* v2.6.0 关键修复：按**像素量**选 rendition（升序），码率只作同分辨率 tiebreak。
+   * 真机实证（2026-10-01 soak）：部分稿件 qn16/回退 rendition 实为 720p/1080p
+   * （High@L5.1），低动态场景码率可低于 360p 高动态 → 旧"按码率选"会选到 1080p，
+   * 4×A53 软解 CPU 100% 吞吐仅 93% → 音画线性漂移。像素量才是解码成本的决定项。 */
+  const pxOf = (x) => (Number(x.width) || 0) * (Number(x.height) || 0);
+  const byPx = (a, b) => pxOf(a) - pxOf(b) || byBw(a, b);
   const avc = pool.filter((x) => String(x.codecs || '').indexOf('avc1') === 0);
-  const pick = (avc.length ? avc : pool).slice().sort(byBw)[0];
+  const pick = (avc.length ? avc : pool).slice().sort(byPx)[0];
   const videoUrl = pickStreamUrl(pick);
   if (!videoUrl) return { ok: false, stage: 'parse', hasDurl: false, message: 'dash.video 无可用 URL' };
   const auds = (dash.audio || []).slice().sort(byBw);
@@ -198,6 +208,8 @@ export function parseDashResponse(res, wantQn) {
     videoUrl: videoUrl,
     audioUrl: audioUrl,
     qn: Number(pick.id) || qn,
+    width: Number(pick.width) || 0,
+    height: Number(pick.height) || 0,
     bandwidth: Number(pick.bandwidth) || 0,
     codecs: String(pick.codecs || ''),
     audioBandwidth: auds.length ? Number(auds[0].bandwidth) || 0 : 0,

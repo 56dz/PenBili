@@ -28,7 +28,24 @@
  *   userAgent — 传给 ffmpeg -user_agent（B 站 CDN 对默认 Lavf UA 返回 403，见 profile）
  *   referer   — 传给 ffmpeg -headers "Referer: <referer>\r\n"（DASH 流需要；html5 不校验）
  *   两者都做长度/字符集校验（valid_user_agent / valid_referer），不合法返回 PLAYER_BAD_HEADERS。
+ *
+ * v1.8.0 音画对齐重写（2026-09-30，修复"越播声音越超前"）：
+ *   旧行为视频"只等不追"——帧到点才贴屏，但从不丢弃落后帧。软解+滤镜链（drawtext×4 +
+ *   scale + transpose）吞吐一旦瞬时跌破实时（复杂场景/UI 抢占），每次掉帧都永久累积，
+ *   画面越来越落后而音频（ALSA 硬实时）照走 → 声音越来越先出（用户实测：开播同步、
+ *   越到后面声音越超前）。新规则：帧落后音频钟 >AV_SKIP_MS 即丢帧快进追钟（每
+ *   AV_SKIP_BLIT_EVERY 帧贴一屏保留快进观感），漂移有界不再累积；音画同步统一覆盖
+ *   durl 单文件路径（原来完全无节拍，画面可领先音频数秒）；音频供给停滞时画面冻结
+ *   等声（rw_timeout 15s 兜底），移除旧的"停滞 8s 转墙钟"——那是漂移后无法回吸的根源。
+ *
+ * v1.9.0 音频锚修正（2026-10-01，修复"画面恒定超前声音一个缓冲容量"）：
+ *   真机 soak 实证（恒速 1x、u=0、零 hold）writer 写出量领先可闻声一个缓冲存量
+ *   （aplay 管道 64KB + ALSA -B 600ms，蓝牙 ≈0.9s）——写出≠发声。锚改为
+ *   可闻位置 = 写出量 − 管道容量 − ALSA 缓冲（aplay -v setup 实测解析，失败保守回退）。
+ *   起播的假超前丢帧风暴（~160 帧）随之消失；停滞期间误差有界（≤一个缓冲），恢复自愈。
  */
+
+#define _GNU_SOURCE 1 /* F_GETPIPE_SZ 等 GNU 扩展（zig cc/glibc 默认不定义） */
 
 #include <jquick_config.h>
 #include <jsmodules/JSCModuleExtension.h>
@@ -57,7 +74,7 @@
 
 static void raise_audio_thread_prio(void); /* 定义在 RING 水位区（feeder 调用点更早） */
 
-#define PLAYER_VERSION "1.7.0"
+#define PLAYER_VERSION "2.0.0"
 #define FB_PATH "/dev/fb0"
 #define FB_PAN_PATH "/sys/class/graphics/fb0/pan"
 #define FB_MODES_PATH "/sys/class/graphics/fb0/modes"
@@ -67,20 +84,6 @@ static void raise_audio_thread_prio(void); /* 定义在 RING 水位区（feeder 
 #define FFMPEG_PATH "/usr/bin/ffmpeg"
 #define LOG_PATH "/tmp/vp_player.log"      /* 视频进程 stderr */
 #define LOG_AUDIO_PATH "/tmp/vp_audio.log" /* 音频独立进程 stderr（分文件防 O_TRUNC 互毁取证） */
-#define DM_FONT "/etc/miniapp/resources/fonts/HarmonyOS_Sans_SC_Regular.ttf" /* 中文（fontconfig 被禁 → drawtext 必须显式 fontfile，真机 CN_OK 验证） */
-#define DM_LANE_COUNT 4
-
-/* 预建 4 个弹幕泳道文本文件（drawtext 对 missing file 会报错拖垮滤镜链） */
-static void init_dm_files(void) {
-    int i;
-    for (i = 0; i < DM_LANE_COUNT; i++) {
-        char p[40];
-        int fd;
-        snprintf(p, sizeof(p), "/tmp/bili_dm%d.txt", i);
-        fd = open(p, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (fd >= 0) close(fd);
-    }
-}
 #define APLAY_PATH "/usr/bin/aplay"
 #define BT_LIST_CMD "/usr/bin/bluealsa-aplay -L 2>/dev/null"
 #define APLAY_LOG_PATH "/tmp/vp_aplay.log"
@@ -303,6 +306,13 @@ struct session {
     long underruns;             /* writer 等水位/空环轮次（≥1 即发生过欠载等待） */
     long wr_errors;             /* aplay 写失败次数（设备崩溃/断流） */
     long ring_drops;            /* 环满被丢弃的字节数（蓝牙消费慢的直接证据） */
+    long video_skips;           /* v1.8.0 丢帧快进计数（追音频钟时丢弃的帧数，status 诊断） */
+    struct timespec paused_at;  /* v1.8.0 暂停起点（resume 时补偿墙钟基准，防 paced 快进闪跳） */
+    long pipe_cap_bytes;        /* v1.9.0 aplay 管道容量（F_GETPIPE_SZ 实测，缺省按 64KB） */
+    long alsa_buf_bytes;        /* v1.9.0 ALSA 缓冲字节（aplay -v setup 解析；0=未解析到不修正） */
+    long audio_base_ms;         /* v1.9.3 音频时钟基准（writer_bytes==0 时的内容位置，= 起播 start_ms） */
+    long video_base_ms;         /* v1.9.3 视频时钟基准（断流恢复后独立重置，通常=audio_base） */
+    int video_retries;          /* v1.9.3 视频流中途断流重启次数（上限 5，防无限循环） */
 };
 
 static struct session g_s;
@@ -408,7 +418,8 @@ static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
     pid_t pid;
     char ss[32];
     char rbuf[32];
-    char vf[1200]; /* 4泳道弹幕 drawtext 链（fontfile + reload 每帧重读 textfile） */
+    char vf[128]; /* scale+transpose（弹幕烧帧已移除：drawtext×4 逐帧渲染占解码预算 ~20%，
+                   * 是弱视频卡顿主因——2026-10-01 用户实测关弹幕即流畅） */
     char arbuf[16]; /* 音频采样率（蓝牙 48000 / 内置 44100） */
     char hdr[544]; /* "Referer: <url>\r\n"，仅当设置了 referer 才用 */
     char logfd_path_check[8];
@@ -419,23 +430,25 @@ static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
         close(vpipe[1]);
         return -1;
     }
-    /* 视频 pipe 扩 1MB / 音频 256KB：视频 blit 的瞬时波动不再堵住 ffmpeg 的 mux 输出，
-     * 防止"视频 pipe 满 → 音频输出被牵连停顿"（零星卡顿的候选来源之一）。
-     * fcntl 失败保持默认 64KB（无害）。 */
-    fcntl(vpipe[1], F_SETPIPE_SZ, 1048576);
+    /* 视频 pipe 扩容（v1.9.2：8MB）/ 音频 256KB：
+     * 1MB≈2.2 帧 → ffmpeg 无蓄水空间，弱网突发停顿直接击穿实时（2026-10-01 soak 实测：
+     * drift 3s 内 +700~1000ms 的下载停顿波形，解码吞吐本身在 fps24 下够用）。
+     * 8MB≈17 帧≈0.7s 解码前置存量，停顿期由存量顶上（与音频侧管道+环形预蓄同思想）。
+     * 超过 pipe-max-size 需要 CAP_SYS_RESOURCE（app 以 root 跑，具备）；失败逐级回退，
+     * 全失败保持 64KB 默认（无害）。 */
+    {
+        int cap = 8 * 1024 * 1024;
+        while (cap >= 1048576) {
+            if (fcntl(vpipe[1], F_SETPIPE_SZ, cap) != -1) break;
+            cap /= 2;
+        }
+    }
     if (with_audio) fcntl(apipe[1], F_SETPIPE_SZ, 262144);
     /* 输出帧是"物理方向"的矩形（已转置），因此 scale 用 (out_h, out_w)。
-     * 弹幕：4 泳道 drawtext 烧进视频帧（与 blit 同源 → 与 UI 层永不互踩 = 零闪）。
-     * **drawtext 必须在 transpose 之前**：内容靠转置才在竖屏上正立，字与内容走同一条
-     * 变换链方向才一致（画在转置后=字方向错，真机实测竖排 bug）；转置前是 452x254 横帧，
-     * x=w-mod(t*SPEED\,w+text_w) 滚动、泳道 y 在 254 高度内，速度/相位/颜色四泳道错开。 */
+     * 弹幕烧帧已移除（v2.7.0）：drawtext×4 reload=1 逐帧重渲染文字占解码预算 ~20%，
+     * 弱稿件上把软解压到 1x 以下（CPU 100% 实证）→ 用户决策整体移除弹幕功能。 */
     snprintf(vf, sizeof(vf),
-             "scale=%d:%d"
-             ",drawtext=fontfile=" DM_FONT ":textfile=/tmp/bili_dm0.txt:reload=1:fontcolor=white:fontsize=17:x=w-mod(t*110\\,w+text_w):y=8"
-             ",drawtext=fontfile=" DM_FONT ":textfile=/tmp/bili_dm1.txt:reload=1:fontcolor=0xFFFFE0:fontsize=17:x=w-mod(t*142\\,w+text_w):y=72"
-             ",drawtext=fontfile=" DM_FONT ":textfile=/tmp/bili_dm2.txt:reload=1:fontcolor=0xA0E8FF:fontsize=17:x=w-mod(t*90\\,w+text_w):y=136"
-             ",drawtext=fontfile=" DM_FONT ":textfile=/tmp/bili_dm3.txt:reload=1:fontcolor=0xFFC8D8:fontsize=17:x=w-mod(t*166\\,w+text_w):y=200"
-             ",transpose=%d,format=rgb32",
+             "scale=%d:%d,transpose=%d,format=rgb32",
              s->out_h, s->out_w, s->transpose);
     snprintf(ss, sizeof(ss), "%ld.%03ld", (long)(start_ms / 1000), (long)(start_ms % 1000));
     snprintf(rbuf, sizeof(rbuf), "%d", s->fps);
@@ -468,7 +481,7 @@ static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
             close(logfd);
         }
         if (with_audio) {
-            char *argv[56]; /* 双输入 × (probesize/rw_timeout/ss/ua/headers) 后最多 50 项，留 NULL 余量 */
+            char *argv[72]; /* 双输入 × (probesize/rw_timeout/reconnect/ss/ua/headers) 后最多 66 项，留 NULL 余量 */
             int i = 0;
             argv[i++] = "ffmpeg";
             argv[i++] = "-nostdin";
@@ -476,7 +489,11 @@ static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
             argv[i++] = "-loglevel";
             argv[i++] = "error";
             argv[i++] = "-threads";
-            argv[i++] = "3"; /* 4×A53 留一核给音频链/系统，防解码占满引发周期抢占 */
+            argv[i++] = "4"; /* v1.9.5：4 线程吃满 4×A53（v2.6.0 起源分辨率受 310K 像素预算约束，
+                              * 内存 ~10MB 可控）；音频链多为阻塞等待，实测不需要独占核 */
+            argv[i++] = "-skip_loop_filter";
+            argv[i++] = "all"; /* v1.9.5：跳过 h264 环路滤波（解码成本 ~25%）——254px 屏上
+                                * 去块纹路不可见，换来的吞吐余量直接决定是否掉帧 */
             if (s->user_agent[0]) {
                 argv[i++] = "-user_agent";
                 argv[i++] = s->user_agent;
@@ -496,6 +513,12 @@ static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
             argv[i++] = "5000000";
             argv[i++] = "-rw_timeout";
             argv[i++] = "15000000"; /* 15s 读写超时：烂节点挂起 → ffmpeg 显式失败可诊断，永不无期等待 */
+            argv[i++] = "-reconnect";
+            argv[i++] = "1"; /* v1.9.3：CDN 断流协议级重连（Range 续传），修"视频/音频进程中途退出" */
+            argv[i++] = "-reconnect_streamed";
+            argv[i++] = "1";
+            argv[i++] = "-reconnect_delay_max";
+            argv[i++] = "10";
             argv[i++] = "-ss";
             argv[i++] = ss;
             argv[i++] = "-i";
@@ -509,6 +532,12 @@ static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
                 argv[i++] = "5000000";
                 argv[i++] = "-rw_timeout";
                 argv[i++] = "15000000";
+                argv[i++] = "-reconnect";
+                argv[i++] = "1";
+                argv[i++] = "-reconnect_streamed";
+                argv[i++] = "1";
+                argv[i++] = "-reconnect_delay_max";
+                argv[i++] = "10";
                 argv[i++] = "-ss";
                 argv[i++] = ss;
                 if (s->user_agent[0]) {
@@ -544,9 +573,13 @@ static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
             argv[i++] = "s16le";
             argv[i++] = "pipe:4";
             argv[i] = NULL;
+            /* 视频 ffmpeg 提优先级（v1.9.4，nice -5 与音频解码同档）：软解+滤镜链吞吐
+             * 贴实时线时，JS/UI 的周期性突发会瞬时挤占解码线程 → 掉帧积压。音画连续
+             * 优先于 UI 丝滑（UI 突发短，A53×4 下仍有余量）。root 下生效，失败无害。 */
+            setpriority(PRIO_PROCESS, 0, -5);
             execv(FFMPEG_PATH, argv);
         } else {
-            char *argv[40];
+            char *argv[48];
             int i = 0;
             argv[i++] = "ffmpeg";
             argv[i++] = "-nostdin";
@@ -554,7 +587,9 @@ static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
             argv[i++] = "-loglevel";
             argv[i++] = "error";
             argv[i++] = "-threads";
-            argv[i++] = "3"; /* 同音频分支：留一核 */
+            argv[i++] = "4"; /* v1.9.5：同上（源分辨率受像素预算约束） */
+            argv[i++] = "-skip_loop_filter";
+            argv[i++] = "all"; /* v1.9.5：同上（解码降本 ~25%） */
             /* 拆进程后 dash 视频走本分支 —— 探测上限必须与音频分支一致：
              * 缺失时默认 probesize(5MB) 在烂网络上 = 首帧 10s+/seek 12s 零帧（1.6.0 实测） */
             argv[i++] = "-probesize";
@@ -563,6 +598,12 @@ static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
             argv[i++] = "5000000";
             argv[i++] = "-rw_timeout";
             argv[i++] = "15000000";
+            argv[i++] = "-reconnect";
+            argv[i++] = "1"; /* v1.9.3：CDN 断流协议级重连（Range 续传） */
+            argv[i++] = "-reconnect_streamed";
+            argv[i++] = "1";
+            argv[i++] = "-reconnect_delay_max";
+            argv[i++] = "10";
             if (s->user_agent[0]) {
                 argv[i++] = "-user_agent";
                 argv[i++] = s->user_agent;
@@ -587,6 +628,7 @@ static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
             argv[i++] = "rawvideo";
             argv[i++] = "pipe:3";
             argv[i] = NULL;
+            setpriority(PRIO_PROCESS, 0, -5); /* 同上（v1.9.4）：DASH 视频分支 */
             execv(FFMPEG_PATH, argv);
         }
         _exit(127);
@@ -661,7 +703,7 @@ static int spawn_ffaudio(struct session *s) {
     if (pid == 0) {
         int logfd;
         int i = 0;
-        char *argv[40];
+        char *argv[48];
         setpgid(0, 0);
         if (dup2(apipe[1], 4) < 0) _exit(126);
         close(apipe[0]);
@@ -695,6 +737,12 @@ static int spawn_ffaudio(struct session *s) {
         argv[i++] = "5000000";
         argv[i++] = "-rw_timeout";
         argv[i++] = "15000000";
+        argv[i++] = "-reconnect";
+        argv[i++] = "1"; /* v1.9.3：音频轨断流重连（soak 末段实测过 CDN 断流杀进程） */
+        argv[i++] = "-reconnect_streamed";
+        argv[i++] = "1";
+        argv[i++] = "-reconnect_delay_max";
+        argv[i++] = "10";
         argv[i++] = "-ss";
         argv[i++] = ss;
         argv[i++] = "-i";
@@ -758,21 +806,17 @@ static int spawn_aplay(struct session *s, const char *device) {
         close(ppipe[0]);
         close(ppipe[1]);
         {
-            int devnull = open("/dev/null", O_WRONLY);
-            if (devnull >= 0) {
-                dup2(devnull, 1);
-                close(devnull);
-            }
-            /* aplay 的 stderr 落盘：蓝牙 PCM 打不开/参数不对时能直接看到原因 */
-            {
-                int alog = open(APLAY_LOG_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-                if (alog >= 0) {
-                    dup2(alog, 2);
-                    close(alog);
-                }
+            /* aplay 的 stdout+stderr 都落盘（v1.9.0 起加 -v：setup dump 含 ALSA 实际
+             * buffer_size/start_threshold，是音频锚"未发声存量"的权威实测值） */
+            int alog = open(APLAY_LOG_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (alog >= 0) {
+                dup2(alog, 1);
+                dup2(alog, 2);
+                close(alog);
             }
         }
         argv[i++] = "aplay";
+        argv[i++] = "-v"; /* v1.9.0：setup dump → APLAY_LOG_PATH（probe_alsa_buffer 解析） */
         /* 诊断期不加 -q：ALSA underrun/overrun 告警进 /tmp/vp_aplay.log（音频卡顿关键证据） */
         if (use && use[0]) {
             argv[i++] = "-D";
@@ -805,6 +849,11 @@ static int spawn_aplay(struct session *s, const char *device) {
     close(ppipe[0]);
     s->aplay_pid = pid;
     s->aplay_fd = ppipe[1];
+    /* v1.9.0：实测管道容量（未设 F_SETPIPE_SZ 通常是 64KB）——音频锚要扣的"未发声存量"之一 */
+    {
+        int cap = fcntl(ppipe[1], F_GETPIPE_SZ);
+        s->pipe_cap_bytes = cap > 0 ? (long)cap : 65536;
+    }
     return 0;
 }
 
@@ -815,6 +864,55 @@ static int spawn_aplay(struct session *s, const char *device) {
  * 若这里再去抢 s->mu 会直接死锁。stop_flag 先于 kill/join 置位，
  * 因此线程能安全地写完最后状态并退出。 */
 
+/* ---- v1.8.0 音画对齐参数 ---- */
+#define AV_SKIP_MS 100     /* 帧落后音频钟超过此值 → 丢帧快进（≈3-4 帧 @24fps；漂移有界的关键） */
+#define AV_WAIT_CAP_MS 200 /* durl 单进程模式每帧等待上限（video pipe 满互锁死锁的解扣） */
+
+/* 音频可闻锚（v1.9.0）：writer 写出量 − "已写出但尚未发声"的存量。
+ * 存量 = aplay 管道容量 + ALSA 缓冲：aplay 消费速率恒等于播放速率
+ * （2026-09-30 真机 soak 实测 writer 恒速 1x、u=0、零 hold → 缓冲恒满），
+ * 写出量恒领先可闻声一个缓冲容量；不扣掉它，起播 800ms 预蓄会让视频
+ * 丢帧追一个假超前，蓝牙(-B 600000)下画面全程领先声音 ~0.9s。
+ * 两个用量在稳态下与启动阈值无关（填满即恒定）；供给停滞时真实存量下降、
+ * 本估算偏高 → 画面滞后 ≤ 一个缓冲容量，恢复供给后经丢帧追赶自动回正。
+ * 返回相对 start_ms 的毫秒（W 从会话起计）。 */
+static long long audio_anchor_ms(const struct session *s) {
+    double bytes_per_ms = ((double)(s->audio_rate > 0 ? s->audio_rate : 44100)) * 4.0 / 1000.0;
+    long long audible = (long long)s->writer_bytes - s->pipe_cap_bytes - s->alsa_buf_bytes;
+    if (audible < 0) audible = 0;
+    return (long long)((double)audible / bytes_per_ms);
+}
+
+/* 解析 aplay -v 的 setup dump（APLAY_LOG_PATH）取 ALSA 实际 buffer_size（帧）。
+ * 调用时机 = writer 预蓄完成后、开写前（距 aplay 起动 ≥800ms，日志必已落盘）。
+ * 解析失败保守回退：BT 用 -B 600ms 名义值；扬声器不修正（宁勿过度回退）。 */
+static void probe_alsa_buffer(struct session *s) {
+    char buf[4096];
+    int fd = open(APLAY_LOG_PATH, O_RDONLY);
+    if (fd < 0) return;
+    {
+        ssize_t r = read(fd, buf, sizeof(buf) - 1);
+        close(fd);
+        if (r > 0) {
+            const char *p;
+            buf[r] = '\0';
+            p = strstr(buf, "buffer_size");
+            if (p) {
+                long frames = -1;
+                p = strchr(p, ':');
+                if (p) frames = strtol(p + 1, NULL, 10);
+                if (frames > 0 && frames < 4000000) {
+                    s->alsa_buf_bytes = frames * 4; /* S16_LE × 2ch */
+                    return;
+                }
+            }
+        }
+    }
+    if (s->audio_is_bt) {
+        s->alsa_buf_bytes = (long)(0.6 * (double)(s->audio_rate > 0 ? s->audio_rate : 44100) * 4.0);
+    }
+}
+
 static void *video_thread(void *arg) {
     struct session *s = (struct session *)arg;
     size_t fsz = (size_t)s->out_w * (size_t)s->out_h * 4u;
@@ -824,6 +922,7 @@ static void *video_thread(void *arg) {
     while (!s->stop_flag) {
         struct pollfd pfd;
         int pr;
+        int do_blit = 1;
         pfd.fd = s->video_fd;
         pfd.events = POLLIN;
         pfd.revents = 0;
@@ -838,43 +937,66 @@ static void *video_thread(void *arg) {
             failed = 1;
             break;
         }
+        /* ---- 播出节拍（v1.8.0 重写，锚 = 音频时钟 = writer 写出量换算的播放位置）----
+         * 帧到时（apos ≥ due）→ 立即贴屏；帧落后（apos ≥ due+AV_SKIP_MS）→ 丢帧快进
+         * 追钟；音频时钟死亡（audio_alive=0）→ 墙钟节拍接管（画面续播，声音已降级）。
+         * v1.7.1 首帧免钟保留：frames==0 跳过等待直接落屏——起播门等首帧、首帧等 writer
+         * 时钟会互锁（writer 不开写则 apos 恒 0，永远追不上 due）。
+         * 旧"停滞 8s 转墙钟"移除：音频供给停滞（网络卡）时画面冻结等声才是同步正解——
+         * 音频进程 rw_timeout=15s 必然 EOF/出错 → audio_alive=0 才转墙钟；旧的 8s 转墙钟
+         * 会在恢复后留下"视频超前音频"的整段错位，且等待期间的超前漂移永远无法回吸。 */
         if (s->paced) {
-            long long elapsed = ms_since(&s->started_at);
             long long target = (long long)((double)(s->frames + 1) * 1000.0 / (double)s->fps);
+            long long elapsed = ms_since(&s->started_at);
             while (!s->stop_flag && elapsed < target) {
                 usleep(5000);
                 elapsed = ms_since(&s->started_at);
             }
             if (s->stop_flag) break;
-        } else if (s->audio_input[0] && s->audio_enabled) {
-            /* v1.6.0 拆进程后的音画同步：以真实播放位置（writer 写出量）为时钟。
-             * 视频超前 → 等到帧到时；音频进程死/时钟停滞 8s → 转墙钟节拍（画面继续，声音降级）。
-             * v1.7.1 首帧免钟：frames==0 时跳过等待直接落屏——起播门等首帧、首帧等 writer
-             * 时钟会互锁（writer 不开写则 apos 恒 start_ms，永远追不上 due）。 */
-            long long due = s->start_ms + (long long)((double)(s->frames + 1) * 1000.0 / (double)s->fps);
+            if (elapsed >= target + AV_SKIP_MS) {
+                /* 墙钟模式同样丢帧追钟（音频死亡/暂停恢复后的缺口按读速追赶） */
+                s->video_skips++;
+                do_blit = (now_seconds() - s->last_blit_at) > 0.6; /* 活性保障，见下 */
+            }
+        } else if (s->audio_enabled) {
+            long long due = s->video_base_ms + (long long)((double)(s->frames + 1) * 1000.0 / (double)s->fps);
+            long long apos = s->audio_base_ms + audio_anchor_ms(s);
             int waited = 0;
-            while (!s->stop_flag && s->audio_alive && s->frames > 0) {
-                double bytes_per_ms = ((double)(s->audio_rate > 0 ? s->audio_rate : 44100)) * 4.0 / 1000.0;
-                long long apos = s->start_ms + (long long)((double)s->writer_bytes / bytes_per_ms);
-                if (apos >= due) break;
+            /* durl（音视频同进程）等待限幅：视频线程不读帧 → video pipe 满 → ffmpeg 阻塞
+             * → 音频断供 → 锚停走 → 继续等 = 死锁。限幅后贴屏放行 pipe 解锁 ffmpeg。
+             * DASH 音频独立进程，无此耦合 → 不限幅（供给停滞时画面冻结等声）。 */
+            int wait_cap = s->audio_input[0] ? 0 : AV_WAIT_CAP_MS;
+            while (!s->stop_flag && s->audio_alive && s->frames > 0 && apos < due) {
                 usleep(2000);
                 waited += 2;
-                if (waited > 8000) break;
+                if (wait_cap && waited >= wait_cap) break;
+                apos = s->start_ms + audio_anchor_ms(s);
             }
             if (s->stop_flag) break;
-            if (s->frames > 0 && (!s->audio_alive || waited > 8000)) s->paced = 1; /* 音频时钟不可用 → 墙钟接管 */
+            if (s->frames > 0 && !s->audio_alive) {
+                s->paced = 1; /* 音频时钟死亡 → 墙钟接管 */
+            } else if (apos >= due + AV_SKIP_MS) {
+                /* 落后音频钟：丢积压帧追钟（v1.9.1）+ 活性保障（v1.9.4）。
+                 * 全丢的问题：生产端恰为 1x 时积压永不收敛（读帧速率=生产速率，
+                 * 丢帧并不推进追赶）→ 画面冻结到 JS 巡检兜底（真机实测 8-20s 黑画面）。
+                 * 现每 0.6s 强制贴最新帧：画面低帧率但"活着"；配合 JS 侧降负载
+                 * （v2.7.0 起无弹幕渲染负担）余量回来后积压自然排空。 */
+                s->video_skips++;
+                do_blit = (now_seconds() - s->last_blit_at) > 0.6;
+            }
         }
         s->frames++;
-        s->position_ms = s->start_ms + (long)((double)s->frames * 1000.0 / (double)s->fps);
+        s->position_ms = s->video_base_ms + (long)((double)s->frames * 1000.0 / (double)s->fps);
         s->frame_valid = 1;
-        /* 帧已产出：放行音频起播门 + 刷新巡检基准（render_paused 时画面被盖但帧流未断，
-         * 巡检的 commentsOpen 条件在 JS 侧兜住用户主动遮挡的场景）。 */
+        /* 帧已产出：放行音频起播门（丢弃帧也算产出——门只关心视频链路活着）。
+         * 巡检基准 last_blit_at 只在真贴屏时刷新：丢帧追钟期间全丢不贴，直到追上；
+         * 积压吸收期最长 ~读速（1s 积压 ≈ 240ms），远小于巡检 8s 阈值，不会误报停帧。 */
         s->video_first_frame = 1;
-        s->last_blit_at = now_seconds();
+        if (do_blit) s->last_blit_at = now_seconds();
         /* render_paused：评论面板/系统UI覆盖时暂停 fb 输出（解码/位置/音频照常）。
          * 根因（2026-09-24 真机三现象钉死）：视频矩形像素归 blit（33ms 写两块）专属，
          * 任何 UI 覆盖都会与其交替抢帧（弹幕层/评论面板/下拉控制中心均闪；暂停后不闪=blit 停）。 */
-        if (!s->render_paused && fb_blit(buf, s->rect_x, s->rect_y, s->rect_w, s->rect_h) != 0) {
+        if (do_blit && !s->render_paused && fb_blit(buf, s->rect_x, s->rect_y, s->rect_w, s->rect_h) != 0) {
             set_error(s, "framebuffer 写入失败");
             s->state = ST_ERROR;
             return NULL;
@@ -882,6 +1004,41 @@ static void *video_thread(void *arg) {
     }
 
     if (s->stop_flag) return NULL;
+
+    if (failed && s->frames > 0 && s->video_retries < 5 &&
+        s->audio_input[0] && s->audio_enabled && s->audio_alive &&
+        !(s->duration_ms > 0 && s->position_ms + 2000 >= s->start_ms + s->duration_ms)) {
+        /* 视频流中途断流（CDN 断开/rw_timeout/进程被杀）≠ 播放结束（v1.9.3，修
+         * "画面显示已播完但声音还在播"）。旧逻辑把任何视频进程退出都判 ENDED。
+         * 现以当前可闻位置重启视频流：音频侧（独立进程+aplay）完全不动，时钟连续；
+         * 断流间隙由丢帧追钟自然吸收。仅 DASH 拆分模式可安全重启（durl 同进程会
+         * 连带音频，维持原判，靠 -reconnect 兜底）。上限 5 次防无限循环；
+         * 已接近片尾（duration 已知）仍按正常结束。 */
+        s->video_retries++;
+        s->retried_no_audio = 1; /* 视频链已证可产出：后续零帧失败不再走"无音轨重试"（防从头重放） */
+        close_fd(&s->video_fd);
+        kill_child(&s->ff_pid);
+        s->video_base_ms = s->audio_base_ms + audio_anchor_ms(s);
+        s->frames = 0;
+        s->position_ms = s->video_base_ms;
+        s->video_first_frame = 1; /* 起播门已过，重启不再等门 */
+        s->last_blit_at = now_seconds(); /* 巡检基线重置，防恢复期被误判停帧 */
+        clock_gettime(CLOCK_MONOTONIC, &s->started_at); /* paced 基线一并重置 */
+        if (spawn_ffmpeg(s, s->video_base_ms, 0) == 0) {
+            return video_thread(arg); /* 与无音轨重试同构：重启后重入主循环 */
+        }
+        capture_log_tail(s);
+        if (!s->error[0]) set_error(s, "视频流断线重连失败");
+        s->state = ST_ERROR;
+        return NULL;
+    }
+
+    if (failed && s->frames == 0 && s->audio_input[0] && s->video_retries > 0) {
+        /* 断流恢复重启后仍零帧 = 源确实耗尽（未知时长的视频正常结尾）→ 按结束处理，
+         * 不落入下面的无音轨重试（那会从头重放）也不报错误 */
+        s->state = ST_ENDED;
+        return NULL;
+    }
 
     if (failed && s->frames == 0 && s->audio_enabled && !s->retried_no_audio) {
         /* 无音轨时 ffmpeg 会因第二个输出没有流而整体失败：去掉音频输出重来一次 */
@@ -1029,6 +1186,7 @@ static void *audio_writer_thread(void *arg) {
     size_t start_level = rate_bytes * RING_START_MS / 1000;
     if (start_level > high_level) start_level = high_level;
     while (!s->stop_flag && s->rlen < start_level) usleep(20000);
+    probe_alsa_buffer(s); /* v1.9.0：开写前锁定 ALSA 缓冲实测值（音频锚扣减用） */
     /* A/V 起播门（v1.7.1）：视频首帧产出前不开写——弱网下音频(66kbps)常先缓冲完先出声，
      * 画面几秒后才来（先声后画）。门期内 ring 继续蓄（上限 2.7s 无损）、视频 pipe 堵塞
      * 在 1MB 缓冲（ffmpeg 反压等待）。15s 超时放行（网络极差先出声再由 JS 巡检 seek 对齐），
@@ -1137,13 +1295,18 @@ static void session_reset(struct session *s) {
     s->underruns = 0;
     s->wr_errors = 0;
     s->ring_drops = 0;
+    s->video_skips = 0;
+    s->pipe_cap_bytes = 65536; /* F_GETPIPE_SZ 实测前按内核默认 */
+    s->alsa_buf_bytes = 0;
+    s->audio_base_ms = 0; /* v1.9.3 时钟基准（session_start 里对齐 start_ms） */
+    s->video_base_ms = 0;
+    s->video_retries = 0;
     ring_reset(s);
 }
 
 /* 启动会话（调用方需保证已有会话已停止） */
 static int session_start(struct session *s, long start_ms, int with_audio, const char *audio_device) {
     s->stop_flag = 0;
-    init_dm_files(); /* 弹幕泳道文件清空（每开播重置） */
     s->frames = 0;
     s->position_ms = start_ms;
     s->start_ms = start_ms;
@@ -1158,6 +1321,12 @@ static int session_start(struct session *s, long start_ms, int with_audio, const
     s->underruns = 0;
     s->wr_errors = 0;
     s->ring_drops = 0;
+    s->video_skips = 0;
+    s->pipe_cap_bytes = 65536; /* F_GETPIPE_SZ 实测前按内核默认 */
+    s->alsa_buf_bytes = 0;
+    s->audio_base_ms = start_ms; /* v1.9.3 时钟基准：writer_bytes==0 ⇔ 内容位置 start_ms */
+    s->video_base_ms = start_ms;
+    s->video_retries = 0;
     ring_reset(s);
     /* 音频设备/采样率：每次 open（audio_rate==0 触发）探测一次；seek 重启复用同值保持一致。
      * 蓝牙(auto 或显式 bluealsa)→ 48000；内置/speaker → 44100。 */
@@ -1494,42 +1663,6 @@ static JSValue js_resumeRender(JSContext *ctx, JSValueConst this_val, int argc, 
     return JS_UNDEFINED;
 }
 
-/* writeDm(idx 0..3, text)：写弹幕泳道文本文件（drawtext reload=1 每帧重读 → 即时生效）。
- * text 空 = 清空该泳道；UTF-8 原样写入（中文经 fontfile 渲染）。 */
-static JSValue js_writeDm(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-    int idx = 0;
-    size_t len = 0;
-    const char *text;
-    char path[40];
-    int fd;
-    (void)this_val;
-    if (argc < 2) return JS_ThrowTypeError(ctx, "writeDm(idx, text)");
-    JS_ToInt32(ctx, &idx, argv[0]);
-    if (idx < 0 || idx >= DM_LANE_COUNT) return JS_ThrowRangeError(ctx, "idx 0..3");
-    text = JS_ToCStringLen(ctx, &len, argv[1]);
-    if (!text) return JS_EXCEPTION;
-    if (len > 240) {
-        JS_FreeCString(ctx, text);
-        return JS_ThrowRangeError(ctx, "text too long");
-    }
-    snprintf(path, sizeof(path), "/tmp/bili_dm%d.txt", idx);
-    fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) {
-        JS_FreeCString(ctx, text);
-        return JS_ThrowInternalError(ctx, "open dm file failed");
-    }
-    if (len > 0) {
-        if (write(fd, text, len) < 0) {
-            close(fd);
-            JS_FreeCString(ctx, text);
-            return JS_ThrowInternalError(ctx, "write failed");
-        }
-    }
-    close(fd);
-    JS_FreeCString(ctx, text);
-    return JS_UNDEFINED;
-}
-
 static JSValue js_status(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     struct session *s = &g_s;
     JSValue res = JS_NewObject(ctx);
@@ -1559,6 +1692,22 @@ static JSValue js_status(JSContext *ctx, JSValueConst this_val, int argc, JSValu
     mk_int(ctx, "gateWaitMs", (int)s->gate_wait_ms, res);
     /* 门进行中（等首帧/未放行）→ JS 巡检让位，防弱网首帧 8~15s 区间被误判停帧打断门 */
     mk_bool(ctx, "gateActive", s->audio_enabled && !s->gate_passed, res);
+    /* 音画漂移诊断（v1.8.0 出，v1.9.0 改用可闻锚）：可闻音频位置 − 已读帧内容位置，
+     * 均相对本会话起点。正 = 声音超前画面（丢帧快进应把它压回 ±AV_SKIP_MS 内）；
+     * 负 = 画面超前。丢帧快进计数 videoSkips 持续增长 = 软解吞吐贴实时线（复杂场景）。
+     * audioBufMs = 锚修正量（管道+ALSA 缓冲 ≈ 写出量与可闻声的固有差），恒定即正常。 */
+    if (s->audio_enabled) {
+        double bytes_per_ms = ((double)(s->audio_rate > 0 ? s->audio_rate : 44100)) * 4.0 / 1000.0;
+        long long content = s->video_base_ms + (long long)((double)s->frames * 1000.0 / (double)s->fps);
+        long long apos = s->audio_base_ms + audio_anchor_ms(s);
+        mk_int(ctx, "avDriftMs", (long)(apos - content), res);
+        mk_int(ctx, "audioBufMs", (long)(((double)(s->pipe_cap_bytes + s->alsa_buf_bytes)) / bytes_per_ms), res);
+    } else {
+        mk_int(ctx, "avDriftMs", 0, res);
+        mk_int(ctx, "audioBufMs", 0, res);
+    }
+    mk_int(ctx, "videoSkips", s->video_skips, res);
+    mk_int(ctx, "videoRestarts", s->video_retries, res); /* v1.9.3：>0 即发生过视频断流重启 */
     mk_bool(ctx, "audioIsBt", s->audio_is_bt, res);
     mk_str(ctx, "audioDevice", s->audio_dev[0] ? s->audio_dev : NULL, res);
     mk_bool(ctx, "frameValid", s->frame_valid, res);
@@ -1580,6 +1729,7 @@ static JSValue js_pause(JSContext *ctx, JSValueConst this_val, int argc, JSValue
     if (s->has_session && s->state == ST_PLAYING) {
         if (s->ff_pid > 0) kill(s->ff_pid, SIGSTOP);
         if (s->aplay_pid > 0) kill(s->aplay_pid, SIGSTOP);
+        clock_gettime(CLOCK_MONOTONIC, &s->paused_at); /* v1.8.0：记暂停起点 */
         s->state = ST_PAUSED;
     }
     mk_bool(ctx, "ok", 1, res);
@@ -1599,6 +1749,21 @@ static JSValue js_resume(JSContext *ctx, JSValueConst this_val, int argc, JSValu
     if (s->has_session && s->state == ST_PAUSED) {
         if (s->ff_pid > 0) kill(s->ff_pid, SIGCONT);
         if (s->aplay_pid > 0) kill(s->aplay_pid, SIGCONT);
+        /* v1.8.0：把暂停时长补偿进墙钟基准 started_at——否则 paced（无音频/音频死亡）模式
+         * 恢复后 target 远超 due，画面会以丢帧快进方式追赶整段暂停时长（闪跳）。
+         * 音频时钟模式不受影响（锚 = writer 字节量，暂停期间 aplay 被 SIGSTOP → writer
+         * 阻塞在管道写上 → 锚天然冻结，与画面一致）。 */
+        {
+            long paused_ms = (long)ms_since(&s->paused_at);
+            struct timespec t = s->started_at;
+            t.tv_sec += paused_ms / 1000;
+            t.tv_nsec += (paused_ms % 1000) * 1000000L;
+            if (t.tv_nsec >= 1000000000L) {
+                t.tv_sec += 1;
+                t.tv_nsec -= 1000000000L;
+            }
+            s->started_at = t;
+        }
         s->state = ST_PLAYING;
     }
     mk_bool(ctx, "ok", 1, res);
@@ -1717,7 +1882,6 @@ static int player_module_init(JSContext *ctx, JSModuleDef *m) {
     JS_SetPropertyStr(ctx, def, "open", JS_NewCFunction(ctx, js_open, "open", 13));
     JS_SetPropertyStr(ctx, def, "pauseRender", JS_NewCFunction(ctx, js_pauseRender, "pauseRender", 0));
     JS_SetPropertyStr(ctx, def, "resumeRender", JS_NewCFunction(ctx, js_resumeRender, "resumeRender", 0));
-    JS_SetPropertyStr(ctx, def, "writeDm", JS_NewCFunction(ctx, js_writeDm, "writeDm", 2));
     JS_SetPropertyStr(ctx, def, "pause", JS_NewCFunction(ctx, js_pause, "pause", 0));
     JS_SetPropertyStr(ctx, def, "resume", JS_NewCFunction(ctx, js_resume, "resume", 0));
     JS_SetPropertyStr(ctx, def, "seek", JS_NewCFunction(ctx, js_seek, "seek", 1));
@@ -1734,7 +1898,6 @@ static int player_module_init(JSContext *ctx, JSModuleDef *m) {
     JS_SetModuleExport(ctx, m, "status", JS_NewCFunction(ctx, js_status, "status", 0));
     JS_SetModuleExport(ctx, m, "pauseRender", JS_NewCFunction(ctx, js_pauseRender, "pauseRender", 0));
     JS_SetModuleExport(ctx, m, "resumeRender", JS_NewCFunction(ctx, js_resumeRender, "resumeRender", 0));
-    JS_SetModuleExport(ctx, m, "writeDm", JS_NewCFunction(ctx, js_writeDm, "writeDm", 2));
     JS_SetModuleExport(ctx, m, "stop", JS_NewCFunction(ctx, js_stop, "stop", 0));
     JS_SetModuleExport(ctx, m, "redraw", JS_NewCFunction(ctx, js_redraw, "redraw", 0));
     JS_SetModuleExport(ctx, m, "release", JS_NewCFunction(ctx, js_release, "release", 0));
@@ -1754,7 +1917,6 @@ static JSModuleDef *player_module_load(JSContext *ctx, const char *moduleName) {
         JS_AddModuleExport(ctx, m, "status");
         JS_AddModuleExport(ctx, m, "pauseRender");
         JS_AddModuleExport(ctx, m, "resumeRender");
-        JS_AddModuleExport(ctx, m, "writeDm");
         JS_AddModuleExport(ctx, m, "stop");
         JS_AddModuleExport(ctx, m, "redraw");
         JS_AddModuleExport(ctx, m, "release");

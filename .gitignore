@@ -17,3 +17,6 @@ PenBili.zip
 .DS_Store
 Thumbs.db
 *.swp
+
+# 中间迭代构建产物（仅发布件 PenBili.amr 入库）
+8002026091900004.*.amr

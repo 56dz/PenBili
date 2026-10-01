@@ -67,7 +67,8 @@ async function main() {
     hostOf,
     dimsForQn,
     QN_LADDER,
-    DASH_QN_LADDER
+    DASH_QN_LADDER,
+    HTML5_FPS
   } = await import('../src/services/bili/playurl.js');
   const {
     buildOpenArgs,
@@ -123,7 +124,6 @@ async function main() {
     SEEK_STEP_MS
   } = await import('../src/services/play_session.js');
   const { fetchReplies, addReply, parseReplies, normalizeReply } = await import('../src/services/bili/reply.js');
-  const { parseDanmakuSeg, toBytes, segUrl, segCount, isDanmakuBytes } = await import('../src/services/bili/danmaku.js');
   const fsx = require('fs');
   const pathx = require('path');
   const fixture = (n) => JSON.parse(fsx.readFileSync(pathx.join(__dirname, '..', 'api-mock', 'fixtures', n), 'utf8'));
@@ -331,7 +331,8 @@ async function main() {
     assert.strictEqual(p.high_quality, 1);
     assert.strictEqual(p.fourk, 0);
     assert.ok(QN_LADDER.every((q) => q < 64));
-    assert.deepStrictEqual(QN_LADDER, [32, 16]);
+    // v2.6.1：durl 也只走 16——qn32 durl 实测 852×480(409K px) 超解码预算(310K)，再次压垮软解
+    assert.deepStrictEqual(QN_LADDER, [16]);
     // DASH 只走 id16（640x360）：dash id32=852x480 把 A53 打到 0.7x 实时（2h 长片实测 underrun 1.4s 循环）
     assert.deepStrictEqual(DASH_QN_LADDER, [16]);
     // DASH 参数集：fnval=16 且**不带 platform=html5**（服务端见 html5 强制降级 durl，真机回退日志坐实）
@@ -893,48 +894,6 @@ async function main() {
     assert.ok(bad.message.indexOf('-111') >= 0, bad.message);
   });
 
-  // ---------------- danmaku 真实弹幕（protobuf） ----------------
-  test('danmaku: fixture 全量解码 + wire 判定 + 分包参数', () => {
-    const raw = fsx.readFileSync(pathx.join(__dirname, '..', 'api-mock', 'fixtures', 'dm_seg.bin'));
-    const bytes = new Uint8Array(raw);
-    assert.strictEqual(isDanmakuBytes(bytes), true, '0x0A 头放行');
-    const r = parseDanmakuSeg(bytes);
-    assert.strictEqual(r.ok, true, r.reason);
-    // 炮姐分包1：5863 条原始 → mode 7（高级 862 条）被过滤
-    assert.ok(r.items.length >= 4500, 'n=' + r.items.length);
-    assert.ok(r.items.length <= 5863);
-    let mx = -1;
-    for (const it of r.items) {
-      assert.ok(it.p >= 0 && it.text.length > 0);
-      if (it.p > mx) mx = it.p;
-    }
-    assert.ok(mx < 360000, 'progress 限定 6min 分包 mx=' + mx);
-    assert.ok(r.items.some((it) => it.text.indexOf('前方高能') >= 0), '中文 UTF-8 解码');
-    // 坏输入：HTML/JSON 头被 wire 判定排除；field4 状态包（0x22）放行给解析器双保险
-    assert.strictEqual(parseDanmakuSeg(null).ok, false);
-    assert.strictEqual(parseDanmakuSeg(new Uint8Array([0x3c, 0x21])).ok, false);
-    assert.strictEqual(isDanmakuBytes(new Uint8Array([0x3c, 0x21])), false, '<头 wire4 排除');
-    assert.strictEqual(isDanmakuBytes(new Uint8Array([0x7b])), false, '{头 wire3 排除');
-    assert.strictEqual(isDanmakuBytes(new Uint8Array([0x22, 0x04, 0x00, 0xc0, 0xfc, 0x15])), true, 'field4 状态包放行');
-    // 空 elems 状态包（真机 193 字节形态）→ 0 条不报错（空段续拉由调用方负责）
-    const stat = parseDanmakuSeg(new Uint8Array([0x22, 0x04, 0x00, 0xc0, 0xfc, 0x15, 0x2a, 0xb8, 0x03, 0xff, 0xff, 0x7f]));
-    assert.strictEqual(stat.ok, true, stat.reason);
-    assert.strictEqual(stat.items.length, 0);
-    // toBytes 字符串 latin1 降级
-    const s = toBytes('A');
-    assert.strictEqual(s.length, 1);
-    assert.strictEqual(s[0], 65);
-    // segUrl 形态：oid=cid（collect 契约；传 aid 得空段——实测踩坑）
-    const u = segUrl(1176840, 810872, 2);
-    assert.ok(u.indexOf('type=1') > 0, u);
-    assert.ok(u.indexOf('oid=1176840') > 0, u);
-    assert.ok(u.indexOf('pid=810872') > 0, u);
-    assert.ok(u.indexOf('segment_index=2') > 0, u);
-    assert.strictEqual(segCount(360000), 1);
-    assert.strictEqual(segCount(360001), 2);
-    assert.strictEqual(segCount(7200000), 20, '2h=20 包');
-  });
-
   // ---------------- history ----------------
   test('history: 容错（旧版本/脏条目）与封顶', () => {
     assert.strictEqual(normalizeHistory(null).items.length, 0);
@@ -1020,7 +979,7 @@ async function main() {
   }
   const probeItem = { kind: 'video', bvid: 'BV1ZCeb6NEyM', cid: 42027451985, durationSec: 206, title: 'x', up: 'u', cover: '' };
 
-  test('play_session: openVideo 全链（居中物理矩形 + UA/Referer + fps30）', async () => {
+  test('play_session: openVideo 全链（居中物理矩形 + UA/Referer + 配置帧率）', async () => {
     const w = fakePlayDeps();
     const r = await openVideo(w, probeItem);
     assert.strictEqual(r.ok, true);
@@ -1030,7 +989,7 @@ async function main() {
     assert.deepStrictEqual(o.rect, { x: 0, y: 174, width: 254, height: 452 });
     assert.strictEqual(o.userAgent, DEFAULT_UA);
     assert.strictEqual(o.referer, REFERER);
-    assert.strictEqual(o.fps, 30);
+    assert.strictEqual(o.fps, HTML5_FPS); // 不锁死数值：锚定 openVideo 传递配置常量（v2.5.1 起 24）
     assert.strictEqual(o.audio, true);
     assert.strictEqual(o.transpose, 2);
     assert.ok(o.input.indexOf('https://') === 0);
