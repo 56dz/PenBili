@@ -4,12 +4,12 @@
  "ttl": 1,
  "data": {
   "is_new": false,
-  "mid": 293793435,
+  "mid": 100000001,
   "access_token": "AT_PLACEHOLDER",
   "refresh_token": "RT_PLACEHOLDER",
   "expires_in": 15552000,
   "token_info": {
-   "mid": 293793435,
+   "mid": 100000001,
    "access_token": "AT_PLACEHOLDER",
    "refresh_token": "RT_PLACEHOLDER",
    "expires_in": 15552000
@@ -32,7 +32,7 @@
     },
     {
      "name": "DedeUserID",
-     "value": "293793435",
+     "value": "100000001",
      "http_only": 0,
      "expires": 1790140171,
      "secure": 0

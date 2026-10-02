@@ -13,6 +13,8 @@ import { buildSignedQuery } from './wbi.js';
 //   v2.6.1：durl 阶梯同样只走 16——qn32 durl 实测 852×480(409K px) 超解码预算(310K)，
 //   会把软解再次压到 1x 以下；qn16 durl = 640×360 真标清，稳。
 export const QN_LADDER = [16];
+/* 发布基线保持 DASH id16（360p）：本轮真机样本未提供 id6(240p)，不额外发起一轮取流请求。
+ * 解析器仍优先选 avc1，并记录服务端实际档位；解码预算超限时继续走 durl 保底。 */
 export const DASH_QN_LADDER = [16];
 
 // 播放节拍帧率。html5 时代实测源 30fps；v2.5.1 降为 24：带弹幕（drawtext×4 逐帧渲染文字）
@@ -21,6 +23,7 @@ export const DASH_QN_LADDER = [16];
 export const HTML5_FPS = 24;
 
 export const MAX_STREAM_URL_LEN = 1000;
+
 
 // B 站系 CDN 域后缀（命中与否都记录在探测详情里，非命中不作为硬失败——
 // URL 本身已通过 https + 无控制字符 + 长度校验，且以 argv 数组传给 ffmpeg，无 shell 注入面）
@@ -171,7 +174,7 @@ function pickStreamUrl(entry) {
 //   2) 条目内 URL 按 scoreStreamUrl 挑（快域 bilivideo.com 优先）。
 //   3) 音频取最低档（实测 66kbps ≈ 设备实测带宽 646kbps 的 1/10 → 分离后声音供给恒稳）。
 //   4) 无 dash 结构 → hasDurl 信号，调用方回退 fnval=1 单文件路径。
-export function parseDashResponse(res, wantQn) {
+export function parseDashResponse(res, wantQn, requireAvc) {
   if (!res || res.ok === false) {
     return {
       ok: false,
@@ -187,6 +190,10 @@ export function parseDashResponse(res, wantQn) {
   }
   const vids = dash.video || [];
   if (!vids.length) return { ok: false, stage: 'parse', hasDurl: false, message: 'dash.video 为空' };
+  /* 把服务端给的全部档位拼成诊断信息（id/宽x高/码率/编码），便于确认最终选流。 */
+  const avail = vids
+    .map((x) => x.id + ':' + (x.width || '?') + 'x' + (x.height || '?') + '/' + Math.round((Number(x.bandwidth) || 0) / 1000) + 'k/' + String(x.codecs || '?').slice(0, 4))
+    .join(' ');
   const qn = Number(wantQn) || 0;
   let pool = qn ? vids.filter((x) => Number(x.id) === qn) : [];
   if (!pool.length) pool = vids.slice();
@@ -198,9 +205,14 @@ export function parseDashResponse(res, wantQn) {
   const pxOf = (x) => (Number(x.width) || 0) * (Number(x.height) || 0);
   const byPx = (a, b) => pxOf(a) - pxOf(b) || byBw(a, b);
   const avc = pool.filter((x) => String(x.codecs || '').indexOf('avc1') === 0);
+  /* 多档取流时，requireAvc=1 的中间档若没有 avc1 就返回 codec 错误，交由调用方试下一档；
+   * 最后一档可允许其他编码兜底，以保留可播放性。当前发布阶梯只有 id16。 */
+  if (!avc.length && requireAvc) {
+    return { ok: false, stage: 'codec', message: 'qn' + qn + ' 无 avc1 流', avail: avail };
+  }
   const pick = (avc.length ? avc : pool).slice().sort(byPx)[0];
   const videoUrl = pickStreamUrl(pick);
-  if (!videoUrl) return { ok: false, stage: 'parse', hasDurl: false, message: 'dash.video 无可用 URL' };
+  if (!videoUrl) return { ok: false, stage: 'parse', hasDurl: false, message: 'dash.video 无可用 URL', avail: avail };
   const auds = (dash.audio || []).slice().sort(byBw);
   const audioUrl = auds.length ? pickStreamUrl(auds[0]) : '';
   return {
@@ -213,7 +225,8 @@ export function parseDashResponse(res, wantQn) {
     bandwidth: Number(pick.bandwidth) || 0,
     codecs: String(pick.codecs || ''),
     audioBandwidth: auds.length ? Number(auds[0].bandwidth) || 0 : 0,
-    durationMs: Math.max(0, Math.floor(Number(data.timelength) || 0))
+    durationMs: Math.max(0, Math.floor(Number(data.timelength) || 0)),
+    avail: avail
   };
 }
 

@@ -497,8 +497,10 @@ export default {
       const at = await getJson(KEYS.autotest, null);
       if (at && (at === true || at.enabled === true)) {
         const soakSec = at && typeof at === 'object' ? Number(at.soak) || 0 : 0;
-        logWarn('[bili] autotest seeded → run' + (soakSec > 0 ? ' soak=' + soakSec + 's' : ''));
-        this.runAutotest(soakSec); // 自检内部自带首屏加载（避免与这里并发双 load 竞态）
+        // soakBv：把 soak 固定到指定稿件（跨轮可复现同一稿件 → 才能做换网/换版本的 A/B 对比）
+        const soakBv = at && typeof at === 'object' && /^BV[0-9A-Za-z]{10}$/.test(at.soakBv || '') ? at.soakBv : '';
+        logWarn('[bili] autotest seeded → run' + (soakSec > 0 ? ' soak=' + soakSec + 's' : '') + (soakBv ? ' bv=' + soakBv : ''));
+        this.runAutotest(soakSec, soakBv); // 自检内部自带首屏加载（避免与这里并发双 load 竞态）
       } else {
         await this.selectTab('rcmd'); // 首屏加载：此刻登录 Cookie 已就位 → 个性化推荐
       }
@@ -793,6 +795,8 @@ export default {
     startPoll(myGen) {
       this.stopPoll();
       this._pollLogged = false;
+      this._audioDeadWarned = false; // 每次新播放重置音频中断提示状态。
+      this._resyncNoteOn = false;
       const tick = async () => {
         if (this.gen !== myGen) {
           this.stopPoll();
@@ -811,35 +815,53 @@ export default {
           return;
         }
         // 每秒采样（v1.3.0 音频重写证据链）：ab/ad/u(欠载)w(写失败)rd(环满丢弃)
-        // v1.8.0 追加 skip(丢帧快进)/drift(可闻音频−画面,正=声音超前)：修复后 drift 应稳在 ±100ms
+        // v1.8.0 追加 skip(滞后帧)/drift(可闻音频−画面,正=声音超前)：修复后 drift 应稳在 ±100ms
         // v1.9.0 追加 buf(可闻锚修正量=管道+ALSA缓冲,恒定即正常)
         // v1.9.3 追加 rst(视频断流重启次数)
-        logWarn(
-          '[bili] poll tick frames=' + st.frames + ' pos=' + st.positionMs +
-          ' ab=' + st.audioBytes + ' ad=' + st.audioDropped +
-          ' u=' + st.audioUnderruns + ' w=' + st.audioWrErrors + ' rd=' + st.audioRingDrops +
-          ' skip=' + (st.videoSkips || 0) + ' drift=' + (st.avDriftMs || 0) + 'ms' +
-          ' buf=' + (st.audioBufMs || 0) + 'ms' +
-          ' rst=' + (st.videoRestarts || 0) +
-          (st.audioDead ? ' DEAD' : '')
-        );
-        // 画面大滞后提示（v1.9.3）：生产端（网络/解码）跟不上时丢帧追钟会造成可见滞后期，
-        // 给用户一个"在自愈"的信号，避免误以为卡死；恢复后自动清除。
-        if (st.state === 'playing' && (st.avDriftMs || 0) > 1200) {
-          if (!this._syncNoteOn) {
-            this._syncNoteOn = true;
-            this.play.note = '网络波动，画面正在同步…';
-            logWarn('[bili] sync lag: drift=' + st.avDriftMs + 'ms skips=' + st.videoSkips + ' → 提示用户');
-          }
-        } else if (this._syncNoteOn && (st.avDriftMs || 0) < 400) {
-          this._syncNoteOn = false;
-          if (this.play.note === '网络波动，画面正在同步…') this.play.note = '';
+        // v2.1.0 追加 rs(强制重同步次数)/RESYNC(正在强制重同步)
+        // 巡检仍每秒执行；常规详细状态每 5 秒输出一次，异常事件（resync/audioDead/gate）即时单独打点。
+        this._pollN = (this._pollN || 0) + 1;
+        if (this._pollN % 5 === 0) {
+          logWarn(
+            '[bili] poll tick frames=' + st.frames + ' pos=' + st.positionMs +
+            ' ab=' + st.audioBytes + ' ad=' + st.audioDropped +
+            ' u=' + st.audioUnderruns + ' w=' + st.audioWrErrors + ' rd=' + st.audioRingDrops +
+            ' stall=' + (st.videoStallMs || 0) + (st.gateActive ? 'G' : '') +
+            ' skip=' + (st.videoSkips || 0) + ' drift=' + (st.resyncing ? '?' : (st.avDriftMs || 0)) + 'ms' +
+            ' buf=' + (st.audioBufMs || 0) + 'ms' +
+            ' rst=' + (st.videoRestarts || 0) + ' rs=' + (st.resyncCount || 0) +
+            ' lead=' + (st.resyncLeadMs || 0) +
+            (st.resyncing ? ' RESYNC(' + (st.resyncingMs || 0) + 'ms)' : '') +
+            (st.audioDead ? ' DEAD' : '')
+          );
         }
-        // 音频链已断（实测主因：蓝牙被其他应用独占——网易云 SoundPlayer 正在用 bluealsa）
-        if (st.audioDead && !this._audioDeadWarned) {
+        // 音画同步分层提示（v2.1.0）：轻微滞后由 native 平滑快进自愈（不打扰用户）；
+        // 过大滞后由 native 强制重同步（视频流重启到音频位置，声音不断）→ 显示"加载中…"，
+        // 首帧落屏后 native 清 resyncing，提示自动消失。
+        // v2.2.5：只有"恢复确实慢"才弹「加载中」。视频流重启通常 1~2s（缓冲还顶着），这种快速自愈
+        // 不打扰用户（只表现为一次极短画面停顿）；真正慢（>2.5s）才给提示，避免提示刷屏。
+        if (st.state === 'playing' && st.resyncing && (st.resyncingMs || 0) > 2500) {
+          if (!this._resyncNoteOn) {
+            this._resyncNoteOn = true;
+            this.play.note = '加载中…';
+            // 注意：重同步窗口内 avDriftMs 是伪值（video_base 已前移到 apos+lead、frames=0
+            // → 算出来恒等于 -lead），所以这里打 native 的触发漂移 avDriftNowMs。
+            // 注意：重启也可能来自 native 的"首帧超时重试"（resyncCount 不增），故文案不写"强制重同步"
+            logWarn(
+              '[bili] 视频流重启中（强制重同步累计=' + (st.resyncCount || 0) + ' 触发漂移=' +
+              (st.avDriftNowMs || 0) + 'ms）已耗时=' + (st.resyncingMs || 0) + 'ms → 加载中…'
+            );
+          }
+        } else if (this._resyncNoteOn) {
+          this._resyncNoteOn = false;
+          if (this.play.note === '加载中…') this.play.note = '';
+        }
+        // 音频链已断时只在播放中提示：视频播完后音频进程正常结束也会置 audioDead，
+        // 不能在"已播完"后再追加无声提示。
+        if (st.audioDead && st.state === 'playing' && !this._audioDeadWarned) {
           this._audioDeadWarned = true;
-          this.play.note = '无声：蓝牙耳机可能被其他应用占用（请关闭音乐播放器后重试）';
-          logWarn('[bili] audio chain dead → 蓝牙设备可能被其他应用占用');
+          this.play.note = '无声：音频输出被其他应用占用';
+          logWarn('[bili] audio chain dead（播放中）→ 音频输出可能被其他应用占用');
         }
         // 起播门诊断（v1.7.1）：音频等待视频首帧的时长（正常=首帧耗时；15000=超时放行）
         if (st.gateWaitMs > 400 && st.gateWaitMs !== this._lastGateMs) {
@@ -852,6 +874,9 @@ export default {
         if (
           st.state === 'playing' &&
           !st.gateActive &&
+          // v2.2.5：重同步期间让位，但**有限让位**——超过 15s 仍未恢复就交回 JS 兜底，
+          // 否则一旦 native 侧重启卡死，两个看门狗都被压住 → 画面永久冻结（真机实测过 66s+）。
+          (!st.resyncing || (st.resyncingMs || 0) > 15000) &&
           st.videoStallMs > 8000 &&
           st.audioBytes > 0 &&
           st.audioBytes !== (this._lastAvAudioBytes || 0) &&
@@ -874,6 +899,7 @@ export default {
         if (
           st.state === 'playing' &&
           !st.gateActive &&
+          (!st.resyncing || (st.resyncingMs || 0) > 15000) &&
           st.videoStallMs > 25000 &&
           st.audioBytes === (this._lastAvAudioBytes || 0) &&
           !this.commentsOpen
@@ -889,14 +915,23 @@ export default {
           }
         }
         this._lastAvAudioBytes = st.audioBytes;
-        // 起播门期提示（首帧/音频都未到 → 缓冲中；不覆盖恢复/无声等后续提示）
-        if (st.state === 'playing' && st.frames === 0 && st.positionMs === 0 && !st.audioBytes) {
-          this.play.note = '缓冲中…';
+        // v2.9.4：**只要还没有任何视频帧就提示「加载中」**。原因（真机诊断实测）：起播门 15s 会
+        // 先放行音频（"极弱网先出声"），此时音频已响但画面仍是冻的 → 用户感受正是"画面卡住但声音
+        // 正常"。原判据（首帧+位置0+无音频字节）在音频放行后就不成立了，于是画面冻着却没有任何提示。
+        // 注意区分：resyncing（视频流重启）走上面的 2.5s 门槛保持静默自愈，避免提示刷屏。
+        if (st.state === 'playing' && st.frames === 0 && !st.resyncing) {
+          if (this.play.note !== '加载中…') {
+            this.play.note = '加载中…';
+            logWarn('[bili] 无画面帧（起播/卡死）→ 加载中…');
+          }
+        } else if (this.play.note === '加载中…' && st.frames > 0) {
+          this.play.note = '';
         }
         this.play.positionMs = st.positionMs;
         this.play.frames = st.frames;
         if (st.state === 'ended') {
           this.play.state = 'ended';
+          this.play.note = ''; // 播完时清掉残留提示。
           this.stopPoll();
           logWarn('[bili] video ended frames=' + st.frames);
         } else if (st.state === 'paused') {
@@ -1330,7 +1365,7 @@ export default {
 
     /* ---------- 真机自检（storage 预置 bili_autotest 触发；
          全部复用按钮同一代码路径 —— 设备无触摸注入的替代取证） ---------- */
-    async runAutotest(soakSec) {
+    async runAutotest(soakSec, soakBv) {
       const ensure = (cond, msg) => {
         if (!cond) throw new Error(msg);
       };
@@ -1341,8 +1376,8 @@ export default {
         await this.onPlayItem(this.rcmdItems[0]);
         ensure(this.play.state === 'playing', '起播失败: ' + this.play.note);
         // 首帧等待：DASH 双输入并发探测在窄带宽下更慢 → 窗口 12s（网歴1.5~8s）
-        const w1 = await this.waitForFrames(12000);
-        ensure(w1.st.ok && w1.st.frames > 0, '12s 内无帧输出: ' + (w1.st.message || w1.st.state));
+        const w1 = await this.waitForFrames(30000);
+        ensure(w1.st.ok && w1.st.frames > 0, '30s 内无帧输出: ' + (w1.st.message || w1.st.state));
         logWarn('[bili] AUTOTEST first frame ' + w1.ms + 'ms frames=' + w1.st.frames + ' pos=' + w1.st.positionMs);
 
         await this.onTogglePlay();
@@ -1351,14 +1386,36 @@ export default {
         await this.onTogglePlay();
         ensure(this.play.state === 'playing', '继续失败: ' + this.play.note);
 
+        // 评论面板开关回归 + 截图取证窗口（停留 7s，便于外部 captureFB 取图）
+        this.openComments();
+        await this.sleep(7000);
+        ensure(this.commentsOpen === true, '评论面板未打开');
+        ensure(this.replies.length > 0 || this.replyLoading, '评论面板打开后无评论数据');
+        this.closeComments();
+        await this.sleep(500);
+        ensure(this.commentsOpen === false, '评论面板未关闭');
+
+        /* 位置断言用"相对量"而非绝对值：onSeek 内部要等帧恢复（seek=重启解码+探流，弱网/重稿件
+         * 下实测可达 15s+），这期间画面仍在前进 → 绝对位置天然会偏大（旧断言 <6000ms 会把
+         * "恢复慢"误判成"定位错"）。容差 6s 覆盖恢复期前进量。 */
+        const posBeforePlus = this.play.positionMs;
         await this.onSeek(this.seekStepSec);
         await this.sleep(1200);
-        ensure(this.play.positionMs >= 15000, 'seek+' + this.seekStepSec + 's 位置异常: ' + this.play.positionMs);
+        ensure(
+          this.play.positionMs >= posBeforePlus + 14000,
+          'seek+' + this.seekStepSec + 's 位置异常: ' + posBeforePlus + '→' + this.play.positionMs
+        );
+        const posBeforeMinus = this.play.positionMs;
         await this.onSeek(-this.seekStepSec);
         // seek 返回即目标位置（native 直给）→ 立即断位置；再等帧恢复（seek=重启解码）
-        ensure(this.play.positionMs < 6000, 'seek-' + this.seekStepSec + 's 位置异常: ' + this.play.positionMs);
-        const w2 = await this.waitForFrames(12000);
-        ensure(w2.st.ok && w2.st.frames > 0, 'seek 后 12s 帧未恢复: frames=' + (w2.st && w2.st.frames));
+        ensure(
+          this.play.positionMs <= Math.max(6000, posBeforeMinus - 14000),
+          'seek-' + this.seekStepSec + 's 位置异常: ' + posBeforeMinus + '→' + this.play.positionMs
+        );
+        // v2.2.5：seek 恢复窗口 12s → 25s。seek=重启解码+重新探流，弱网/CDN 劣化时实测可超 12s
+        // （探流阶段等 probesize 就够 60s+）→ 12s 会把"网络慢"误判成"定位失败"（真机连续踩过）。
+        const w2 = await this.waitForFrames(25000);
+        ensure(w2.st.ok && w2.st.frames > 0, 'seek 后 25s 帧未恢复: frames=' + (w2.st && w2.st.frames));
         const frames2 = w2.st.frames;
         logWarn('[bili] AUTOTEST seek recover ' + w2.ms + 'ms frames=' + frames2);
 
@@ -1414,13 +1471,16 @@ export default {
         );
 
         /* —— v2.4.0 音画对齐长播验证（seed soak 秒，缺省 0=跳过）：复播推荐第一个视频持续播放。
-         * poll tick 每秒带 skip=/drift= 落设备日志；这里每 5s 采样，每 30s 打一条检查点，
-         * 结束输出漂移上界。通过线 |drift|≤300ms（丢帧快进稳态 ±100ms + 起播/供给波动裕量）。 */
+         * poll tick 每秒带 skip=/drift=/rs= 落设备日志；这里每 5s 采样，每 30s 打一条检查点，
+         * 结束输出漂移上界与强制重同步次数。通过线 |drift|≤1500ms——v2.2.7 起 native AV_RESYNC_MS
+         * 为 1000ms（音频最多超前画面 1s 就强制重同步；提示频率已由"快速重启不弹提示"解决），
+         * 故采样点合法上界 = 1000 + 锚偏移 ~42ms + 采样裕量。
+         * 另：重同步窗口本身与其后 10s 追赶瞬态不计入判据（那是设计内的"跳到同步 + 快进吸收"）。 */
         if (soakSec > 0) {
-          await this.onPlayItem(this.rcmdItems[0]);
+          await this.onPlayItem(soakBv ? { bvid: soakBv, title: 'SOAK ' + soakBv, up: '', cover: '', durationSec: 0 } : this.rcmdItems[0]);
           ensure(this.play.state === 'playing', 'soak 起播失败: ' + this.play.note);
-          const wsf = await this.waitForFrames(12000);
-          ensure(wsf.st.ok && wsf.st.frames > 0, 'soak 12s 内无帧: ' + (wsf.st.message || wsf.st.state));
+          const wsf = await this.waitForFrames(30000);
+          ensure(wsf.st.ok && wsf.st.frames > 0, 'soak 30s 内无帧: ' + (wsf.st.message || wsf.st.state));
           logWarn('[bili] AUTOTEST SOAK start ' + soakSec + 's bv=' + (this.play.bvid || ''));
           const t0 = Date.now();
           let maxDrift = 0;
@@ -1428,28 +1488,47 @@ export default {
           let skipBase = -1;
           let skipEnd = 0;
           let n = 0;
+          let resyncEnd = 0;
+          let seenResync = 0;
+          let settleUntil = 0;
           while (Date.now() - t0 < soakSec * 1000 && this.mode === 'play' && this.play.state === 'playing') {
             await this.sleep(5000);
             if (this.mode !== 'play' || this.play.state !== 'playing') break;
             const st = await readStatus(this.makeCtx(this.gen));
             if (!st.ok || st.state !== 'playing') continue;
+            // 重同步窗口内 avDriftMs 是伪值（video_base 已前移到 apos+lead、frames=0 → 恒为 -lead），
+            // 计入 min/max 会把判据打成假 FAIL；只统计稳态漂移。
+            if (st.resyncing) continue;
+            // 重同步后的追赶瞬态同样不算：强制重同步是"跳到同步点 + 平滑快进吸收残余"，
+            // 首帧落屏到残余排空之间 drift 会短暂偏高（实测可达 ~1.8s），这是设计内的，
+            // 稳态判据只看排空之后。每次 resyncCount 增加即开 10s 稳定窗口。
+            if ((st.resyncCount || 0) !== seenResync) {
+              seenResync = st.resyncCount || 0;
+              settleUntil = Date.now() + 10000;
+            }
+            if (Date.now() < settleUntil) continue;
             const d = st.avDriftMs || 0;
             if (d > maxDrift) maxDrift = d;
             if (d < minDrift) minDrift = d;
             if (skipBase < 0) skipBase = st.videoSkips || 0;
             skipEnd = st.videoSkips || 0;
+            resyncEnd = st.resyncCount || 0;
             n++;
             const el = Math.round((Date.now() - t0) / 1000);
             if (el % 30 < 5) {
-              logWarn('[bili] SOAK t=' + el + 's pos=' + st.positionMs + ' drift=' + d + 'ms skips=' + st.videoSkips);
+              logWarn(
+                '[bili] SOAK t=' + el + 's pos=' + st.positionMs + ' drift=' + d + 'ms skips=' + st.videoSkips +
+                ' rs=' + (st.resyncCount || 0)
+              );
             }
           }
-          const over = Math.max(Math.abs(maxDrift), Math.abs(minDrift)) > 300;
+          const over = Math.max(Math.abs(maxDrift), Math.abs(minDrift)) > 1500;
           logWarn(
             '[bili] AUTOTEST SOAK ' + (over ? 'FAIL' : 'PASS') +
             ' n=' + n + ' drift=[' + minDrift + ',' + maxDrift + ']ms' +
             ' skips=+' + (skipEnd - (skipBase < 0 ? skipEnd : skipBase)) +
-            (over ? '（|drift| 超 ±300ms）' : '')
+            ' resyncs=' + resyncEnd +
+            (over ? '（|drift| 超 ±1500ms）' : '')
           );
           if (this.mode === 'play') await this.onBack();
         }

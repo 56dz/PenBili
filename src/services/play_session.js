@@ -61,17 +61,21 @@ export async function resolveVideoUrl(ctx, item) {
   //   贴顶拖垮（音频卡顿根因，白噪对照实验已证链路清白）；视频选 avc1 避开 HEVC 软解。
   let last = null;
   let stop = false;
-  // DASH 只走 [16]=640x360（dash 的 id32 是 480p，A53 软解击穿实时线——见 DASH_QN_LADDER 注释）
+  // DASH 阶梯 [6,16]：先试 240p（解码像素减半，254px 屏上只需 6% 上采样），没有则 360p。
+  // 最后一档允许非 avc1 兜底（保住"能播"）；前面的档位要求 avc1，避免退到 HEVC（软解解不动）。
+  const lastIdx = DASH_QN_LADDER.length - 1;
   for (let i = 0; i < DASH_QN_LADDER.length; i++) {
     const qn = DASH_QN_LADDER[i];
     const built = buildPlayurlQuery({ bvid: item.bvid, cid: cid, qn: qn, fnval: 16 }, mixin, nowSec());
     if (!built.ok) return { ok: false, stage: 'param', message: built.message };
     const res = await ctx.client.fetchPlayurl(built.query);
     if (cancelled(ctx)) return { ok: false, stage: 'cancel', message: '已取消' };
-    const parsed = parseDashResponse(res, qn);
+    const parsed = parseDashResponse(res, qn, i < lastIdx);
     if (!parsed.ok) {
       last = { stage: parsed.stage === 'api' ? 'playurl' : parsed.stage, message: parsed.message };
-      if (ctx.log) ctx.log('[bili] dash 尝试失败 qn' + qn + ': ' + parsed.message);
+      if (ctx.log) {
+        ctx.log('[bili] dash 尝试失败 qn' + qn + ': ' + parsed.message + (parsed.avail ? ' | 可用档位: ' + parsed.avail : ''));
+      }
       if (fatal(res)) {
         stop = true; // 版权/不存在：阶梯与 durl 回退都无意义
         break;
@@ -109,7 +113,8 @@ export async function resolveVideoUrl(ctx, item) {
       ctx.log(
         '[bili] stream DASH qn=' + parsed.qn + ' ' + (parsed.width || '?') + 'x' + (parsed.height || '?') +
           ' vb=' + parsed.bandwidth + ' ' + parsed.codecs +
-          ' ab=' + parsed.audioBandwidth + ' host=' + vv.host
+          ' ab=' + parsed.audioBandwidth + ' host=' + vv.host +
+          ' | 可用档位: ' + parsed.avail
       );
     }
     return {
@@ -306,7 +311,15 @@ export async function readStatus(ctx) {
     videoSkips: Number(st.videoSkips) || 0,
     avDriftMs: Number(st.avDriftMs) || 0,
     audioBufMs: Number(st.audioBufMs) || 0,
-    videoRestarts: Number(st.videoRestarts) || 0
+    videoRestarts: Number(st.videoRestarts) || 0,
+    /* v2.1.0 音画同步分层：resyncing=视频流正在强制重同步（首帧未产出）→ 页面显示"加载中…"；
+     * resyncCount=漂移触发的强制重同步次数；avDriftNowMs=native 侧最近漂移（诊断） */
+    resyncing: !!st.resyncing,
+    resyncCount: Number(st.resyncCount) || 0,
+    avDriftNowMs: Number(st.avDriftNowMs) || 0,
+    resyncLeadMs: Number(st.resyncLeadMs) || 0,
+    /* v2.2.4：本次重同步已持续毫秒（未重同步为 0）——页面据此只在"恢复确实慢"时才弹「加载中」 */
+    resyncingMs: Number(st.resyncingMs) || 0
   };
 }
 

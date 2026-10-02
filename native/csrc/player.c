@@ -43,6 +43,42 @@
  *   （aplay 管道 64KB + ALSA -B 600ms，蓝牙 ≈0.9s）——写出≠发声。锚改为
  *   可闻位置 = 写出量 − 管道容量 − ALSA 缓冲（aplay -v setup 实测解析，失败保守回退）。
  *   起播的假超前丢帧风暴（~160 帧）随之消失；停滞期间误差有界（≤一个缓冲），恢复自愈。
+ *
+ * v2.1.0/2.1.3 音画同步分层（2026-10-02，用户诉求："轻微不同步平滑加速追上；过大不同步直接
+ *   提示加载中并强制加载为同步画面"）：
+ *   旧行为的分层只有一档——帧落后音频钟 >AV_SKIP_MS 就丢帧，且为"活性保障"每 0.6s 才贴
+ *   一屏（≈1.6fps），于是网络波动后进入一段可见的低帧率顿挫期，靠解码产速>1x 慢慢排空积压
+ *   （实测"过好一会才追上"）。新行为分两档：
+ *     ① 轻微滞后（AV_SKIP_MS < drift ≤ AV_RESYNC_MS）→ **平滑快进**：每帧都贴屏、不等钟，
+ *        画面以当前解码产速连续快进（不再 0.6s 节流），观感顺滑而非顿挫；产速>1x 时积压自然
+ *        排空，仍不收敛则升级到②。
+ *     ② 过大滞后（drift > AV_RESYNC_MS）→ **强制重同步**：跳过积压内容，把**视频流**重启到
+ *        "当前可闻音频位置 + 预估启动时延"（音频进程/aplay 完全不动，声音不断）。启动时延
+ *        （-ss 定位 + probesize + 首帧解码 ≈1~2s）由每次重启实测自适应，使首帧落屏时刻的音频
+ *        位置 ≈ 首帧内容位置 → **落屏即同步**（否则会白落一个启动时延、又得靠①慢慢追）。
+ *        重同步期间 status.resyncing=1，JS 显示"加载中…"；仅 DASH 拆分模式可安全重启
+ *        （durl 音视频同进程，重启会连带音频 → 退回①平滑快进兜底）。
+ *   断流重启（原 video_retries 路径）复用同一落点逻辑，顺带修掉它"重启后恒定落后一个启动时延"
+ *   的旧缺陷。
+ *   另一处补漏：漂移检查原本只在"读到帧"时执行，于是**纯视频停帧**（帧流断、音频链还健康）时
+ *   native 完全无感，画面只能冻到 JS 巡检（8s）做双进程重启（实测连带打断音频 + 恢复期再走
+ *   起播门 3.5s）。现利用 poll 的 200ms 空转做同一套巡检：音频链仍在供数（audio_bytes 增长）
+ *   且落后 >AV_RESYNC_MS 即强制重同步（只重启视频）；音频链也断供（双侧硬断档）时不抢，交给
+ *   JS 看门狗双重启。连续 3 次空转重同步仍无帧则放弃并清 resyncing（防坏节点上无限重启）。
+ *
+ * v2.2.0 网络预取（2026-10-02，用户诉求："像 B 站 App 那样：起播缓冲 ~0.5s，播放中用多余带宽
+ *   尽量多缓冲，缓冲池保持 ~15s 音视频；不足 15s 就缓冲到片尾"）：
+ *   动机：v2.1.x 的"加载中"偏多——根因是解码链路几乎无蓄水（视频 pipe 8MB≈0.7s 解码后画面、
+ *   音频环 2.9s），网络一抖动立刻变成画面停帧 → 音画漂移 → 强制重同步。
+ *   做法：给每个输入加 `-thread_queue_size`——ffmpeg 的输入线程把**压缩包**排进内存队列；
+ *   主线程被输出管道反压时队列继续被灌满，于是下载与解码解耦，抖动先被队列吸收。
+ *   只缓冲压缩流是硬约束：解码后画面 459KB/帧×24fps=11MB/s，15s 要 165MB（MemTotal 352MB）→ 不可行；
+ *   压缩流 15s 仅 ~780KB。详见 AV_PREFETCH_PACKETS_VIDEO / _AUDIO 处注释。
+ *   顺带修掉"重同步打转"（真机实测 v2.1.3：弱网下 rs=9/56s，画面累计被跳过 ~80s）：
+ *   根因是重启视频流要 ~2~6s 才出首帧，而这期间漂移继续涨 → 冷却一过又触发 → 每次又跳一段内容。
+ *   两处收口：① 队列按流精确到 ~15s（原 1500 包 ≈62s，重启时白重下 ~2.7MB 把链路打满 → 首帧
+ *   从 2s 拖到 6s → 正反馈）；② 冷却 6s → 15s。配合 v2.1.3 的"残余漂移反馈"（lead 收敛到实测
+ *   重启耗时），落点误差 = Δ 的抖动（稳定网络下 →0）→ 重同步由"每 6s 一次"变为"收敛后不再触发"。
  */
 
 #define _GNU_SOURCE 1 /* F_GETPIPE_SZ 等 GNU 扩展（zig cc/glibc 默认不定义） */
@@ -74,7 +110,35 @@
 
 static void raise_audio_thread_prio(void); /* 定义在 RING 水位区（feeder 调用点更早） */
 
-#define PLAYER_VERSION "2.0.0"
+#define PLAYER_VERSION "2.2.7"
+
+/* ---- v2.2.0 网络预取（用户诉求："像 B 站 App 那样：起播缓冲 ~0.5s，播放中用多余带宽尽量多缓冲，
+ *      缓冲池保持 ~15s 音视频；不足 15s 就缓冲到片尾"）----
+ * 为什么不能缓冲"解码后的画面"：输出是 254×452×4B = 459KB/帧，24fps = 11MB/s，15s 要 165MB
+ * （本机 MemTotal 仅 352MB）→ 不可行。所以只缓冲**压缩源码流**：15s ≈ 视频 43KB/s×15=653KB +
+ * 音频 8KB/s×15=123KB ≈ 780KB，完全可忽略。
+ * 实现：`-thread_queue_size N` —— ffmpeg 的输入线程把解包后的**压缩包**排进内存队列；主线程被
+ * 输出管道反压（视频 pipe 8MB 满 / 音频环满）时队列继续被灌满，于是"下载"与"解码"解耦：
+ * 网络抖动先被队列吸收，不再立刻变成画面停帧 → 音画漂移 → 强制重同步（"加载中"）。
+ * N 的取值：包数 = 目标秒数 × 每秒包数。视频 1 包/帧（24fps→24/s，60fps 源→60/s）；
+ * AAC 1 包/1024 样本（44.1k→43/s）。故 600 包 ≈ 15~25s 视频、800 包 ≈ 18s 音频；
+ * 内存 = 包数 × 平均包长 ≈ 1.1MB(视频 1.8KB/包) + 0.15MB(音频 0.2KB/包)，实测可忽略。
+ * 取值偏保守是刻意的：**重启视频流时队列会被丢弃重下**，队列越深、弱网下重同步一次浪费越大
+ * （实测 1500 包时单次重启重下 ~2.7MB，把链路打满 → 下一次重启的首帧从 2s 拖到 6s → 触发
+ * 更多重同步，形成正反馈风暴）。
+ * "不足 15s 缓冲到片尾"天然成立：输入线程读到 EOF 即停，队列里剩余的包照常排空播放。
+ * 起播 ~0.5s 缓冲也天然成立：既有"起播门"要等视频首帧（实测 0.6~2.5s，探流+解码耗时），
+ * 这段时间输入线程已把队列灌到远大于 0.5s。
+ * 注意：队列在 ffmpeg 进程内，native 侧拿不到其填充量 → 暂无法做"缓冲进度条"UI；
+ * 但正因为队列把下载与解码解耦，网络抖动不再穿透为"加载中"，且解码不再被网络限速
+ * → ①平滑快进真正有了余量（产速可跑到 CPU 上限 1.1~1.9x，而不是被链路卡在 1x）。
+ * 副作用（实测）：单次重同步后队列要重灌 → 弱网下每次重同步多下 ~1MB。 */
+#define AV_PREFETCH_PACKETS_VIDEO 300 /* ≈15~30s 视频（实测 ≈3KB/包 → ≈20s）；须 > rw_timeout 8s + 重启耗时 */
+#define AV_PREFETCH_PACKETS_AUDIO 700 /* ≈16s 音频（+环 2.9s + ALSA 0.6s ≈ 19.5s 抗断） */
+#define AV_STR_(x) #x
+#define AV_STR(x) AV_STR_(x)
+#define AV_PREFETCH_PACKETS_VIDEO_STR AV_STR(AV_PREFETCH_PACKETS_VIDEO)
+#define AV_PREFETCH_PACKETS_AUDIO_STR AV_STR(AV_PREFETCH_PACKETS_AUDIO)
 #define FB_PATH "/dev/fb0"
 #define FB_PAN_PATH "/sys/class/graphics/fb0/pan"
 #define FB_MODES_PATH "/sys/class/graphics/fb0/modes"
@@ -261,7 +325,6 @@ struct session {
     long position_ms;
     long frames;
     int audio_enabled;   /* 请求带音频 */
-    int audio_active;    /* ffmpeg 当前确实在有音轨输出 */
     int audio_is_bt;     /* 本次会话是否把音频送到了蓝牙 */
     int audio_rate;      /* 音频采样率：44100 内置 / 48000 蓝牙；0=尚未探测（open 时置0） */
     char audio_dev[128]; /* 实际使用的 aplay -D 设备（空=ALSA 默认） */
@@ -307,6 +370,20 @@ struct session {
     long wr_errors;             /* aplay 写失败次数（设备崩溃/断流） */
     long ring_drops;            /* 环满被丢弃的字节数（蓝牙消费慢的直接证据） */
     long video_skips;           /* v1.8.0 丢帧快进计数（追音频钟时丢弃的帧数，status 诊断） */
+    /* v2.1.0 音画同步分层（平滑快进 / 强制重同步） */
+    int resyncing;              /* 视频流重启中（首帧未产出）→ status.resyncing → JS "加载中…" */
+    long resync_count;          /* 漂移触发的强制重同步次数（诊断；不含断流重启） */
+    long resync_lead_ms;        /* 重启落点前移量：预估启动时延（每次重启实测自适应） */
+    double resync_at;           /* 最近一次视频流重启的墙钟秒（漂移重同步冷却基准） */
+    long last_drift_ms;         /* 最近一次计算的音画漂移 apos−due（诊断） */
+    int resync_burst;           /* v2.2.0 滚动窗口内已触发重同步次数（限流用） */
+    int resync_timeout;         /* v2.2.5 因首帧超时被判失败（用于失败分类：应报错误而非"已播完"，
+                                 * 并允许"起播阶段"也走重试路径） */
+    double video_spawn_at;      /* v2.2.5 最近一次启动/重启视频流的墙钟（首帧超时判定基准） */
+    double resync_burst_at;     /* v2.2.0 滚动窗口起点墙钟 */
+    int ever_played;            /* v2.1.0 本会话是否产出过帧（重启后 frames 归零，据此区分"中途断流"与"从未出画"） */
+    long probe_audio_bytes;     /* v2.1.0 空转期巡检用：上次看到的音频供给量（判定音频链是否在供数） */
+    int stall_resyncs;          /* v2.1.0 连续"空转期重同步"次数（读到帧即清零；≥3 放弃让 JS 巡检接管） */
     struct timespec paused_at;  /* v1.8.0 暂停起点（resume 时补偿墙钟基准，防 paced 快进闪跳） */
     long pipe_cap_bytes;        /* v1.9.0 aplay 管道容量（F_GETPIPE_SZ 实测，缺省按 64KB） */
     long alsa_buf_bytes;        /* v1.9.0 ALSA 缓冲字节（aplay -v setup 解析；0=未解析到不修正） */
@@ -481,7 +558,8 @@ static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
             close(logfd);
         }
         if (with_audio) {
-            char *argv[72]; /* 双输入 × (probesize/rw_timeout/reconnect/ss/ua/headers) 后最多 66 项，留 NULL 余量 */
+            char *argv[80]; /* 双输入 × (probesize/rw_timeout/reconnect/thread_queue_size/ss/ua/headers)
+                             * 后最多 70 项，留 NULL 余量 */
             int i = 0;
             argv[i++] = "ffmpeg";
             argv[i++] = "-nostdin";
@@ -494,6 +572,9 @@ static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
             argv[i++] = "-skip_loop_filter";
             argv[i++] = "all"; /* v1.9.5：跳过 h264 环路滤波（解码成本 ~25%）——254px 屏上
                                 * 去块纹路不可见，换来的吞吐余量直接决定是否掉帧 */
+            /* v2.9.1 实测记录：曾试 `-flags2 +fast`（解码器非规范优化路径）→ 真机 40~50s 窗口
+             * 采样显示视频解码反而 60.3→69.6 jiffies/s（更贵），且属"非规范"标志有画质风险 →
+             * 已回退。结论：本机 CPU 不是瓶颈（整机仅约 25% 忙），解码降本旋钮收益为负，不加。 */
             if (s->user_agent[0]) {
                 argv[i++] = "-user_agent";
                 argv[i++] = s->user_agent;
@@ -512,13 +593,19 @@ static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
             argv[i++] = "-analyzeduration";
             argv[i++] = "5000000";
             argv[i++] = "-rw_timeout";
-            argv[i++] = "15000000"; /* 15s 读写超时：烂节点挂起 → ffmpeg 显式失败可诊断，永不无期等待 */
+            /* v2.2.5：保持 15s。曾试 8s（想"在缓冲窗口内就发现断档"），但实测证明**重启是破坏性的**：
+             * 重启会丢掉已下好的 ~20s 缓冲，若断档仍在（涓流），新 ffmpeg 反而在探流阶段饿死。
+             * 满断档本来就由 20s 缓冲吸收（缓冲有数据时画面照常播、漂移不涨），rw_timeout 只是
+             * "断档确实持续"的确认 → 越晚确认越好（给网络恢复留时间）→ 与缓冲同量级 15s 最合适。 */
+            argv[i++] = "15000000";
             argv[i++] = "-reconnect";
             argv[i++] = "1"; /* v1.9.3：CDN 断流协议级重连（Range 续传），修"视频/音频进程中途退出" */
             argv[i++] = "-reconnect_streamed";
             argv[i++] = "1";
             argv[i++] = "-reconnect_delay_max";
             argv[i++] = "10";
+            argv[i++] = "-thread_queue_size";
+            argv[i++] = AV_PREFETCH_PACKETS_VIDEO_STR; /* v2.2.0 输入线程预取压缩包（≈15~25s） */
             argv[i++] = "-ss";
             argv[i++] = ss;
             argv[i++] = "-i";
@@ -538,6 +625,8 @@ static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
                 argv[i++] = "1";
                 argv[i++] = "-reconnect_delay_max";
                 argv[i++] = "10";
+                argv[i++] = "-thread_queue_size";
+            argv[i++] = AV_PREFETCH_PACKETS_AUDIO_STR; /* v2.2.0 音轨独立预取（≈18s） */
                 argv[i++] = "-ss";
                 argv[i++] = ss;
                 if (s->user_agent[0]) {
@@ -597,7 +686,7 @@ static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
             argv[i++] = "-analyzeduration";
             argv[i++] = "5000000";
             argv[i++] = "-rw_timeout";
-            argv[i++] = "15000000";
+            argv[i++] = "15000000"; /* v2.2.5：同上（与 20s 缓冲同量级；早退会白丢缓冲） */
             argv[i++] = "-reconnect";
             argv[i++] = "1"; /* v1.9.3：CDN 断流协议级重连（Range 续传） */
             argv[i++] = "-reconnect_streamed";
@@ -615,6 +704,8 @@ static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
             }
             argv[i++] = "-sws_flags";
             argv[i++] = "fast_bilinear";
+            argv[i++] = "-thread_queue_size";
+            argv[i++] = AV_PREFETCH_PACKETS_VIDEO_STR; /* v2.2.0 输入线程预取压缩包（≈15~25s） */
             argv[i++] = "-ss";
             argv[i++] = ss;
             argv[i++] = "-i";
@@ -638,15 +729,19 @@ static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
     if (apipe[1] >= 0) close(apipe[1]);
     s->ff_pid = pid;
     s->video_fd = vpipe[0];
-    s->audio_fd = apipe[0];
-    s->audio_active = with_audio;
+    /* v2.1.1 修复：仅当本次进程带音频输出时才接管 audio_fd。拆分模式（with_audio=0，DASH）
+     * 下音频由 spawn_audio_ffmpeg 的独立进程经自己的 pipe 供给；旧代码无条件写 apipe[0]
+     * （此时恒为 -1）→ "重启视频流"会把音频管道 fd 清成 -1，feeder 随即 EBADF 退出 →
+     * 声音断供（真机实测：ab 冻结 + underrun，而音频 ffmpeg 其实还活着）。断流重连
+     * （v1.9.3）与强制重同步都走本函数，故两者此前都会误伤音频链。 */
+    if (with_audio) s->audio_fd = apipe[0];
     return 0;
 }
 
 /* 自动挑选音频输出设备：
  *   本机音频走 ALSA；内置扬声器是默认设备，蓝牙耳机则要显式指定 bluealsa 的 PCM。
  *   `bluealsa-aplay -L` 的输出形如（真机实测）：
- *       bluealsa:SRV=org.bluealsa,DEV=<BT_MAC>,PROFILE=a2dp
+ *       bluealsa:SRV=org.bluealsa,DEV=<BT_MAC>,PROFILE=a2dp  （真机地址不入库）
  *           Redmi Buds 6, trusted audio-card, playback
  *   注意 DEV 前面还有 SRV=...，所以必须匹配 "bluealsa:" 而不是 "bluealsa:DEV="，
  *   否则永远匹配不到、音频就一直在内置扬声器上（已踩过）。
@@ -743,6 +838,8 @@ static int spawn_ffaudio(struct session *s) {
         argv[i++] = "1";
         argv[i++] = "-reconnect_delay_max";
         argv[i++] = "10";
+        argv[i++] = "-thread_queue_size";
+        argv[i++] = AV_PREFETCH_PACKETS_AUDIO_STR; /* v2.2.0 音轨独立预取（≈18s） */
         argv[i++] = "-ss";
         argv[i++] = ss;
         argv[i++] = "-i";
@@ -865,8 +962,25 @@ static int spawn_aplay(struct session *s, const char *device) {
  * 因此线程能安全地写完最后状态并退出。 */
 
 /* ---- v1.8.0 音画对齐参数 ---- */
-#define AV_SKIP_MS 100     /* 帧落后音频钟超过此值 → 丢帧快进（≈3-4 帧 @24fps；漂移有界的关键） */
+#define AV_SKIP_MS 100     /* 帧落后音频钟超过此值 → 平滑快进（≈3-4 帧 @24fps；漂移有界的关键） */
 #define AV_WAIT_CAP_MS 200 /* durl 单进程模式每帧等待上限（video pipe 满互锁死锁的解扣） */
+/* v2.1.0 音画同步分层：轻微滞后平滑快进追上；过大滞后强制重同步（跳到同步画面） */
+#define AV_RESYNC_MS 1000          /* 帧落后音频钟超过此值 → 强制重同步（"过大"的定义 = 音频最多
+                                    * 超前画面 1s）。v2.2.5 曾上调到 3s（想少打扰），但用户实测反馈
+                                    * "音频又快于画面" —— 3s 的唇音失配不可接受。v2.2.7 收回 1s：
+                                    * 提示频率问题已由 JS 侧"<2.5s 的快速重启不弹提示"解决，不必再用
+                                    * 大阈值换安静。0.1~1s 的滞后仍优先交给①平滑快进自愈。 */
+#define AV_RESYNC_COOLDOWN_MS 12000 /* 两次强制重同步最小间隔：越短则"跳内容"越少（漂移累积越少），
+                                     * 频率问题交给 JS 侧"快速恢复不弹提示"解决 */
+#define AV_FIRST_FRAME_MAX_MS 15000 /* v2.2.5 首帧硬上限：每次（重）启视频流后超过此值仍无首帧
+                                     * = ffmpeg 在劣化链路上探流饿死（probesize 64KB 等不到，而涓流
+                                     * 又不会触发 rw_timeout）→ 按"视频流失败"处理并重试（新连接往往
+                                     * 能换到好节点）。**起播阶段同样适用**：否则会永远停在"缓冲中"
+                                     * （真机实测：链路 4KB/s 时首帧永不出现，无任何兜底）。 */
+#define AV_RESYNC_WINDOW_SEC 60     /* 限流滚动窗口 */
+#define AV_RESYNC_BURST_MAX 3       /* 窗口内最多触发次数：超过即停触发（画面退回"落后但连续"） */
+#define AV_RESYNC_LEAD_MIN_MS 300  /* 重启落点前移量 clamp 下界 */
+#define AV_RESYNC_LEAD_MAX_MS 4000 /* 重启落点前移量 clamp 上界 */
 
 /* 音频可闻锚（v1.9.0）：writer 写出量 − "已写出但尚未发声"的存量。
  * 存量 = aplay 管道容量 + ALSA 缓冲：aplay 消费速率恒等于播放速率
@@ -913,6 +1027,63 @@ static void probe_alsa_buffer(struct session *s) {
     }
 }
 
+/* ---- v2.1.0 视频流重启（强制重同步 / 断流重连共用）---- */
+
+/* 把**视频流**重启到指定内容位置：杀旧视频 ffmpeg → 以 -ss target 重开（音频进程/aplay 不动）。
+ * 仅用于 DASH 拆分模式（音频独立进程）——durl 音视频同进程，重启会连带音频。
+ * 返回 0 = 已重启（调用方应 `return video_thread(arg)` 重入主循环），-1 = 启动失败。
+ * resyncing 置位至首帧产出（JS 显示"加载中…"）。 */
+static int respawn_video_at(struct session *s, long long target_ms) {
+    if (target_ms < s->start_ms) target_ms = s->start_ms;
+    if (s->duration_ms > 0) {
+        long long hi = s->start_ms + s->duration_ms - 1000;
+        if (hi > s->start_ms && target_ms > hi) target_ms = hi;
+    }
+    close_fd(&s->video_fd);
+    kill_child(&s->ff_pid);
+    s->video_base_ms = (long)target_ms;
+    s->frames = 0;
+    s->position_ms = (long)target_ms;
+    s->video_first_frame = 1;        /* 起播门已过：重启不再等门 */
+    s->last_blit_at = now_seconds(); /* 巡检基线重置，防恢复期被误判停帧 */
+    clock_gettime(CLOCK_MONOTONIC, &s->started_at); /* paced 基线一并重置 */
+    s->resync_at = now_seconds(); /* 冷却基准：重启后短期内不再触发漂移重同步 */
+    s->resyncing = 1;
+    s->resync_timeout = 0;
+    s->video_spawn_at = now_seconds();
+    if (spawn_ffmpeg(s, (long)target_ms, 0) != 0) {
+        s->resyncing = 0;
+        return -1;
+    }
+    return 0;
+}
+
+/* 触发闸门（v2.2.0）：冷却 + 滚动窗口限流。
+ * 为什么需要限流：真机实测（youdao-x5）弱网/重稿件下视频管线吞吐 <1x（软解 + fb 双缓冲写
+ * 33ms/帧 ≈ CPU 100%），漂移必然持续增长 → 只靠"冷却一过就重同步"会变成每 20s 跳一段内容的
+ * 打转（实测 v2.1.3：rs=9/56s、累计跳过 ~80s 画面）。故窗口内最多 AV_RESYNC_BURST_MAX 次；
+ * 超限后不再触发，画面退回"落后但连续"（配合①平滑快进尽量收窄），把加载提示的频次钉住。
+ * 返回 1 = 允许触发（并已计入窗口），0 = 拒绝。有副作用，必须放在 && 链末位（前面条件先短路）。 */
+static int av_resync_gate(struct session *s) {
+    double now = now_seconds();
+    if (now - s->resync_at < (double)AV_RESYNC_COOLDOWN_MS / 1000.0) return 0;
+    if (now - s->resync_burst_at >= (double)AV_RESYNC_WINDOW_SEC) {
+        s->resync_burst = 0;
+        s->resync_burst_at = now;
+    }
+    if (s->resync_burst >= AV_RESYNC_BURST_MAX) return 0;
+    s->resync_burst++;
+    return 1;
+}
+
+/* 落到"当前可闻音频位置 + 预估启动时延"重启视频流：首帧落屏时刻的音频位置 ≈ 首帧内容位置
+ * → 落屏即同步。lead 用**残余漂移反馈**自适应（见 video_thread 首帧处）：落点偏了就修多少，
+ * 故首次用先验估值、其后一次即可收敛（比直接测"重启耗时"更准——那个量与落点误差不是一回事）。 */
+static int restart_video_synced(struct session *s) {
+    long long target = (long long)s->audio_base_ms + audio_anchor_ms(s) + (long long)s->resync_lead_ms;
+    return respawn_video_at(s, target);
+}
+
 static void *video_thread(void *arg) {
     struct session *s = (struct session *)arg;
     size_t fsz = (size_t)s->out_w * (size_t)s->out_h * 4u;
@@ -932,14 +1103,47 @@ static void *video_thread(void *arg) {
             failed = 1;
             break;
         }
-        if (pr == 0) continue;
+        if (pr == 0) {
+            /* v2.1.0 空转期（200ms 无新帧）漂移巡检：纯视频停帧而音频链仍在供数时，漂移检查
+             * 因"只在读到帧时才跑"而永不触发 → 画面只能冻到 JS 巡检（8s）做**双进程重启**
+             * （实测连带打断音频、恢复期还要重新过起播门 3.5s）。此处直接强制重同步：只重启
+             * 视频流，声音不断。
+             * 判据 audio_bytes 仍在增长 = 音频链健康、问题在视频侧；音频链也断供（双侧硬断档）
+             * 时不抢——否则反复重启视频既救不活音频，又会不断重置 videoStallMs 把 JS 巡检压死。
+             * 连续 3 次仍无帧则放弃并清 resyncing，把处置权交回 JS 巡检（防坏节点上无限重启）。 */
+            /* v2.2.5 首帧卡死保护（通用：起播与重启都适用）：spawn 后 15s 仍无首帧 = 链路劣化导致
+             * ffmpeg 探流饿死（涓流不触发 rw_timeout）→ 判失败走失败路径重试（≤5 次），否则画面
+             * 会永久冻结/永远停在"缓冲中"（真机实测过 66s+ 不恢复）。 */
+            if (s->frames == 0 && (now_seconds() - s->video_spawn_at) * 1000.0 > (double)AV_FIRST_FRAME_MAX_MS) {
+                s->resync_timeout = 1;
+                failed = 1;
+                break;
+            }
+            if (!s->paced && s->audio_enabled && s->audio_input[0] &&
+                s->frames > 0 && s->audio_alive && s->audio_bytes > s->probe_audio_bytes) {
+                if (s->stall_resyncs >= 3) {
+                    s->resyncing = 0;
+                } else {
+                    long long last_pos = s->video_base_ms + (long long)((double)s->frames * 1000.0 / (double)s->fps);
+                    long long apos = s->audio_base_ms + audio_anchor_ms(s);
+                    if (apos - last_pos > AV_RESYNC_MS && av_resync_gate(s)) {
+                        s->last_drift_ms = (long)(apos - last_pos);
+                        s->resync_count++;
+                        s->stall_resyncs++;
+                        if (restart_video_synced(s) == 0) continue;
+                    }
+                }
+            }
+            s->probe_audio_bytes = s->audio_bytes;
+            continue;
+        }
         if (read_full(s->video_fd, buf, fsz) != 0) {
             failed = 1;
             break;
         }
         /* ---- 播出节拍（v1.8.0 重写，锚 = 音频时钟 = writer 写出量换算的播放位置）----
-         * 帧到时（apos ≥ due）→ 立即贴屏；帧落后（apos ≥ due+AV_SKIP_MS）→ 丢帧快进
-         * 追钟；音频时钟死亡（audio_alive=0）→ 墙钟节拍接管（画面续播，声音已降级）。
+         * 帧到时（apos ≥ due）→ 立即贴屏；帧落后音频钟 → v2.1.0 分两档：轻微滞后平滑快进、
+         * 过大滞后强制重同步（见下）；音频时钟死亡（audio_alive=0）→ 墙钟节拍接管（画面续播）。
          * v1.7.1 首帧免钟保留：frames==0 跳过等待直接落屏——起播门等首帧、首帧等 writer
          * 时钟会互锁（writer 不开写则 apos 恒 0，永远追不上 due）。
          * 旧"停滞 8s 转墙钟"移除：音频供给停滞（网络卡）时画面冻结等声才是同步正解——
@@ -954,13 +1158,15 @@ static void *video_thread(void *arg) {
             }
             if (s->stop_flag) break;
             if (elapsed >= target + AV_SKIP_MS) {
-                /* 墙钟模式同样丢帧追钟（音频死亡/暂停恢复后的缺口按读速追赶） */
+                /* 墙钟模式同样平滑快进（v2.1.0：每帧都贴，不再 0.6s 节流——音频死亡/无音轨
+                 * 时按解码产速追赶墙钟，观感顺滑且永不黑屏） */
                 s->video_skips++;
-                do_blit = (now_seconds() - s->last_blit_at) > 0.6; /* 活性保障，见下 */
+                do_blit = 1;
             }
         } else if (s->audio_enabled) {
             long long due = s->video_base_ms + (long long)((double)(s->frames + 1) * 1000.0 / (double)s->fps);
             long long apos = s->audio_base_ms + audio_anchor_ms(s);
+            long long drift;
             int waited = 0;
             /* durl（音视频同进程）等待限幅：视频线程不读帧 → video pipe 满 → ffmpeg 阻塞
              * → 音频断供 → 锚停走 → 继续等 = 死锁。限幅后贴屏放行 pipe 解锁 ffmpeg。
@@ -973,25 +1179,51 @@ static void *video_thread(void *arg) {
                 apos = s->start_ms + audio_anchor_ms(s);
             }
             if (s->stop_flag) break;
+            drift = apos - due;
+            s->last_drift_ms = (long)drift;
             if (s->frames > 0 && !s->audio_alive) {
                 s->paced = 1; /* 音频时钟死亡 → 墙钟接管 */
-            } else if (apos >= due + AV_SKIP_MS) {
-                /* 落后音频钟：丢积压帧追钟（v1.9.1）+ 活性保障（v1.9.4）。
-                 * 全丢的问题：生产端恰为 1x 时积压永不收敛（读帧速率=生产速率，
-                 * 丢帧并不推进追赶）→ 画面冻结到 JS 巡检兜底（真机实测 8-20s 黑画面）。
-                 * 现每 0.6s 强制贴最新帧：画面低帧率但"活着"；配合 JS 侧降负载
-                 * （v2.7.0 起无弹幕渲染负担）余量回来后积压自然排空。 */
+            } else if (drift > AV_RESYNC_MS && s->frames > 0 && s->audio_input[0] && av_resync_gate(s)) {
+                /* ② 不同步过大 → 强制重同步（v2.1.0）：跳过积压内容，视频流重启到"当前可闻音频
+                 * 位置 + 预估启动时延"，首帧落屏即同步（音频侧完全不动，声音不断）。重同步期间
+                 * status.resyncing=1 → JS 显示"加载中…"。仅 DASH 拆分模式可安全重启；
+                 * durl（audio_input 空）无独立音频进程 → 退回下面①的平滑快进兜底。 */
+                s->resync_count++;
+                if (restart_video_synced(s) == 0) continue; /* 重入主循环读新流首帧（不递归，防长会话栈增长） */
                 s->video_skips++;
-                do_blit = (now_seconds() - s->last_blit_at) > 0.6;
+                do_blit = 1; /* 重启失败 → 退化为平滑快进 */
+            } else if (drift > AV_SKIP_MS) {
+                /* ① 轻微滞后 → 平滑快进追上（v2.1.0）：每帧都贴屏、不等钟，画面以当前解码产速
+                 * 连续快进（不再旧的 0.6s 节流 → 消除"网络波动后一段 1.6fps 顿挫"）。产速>1x
+                 * 时积压自然排空；仍不收敛则累计到 >AV_RESYNC_MS 升级为②强制重同步。 */
+                s->video_skips++;
+                do_blit = 1;
             }
         }
         s->frames++;
+        s->ever_played = 1; /* v2.1.0：本会话已出过画（重启后 frames 归零，据此区分中途断流与从未出画） */
+        s->stall_resyncs = 0; /* v2.1.0：有新帧 = 空转期重同步成功/视频链恢复 → 计数清零 */
         s->position_ms = s->video_base_ms + (long)((double)s->frames * 1000.0 / (double)s->fps);
         s->frame_valid = 1;
-        /* 帧已产出：放行音频起播门（丢弃帧也算产出——门只关心视频链路活着）。
-         * 巡检基准 last_blit_at 只在真贴屏时刷新：丢帧追钟期间全丢不贴，直到追上；
-         * 积压吸收期最长 ~读速（1s 积压 ≈ 240ms），远小于巡检 8s 阈值，不会误报停帧。 */
+        /* 帧已产出：放行音频起播门（重启后的首帧也算产出——门只关心视频链路活着）。
+         * v2.1.0 起滞后帧也逐帧贴屏（平滑快进），故 last_blit_at 每帧刷新、不会误报停帧。 */
         s->video_first_frame = 1;
+        if (s->resyncing) {
+            /* 重启后首帧（v2.1.2）：用**残余漂移**反馈修正 lead —— 这才是正确观测量。
+             * 重启耗时 Δ 本身不可预知，且落点误差 = Δ − lead_used；直接测 Δ 赋值会残留
+             * "Δ−lead" 的固定偏差（实测残留 ~2s → 每过 6s 冷却又触发一次重同步，要连做
+             * 3 次才收敛）。改为 lead ← lead + 残余（钳制），一次重同步后即落到同步附近，
+             * 残余交给①平滑快进吸收。 */
+            long long anchor = s->audio_base_ms + audio_anchor_ms(s);
+            long long pos = s->video_base_ms + (long long)((double)s->frames * 1000.0 / (double)s->fps);
+            long residual = (long)(anchor - pos); /* >0 = 重启后仍落后 → lead 偏小 */
+            long lead = s->resync_lead_ms + residual;
+            if (lead < AV_RESYNC_LEAD_MIN_MS) lead = AV_RESYNC_LEAD_MIN_MS;
+            if (lead > AV_RESYNC_LEAD_MAX_MS) lead = AV_RESYNC_LEAD_MAX_MS;
+            s->resync_lead_ms = lead;
+            s->last_drift_ms = residual;
+            s->resyncing = 0; /* 首帧已产出 → 清除"加载中…" */
+        }
         if (do_blit) s->last_blit_at = now_seconds();
         /* render_paused：评论面板/系统UI覆盖时暂停 fb 输出（解码/位置/音频照常）。
          * 根因（2026-09-24 真机三现象钉死）：视频矩形像素归 blit（33ms 写两块）专属，
@@ -1005,26 +1237,23 @@ static void *video_thread(void *arg) {
 
     if (s->stop_flag) return NULL;
 
-    if (failed && s->frames > 0 && s->video_retries < 5 &&
+    if (failed && (s->ever_played || s->resync_timeout) && s->video_retries < 5 &&
         s->audio_input[0] && s->audio_enabled && s->audio_alive &&
         !(s->duration_ms > 0 && s->position_ms + 2000 >= s->start_ms + s->duration_ms)) {
         /* 视频流中途断流（CDN 断开/rw_timeout/进程被杀）≠ 播放结束（v1.9.3，修
          * "画面显示已播完但声音还在播"）。旧逻辑把任何视频进程退出都判 ENDED。
-         * 现以当前可闻位置重启视频流：音频侧（独立进程+aplay）完全不动，时钟连续；
-         * 断流间隙由丢帧追钟自然吸收。仅 DASH 拆分模式可安全重启（durl 同进程会
+         * 现以"当前可闻位置 + 预估启动时延"重启视频流（v2.1.0）：音频侧（独立进程+aplay）
+         * 完全不动，时钟连续，首帧落屏即同步。仅 DASH 拆分模式可安全重启（durl 同进程会
          * 连带音频，维持原判，靠 -reconnect 兜底）。上限 5 次防无限循环；
-         * 已接近片尾（duration 已知）仍按正常结束。 */
+         * 已接近片尾（duration 已知）仍按正常结束。
+         * v2.1.0：判据由 frames>0 改为 ever_played —— 重启后 frames 已归零，若仍用 frames>0
+         * 会把"重启后的视频流又断"误判成"从未出画"→ 掉进无音轨重试从头重放。 */
         s->video_retries++;
         s->retried_no_audio = 1; /* 视频链已证可产出：后续零帧失败不再走"无音轨重试"（防从头重放） */
-        close_fd(&s->video_fd);
-        kill_child(&s->ff_pid);
-        s->video_base_ms = s->audio_base_ms + audio_anchor_ms(s);
-        s->frames = 0;
-        s->position_ms = s->video_base_ms;
-        s->video_first_frame = 1; /* 起播门已过，重启不再等门 */
-        s->last_blit_at = now_seconds(); /* 巡检基线重置，防恢复期被误判停帧 */
-        clock_gettime(CLOCK_MONOTONIC, &s->started_at); /* paced 基线一并重置 */
-        if (spawn_ffmpeg(s, s->video_base_ms, 0) == 0) {
+        /* v2.1.0：断流重启复用"音频位置 + 启动时延"落点（与强制重同步同构）——
+         * 首帧落屏即同步；旧逻辑只按音频位置重开，白落一个启动时延又得慢慢追。
+         * resyncing 由 respawn_video_at 置位 → JS 显示"加载中…"。 */
+        if (restart_video_synced(s) == 0) {
             return video_thread(arg); /* 与无音轨重试同构：重启后重入主循环 */
         }
         capture_log_tail(s);
@@ -1033,14 +1262,14 @@ static void *video_thread(void *arg) {
         return NULL;
     }
 
-    if (failed && s->frames == 0 && s->audio_input[0] && s->video_retries > 0) {
+    if (failed && s->frames == 0 && s->audio_input[0] && s->video_retries > 0 && !s->resync_timeout) {
         /* 断流恢复重启后仍零帧 = 源确实耗尽（未知时长的视频正常结尾）→ 按结束处理，
          * 不落入下面的无音轨重试（那会从头重放）也不报错误 */
         s->state = ST_ENDED;
         return NULL;
     }
 
-    if (failed && s->frames == 0 && s->audio_enabled && !s->retried_no_audio) {
+    if (failed && !s->ever_played && s->frames == 0 && s->audio_enabled && !s->retried_no_audio && !s->resync_timeout) {
         /* 无音轨时 ffmpeg 会因第二个输出没有流而整体失败：去掉音频输出重来一次 */
         s->retried_no_audio = 1;
         s->audio_enabled = 0;
@@ -1051,6 +1280,7 @@ static void *video_thread(void *arg) {
         kill_child(&s->aplay_pid);
         close_fd(&s->aplay_fd);
         clock_gettime(CLOCK_MONOTONIC, &s->started_at);
+        s->video_spawn_at = now_seconds();
         if (spawn_ffmpeg(s, s->start_ms, 0) == 0 && spawn_aplay(s, NULL) == 0) {
             return video_thread(arg);
         }
@@ -1285,7 +1515,6 @@ static void session_reset(struct session *s) {
     s->audio_bytes = 0;
     s->audio_dropped = 0;
     s->has_audio = 0;
-    s->audio_active = 0;
     s->audio_is_bt = 0;
     s->audio_dev[0] = '\0';
     s->paced = 0;
@@ -1301,6 +1530,19 @@ static void session_reset(struct session *s) {
     s->audio_base_ms = 0; /* v1.9.3 时钟基准（session_start 里对齐 start_ms） */
     s->video_base_ms = 0;
     s->video_retries = 0;
+    /* v2.1.0 音画同步分层状态 */
+    s->resyncing = 0;
+    s->resync_count = 0;
+    s->resync_lead_ms = 1200; /* 首启无实测值：先验估值（-ss 定位 + probesize + 首帧解码） */
+    s->resync_at = 0;
+    s->last_drift_ms = 0;
+    s->ever_played = 0;
+    s->probe_audio_bytes = 0;
+    s->stall_resyncs = 0;
+    s->resync_burst = 0;
+    s->resync_burst_at = 0;
+    s->resync_timeout = 0;
+    s->video_spawn_at = 0;
     ring_reset(s);
 }
 
@@ -1327,6 +1569,19 @@ static int session_start(struct session *s, long start_ms, int with_audio, const
     s->audio_base_ms = start_ms; /* v1.9.3 时钟基准：writer_bytes==0 ⇔ 内容位置 start_ms */
     s->video_base_ms = start_ms;
     s->video_retries = 0;
+    /* v2.1.0：新会话/seek 复位同步分层状态（lead 自适应值随会话重置） */
+    s->resyncing = 0;
+    s->resync_count = 0;
+    s->resync_lead_ms = 1200;
+    s->resync_at = 0;
+    s->last_drift_ms = 0;
+    s->ever_played = 0;
+    s->probe_audio_bytes = 0;
+    s->stall_resyncs = 0;
+    s->resync_burst = 0;
+    s->resync_burst_at = 0;
+    s->resync_timeout = 0;
+    s->video_spawn_at = 0;
     ring_reset(s);
     /* 音频设备/采样率：每次 open（audio_rate==0 触发）探测一次；seek 重启复用同值保持一致。
      * 蓝牙(auto 或显式 bluealsa)→ 48000；内置/speaker → 44100。 */
@@ -1356,6 +1611,7 @@ static int session_start(struct session *s, long start_ms, int with_audio, const
     /* DASH（有第二输入音频轨）→ 音频走独立进程，视频进程只需单输出；
      * durl 回退（单文件，音视频同文件）→ 保持原双输出同进程模式 */
     int split_audio = with_audio && s->audio_input[0];
+    s->video_spawn_at = now_seconds();
     if (spawn_ffmpeg(s, start_ms, with_audio && !split_audio) != 0) {
         set_error(s, "无法启动 ffmpeg 进程");
         s->state = ST_ERROR;
@@ -1373,6 +1629,7 @@ static int session_start(struct session *s, long start_ms, int with_audio, const
             if (!split_audio) {
                 kill_child(&s->ff_pid);
                 close_fd(&s->video_fd);
+                s->video_spawn_at = now_seconds();
                 if (spawn_ffmpeg(s, start_ms, 0) != 0) {
                     set_error(s, "无法启动解码进程");
                     s->state = ST_ERROR;
@@ -1708,6 +1965,15 @@ static JSValue js_status(JSContext *ctx, JSValueConst this_val, int argc, JSValu
     }
     mk_int(ctx, "videoSkips", s->video_skips, res);
     mk_int(ctx, "videoRestarts", s->video_retries, res); /* v1.9.3：>0 即发生过视频断流重启 */
+    /* v2.1.0 音画同步分层：resyncing=视频流正在强制重同步（首帧未产出）→ JS 显示"加载中…"；
+     * resyncCount=漂移触发的强制重同步次数；avDriftNowMs=最近一次漂移（apos−due，诊断）。 */
+    mk_bool(ctx, "resyncing", s->state == ST_PLAYING && s->resyncing, res);
+    /* v2.2.4：本次重同步已持续毫秒数（未在重同步时为 0）——JS 据此只在"恢复确实慢"时才弹
+     * 「加载中」，把 1~2s 的快速视频流重启做成静默自愈（用户只看到一次极短的画面停顿）。 */
+    mk_int(ctx, "resyncingMs", s->resyncing ? (long)((now_seconds() - s->resync_at) * 1000.0) : 0, res);
+    mk_int(ctx, "resyncCount", s->resync_count, res);
+    mk_int(ctx, "avDriftNowMs", s->last_drift_ms, res);
+    mk_int(ctx, "resyncLeadMs", s->resync_lead_ms, res); /* v2.2.0 诊断：落点前移量自适应值 */
     mk_bool(ctx, "audioIsBt", s->audio_is_bt, res);
     mk_str(ctx, "audioDevice", s->audio_dev[0] ? s->audio_dev : NULL, res);
     mk_bool(ctx, "frameValid", s->frame_valid, res);

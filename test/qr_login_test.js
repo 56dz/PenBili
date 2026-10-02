@@ -224,9 +224,9 @@ async function main() {
     assert.strictEqual(r.state, QR_STATE.OK, JSON.stringify(r));
     assert.strictEqual(r.cookies.SESSDATA, 'SESS_PLACEHOLDER_222CHARS');
     assert.strictEqual(r.cookies.bili_jct, 'JCT_PLACEHOLDER');
-    assert.strictEqual(r.cookies.DedeUserID, '293793435');
+    assert.strictEqual(r.cookies.DedeUserID, '100000001');
     assert.strictEqual(r.cookies.expiresAt, 1790140171000);
-    assert.strictEqual(r.mid, 293793435);
+    assert.strictEqual(r.mid, 100000001);
     assert.strictEqual(r.refreshToken, 'RT_PLACEHOLDER');
   });
   test('qrlogin: 成功态缺 SESSDATA → 防御且只露 name 列表', () => {
@@ -265,8 +265,8 @@ async function main() {
     const c1 = createClient({ get: async () => ({ statusCode: 200, body: JSON.stringify(loginFx) }) });
     const p = parseNavProfile(await c1.request('/x/web-interface/nav'));
     assert.strictEqual(p.ok, true, p.message);
-    assert.strictEqual(p.mid, 293793435);
-    assert.strictEqual(p.uname, '社会易姐QwQ');
+    assert.strictEqual(p.mid, 100000001);
+    assert.strictEqual(p.uname, '示例用户');
     assert.strictEqual(p.level, 6);
     assert.strictEqual(p.vipType, 2);
 

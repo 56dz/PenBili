@@ -333,8 +333,10 @@ async function main() {
     assert.ok(QN_LADDER.every((q) => q < 64));
     // v2.6.1：durl 也只走 16——qn32 durl 实测 852×480(409K px) 超解码预算(310K)，再次压垮软解
     assert.deepStrictEqual(QN_LADDER, [16]);
-    // DASH 只走 id16（640x360）：dash id32=852x480 把 A53 打到 0.7x 实时（2h 长片实测 underrun 1.4s 循环）
+    // 发布阶梯仅保留已验证的 DASH id16(360p)，避免服务端不提供 240p 时额外多发一轮请求。
+    // 不提供 id32(480p)：弱设备上解码吞吐低于实时。
     assert.deepStrictEqual(DASH_QN_LADDER, [16]);
+    assert.ok(DASH_QN_LADDER.every((q) => q < 32), '不得含 480p/720p');
     // DASH 参数集：fnval=16 且**不带 platform=html5**（服务端见 html5 强制降级 durl，真机回退日志坐实）
     const dp = buildPlayurlParams({ bvid: 'BV1ZCeb6NEyM', cid: 42, qn: 16, fnval: 16 });
     assert.strictEqual(dp.fnval, 16);
@@ -404,6 +406,24 @@ async function main() {
     // 传输/请求失败
     assert.strictEqual(parseDashResponse({ ok: false, stage: 'transport', message: 'x' }).stage, 'transport');
     assert.strictEqual(parseDashResponse(null, 16).ok, false);
+  });
+  test('playurl: DASH qn16 保持 360p 并优先 AVC', () => {
+    const mk = (video) => ({ ok: true, code: 0, data: { timelength: 1000, dash: { video: video, audio: [{ id: 30216, bandwidth: 65000, baseUrl: 'https://a.bilivideo.com/a.m4s' }] } } });
+    const v360 = { id: 16, width: 640, height: 360, bandwidth: 230000, codecs: 'avc1.64001E', baseUrl: 'https://a.bilivideo.com/v16.m4s' };
+    const hevc360 = { id: 16, width: 640, height: 360, bandwidth: 90000, codecs: 'hvc1.1.6.L120.90', baseUrl: 'https://a.bilivideo.com/h16.m4s' };
+    const v480 = { id: 32, width: 852, height: 480, bandwidth: 400000, codecs: 'avc1.64001F', baseUrl: 'https://a.bilivideo.com/v32.m4s' };
+    assert.deepStrictEqual(DASH_QN_LADDER, [16]);
+    const p = parseDashResponse(mk([v480, hevc360, v360]), 16, false);
+    assert.strictEqual(p.ok, true, p.message);
+    assert.strictEqual(p.qn, 16);
+    assert.strictEqual(p.width, 640);
+    assert.strictEqual(p.height, 360);
+    assert.strictEqual(p.codecs.indexOf('avc1'), 0);
+    assert.ok(p.avail.indexOf('16:640x360') >= 0, '诊断应包含实际 360p 档位');
+    assert.ok(p.avail.indexOf('32:852x480') >= 0, '诊断应包含服务端提供的高档位');
+    const onlyHevc = parseDashResponse(mk([hevc360]), 16, true);
+    assert.strictEqual(onlyHevc.ok, false);
+    assert.strictEqual(onlyHevc.stage, 'codec');
   });
   test('playurl: parseHtml5Response 正常/无 durl/请求失败', () => {
     const good = parseHtml5Response({
@@ -1114,6 +1134,28 @@ async function main() {
     await closeSession(w);
     assert.strictEqual(w.calls.stop, 2);
     assert.strictEqual(w.calls.release, 2);
+  });
+  test('play_session: readStatus 透传 v2.1.0 强制重同步字段', async () => {
+    const w = fakePlayDeps();
+    w.player.status = async () => ({
+      ok: true,
+      state: 'playing',
+      frames: 100,
+      positionMs: 5000,
+      avDriftMs: 900,
+      resyncing: true,
+      resyncCount: 3,
+      avDriftNowMs: 812
+    });
+    const st = await readStatus(w);
+    assert.strictEqual(st.resyncing, true, '重同步标志透传 → 页面显示"加载中…"');
+    assert.strictEqual(st.resyncCount, 3);
+    assert.strictEqual(st.avDriftNowMs, 812);
+    // 缺省（老 native 无这些字段）→ false/0，页面不会误显示"加载中…"
+    w.player.status = async () => ({ ok: true, state: 'playing', frames: 1 });
+    const st2 = await readStatus(w);
+    assert.strictEqual(st2.resyncing, false);
+    assert.strictEqual(st2.resyncCount, 0);
   });
   test('play_session: describePlayError 阶段翻译 + 步长常量', () => {
     assert.ok(describePlayError({ ok: false, stage: 'wbi', message: 'x' }).indexOf('签名') >= 0);

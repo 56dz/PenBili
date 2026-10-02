@@ -4,16 +4,16 @@
  "ttl": 1,
  "data": {
   "isLogin": true,
-  "face": "https://i0.hdslb.com/bfs/face/aebb2639a0d47f2ce1fec0631f412eaf53d4a0be.jpg",
+  "face": "https://example.com/face/placeholder.jpg",
   "level_info": {
    "current_level": 6,
    "current_min": 28800,
    "current_exp": 52689,
    "next_exp": "--"
   },
-  "mid": 293793435,
+  "mid": 100000001,
   "money": 172.4,
-  "uname": "社会易姐QwQ",
+  "uname": "示例用户",
   "vipStatus": 1,
   "vipType": 2,
   "wbi_img": {
