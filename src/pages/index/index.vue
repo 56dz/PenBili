@@ -18,13 +18,13 @@
         <!-- 播放态左栏：标题/作者/评论区置顶（v2.8.0 用户指定），下方才是返回与播放控制 -->
         <text class="play-title">{{ infoTitle }}</text>
         <text class="play-up">{{ infoUp }}</text>
-        <div class="ctrl play-comment" @click="openComments">
+        <div class="ctrl ctrl-play play-comment" @click="openComments">
           <text class="ctrl-text">评论区{{ replyCount ? ' · ' + replyCount : '' }}</text>
         </div>
-        <div class="ctrl" @click="onBack">
+        <div class="ctrl ctrl-play" @click="onBack">
           <text class="ctrl-text">返回列表</text>
         </div>
-        <div class="ctrl ctrl-main" @click="onTogglePlay">
+        <div class="ctrl ctrl-play ctrl-main" @click="onTogglePlay">
           <text class="ctrl-text">{{ btnText }}</text>
         </div>
         <!-- v2.8.0：±20s 按钮已按用户要求移除（seek 能力保留给自动恢复/自检内部调用） -->
@@ -204,12 +204,18 @@
         <text class="play-idle-text">{{ idleText }}</text>
       </div>
     </div>
-    <!-- 右列：弹幕流（v2.8.0 用户指定）。新条目自底部进入、整列上移（justify-content:flex-end
-         + 列表封顶 → 顶部溢出裁掉）。纯 UI 层文本渲染，与 v2.7.0 移除的 native drawtext 烧帧
-         方案完全不同，不占解码预算。条目按 id 去重（同文本在可见窗口内也只留一条）。 -->
-    <div v-if="mode === 'play' && !commentsOpen" :class="dmLines.length ? 'dm-col' : 'dm-col dm-col-empty'">
-      <text v-if="dmHint" class="dm-hint">{{ dmHint }}</text>
-      <text v-for="l in dmLines" :key="l.id" class="dm-line">{{ l.text }}</text>
+    <!-- 右列：弹幕流（v2.8.1 用户指定）。
+         结构刻意做成**固定槽位**：外框 + 标题「弹幕」+ 恒定 N 个弹幕框（key 固定为 s0..sN-1），
+         内容更新时只有 <text> 的文字变化，节点树不增删 → 不会触发大面积重绘（用户反馈
+         每来一条弹幕画面会闪一下，即由此而来）。空槽位显示空白，不隐藏框。
+         新条目自底部进入、整列上移 = 槽位文字整体前移一位。 -->
+    <div v-if="mode === 'play' && !commentsOpen" class="dm-col">
+      <div class="dm-head">
+        <text class="dm-head-text">{{ dmHeadText }}</text>
+      </div>
+      <div v-for="(slot, i) in dmSlots" :key="'s' + i" class="dm-box">
+        <text class="dm-line">{{ slot }}</text>
+      </div>
     </div>
   </div>
 </template>
@@ -358,10 +364,11 @@ export default {
       replyOpen: { root: 0, items: [], shown: 0, page: 1, noMore: false, loading: false },
       // 评论覆盖面板
       commentsOpen: false,
-      // 右栏弹幕显示列表（v2.8.0）：由 danmaku_feed 推进，按 id 去重、行数有上限
-      dmLines: [],
-      // 右栏空状态文案（加载中 / 本视频无弹幕）；有内容时为空串
-      dmHint: ''
+      // 右栏弹幕固定槽位（v2.8.1）：长度恒为 DM_MAX_LINES，空槽位为空串。
+      // 恒定长度 + 固定 key → 更新时只改文字，不增删节点（防闪烁）
+      dmSlots: [],
+      // 右栏标题文案：「弹幕」或「弹幕 · 加载中…」/「弹幕 · 无弹幕」
+      dmHeadText: '弹幕'
     };
   },
   computed: {
@@ -421,6 +428,9 @@ export default {
     this._poll = 0;
     this.mixinMemo = {}; // WBI 密钥会话级缓存（播放与搜索共享）
     this.client = createClient({});
+    // 右栏弹幕槽位初始化：恒定长度，保证首次渲染就有 N 个空框（结构此后不再变化）
+    this.dmSlots = new Array(DM_MAX_LINES);
+    for (let i = 0; i < DM_MAX_LINES; i++) this.dmSlots[i] = '';
     // 弹幕流（右栏）：fetchSeg 在 start() 时按 cid/aid 绑定；advance() 由播放轮询驱动，
     // 不额外起定时器。日志走 logWarn（与 [bili] 前缀一致，便于真机 grep）。
     this.dm = createDanmakuFeed({
@@ -782,9 +792,11 @@ export default {
       ).items;
       saveHistory({ version: 1, items: this.history });
       this.loadReplies(r.session.aid || 0); // 评论首屏（不阻塞播放；无 aid 内部直接返回）
-      // 弹幕：按本稿件的 cid/aid 重建抓取器（cid 是 oid，传 aid 会拿到空段），并清空上一稿列表
-      this.dmLines = [];
-      this.dmHint = '';
+      // 弹幕：按本稿件的 cid/aid 重建抓取器（cid 是 oid，传 aid 会拿到空段），并清空槽位文字
+      // （长度保持不变 —— 只清文字，不动节点树）
+      for (let i = 0; i < this.dmSlots.length; i++) this.dmSlots[i] = '';
+      this.dmSlots = this.dmSlots.slice();
+      this.dmHeadText = '弹幕';
       this._dmSig = '';
       this.dm = createDanmakuFeed({
         fetchSeg: makeSegFetcher(this.client, r.session.cid, r.session.aid || 0),
@@ -944,16 +956,18 @@ export default {
         this.play.frames = st.frames;
         // 弹幕推进（v2.8.0）：只在播放中推进 —— 暂停/播完时位置不动，弹幕自然停住。
         // advance() 是同步的：分段未就绪只触发后台拉取并返回 0，绝不阻塞轮询。
-        // 用 signature（长度+末条 id）判断是否需要重新赋值，避免每秒无谓重绘。
+        // 用 signature（长度+末条 id）判断是否需要重新赋值；dmSlots 长度恒定，
+        // 赋值后 Vue 复用同一批节点、只改文字（防闪烁）。
         if (st.state === 'playing') {
           this.dm.advance(st.positionMs);
           const sig = this.dm.signature();
           if (sig !== this._dmSig) {
             this._dmSig = sig;
-            this.dmLines = this.dm.getLines();
+            this.dmSlots = this.dm.getSlots();
           }
           const hint = this.dm.hintText();
-          if (hint !== this.dmHint) this.dmHint = hint;
+          const head = hint ? '弹幕 · ' + hint : '弹幕';
+          if (head !== this.dmHeadText) this.dmHeadText = head;
         }
         if (st.state === 'ended') {
           this.play.state = 'ended';
@@ -1372,8 +1386,9 @@ export default {
         this.play = idlePlay();
         // 弹幕：随播放会话一起清空。gen++ 已使在途的分段拉取结果被丢弃（feed 内部同样按 gen 守卫）
         if (this.dm) this.dm.reset();
-        this.dmLines = [];
-        this.dmHint = '';
+        for (let i = 0; i < this.dmSlots.length; i++) this.dmSlots[i] = '';
+        this.dmSlots = this.dmSlots.slice();
+        this.dmHeadText = '弹幕';
         this._dmSig = '';
       }
       if (note) this.statusText = note;

@@ -102,12 +102,20 @@
   opacity: 0.7;
 }
 
+/* 播放态左栏专用：比浏览态按钮矮一点、间距小一点。
+   原因（v2.8.1 修 bug）：左栏在播放态要塞下 brand + 标题(2行) + 作者 + 3 个按钮 + 进度 + 状态，
+   用浏览态尺寸(34px/6px)时总高超出 254px，「播放中」被挤到屏幕外只剩一半。 */
+.ctrl-play {
+  height: 30px;
+  margin-top: 4px;
+}
+
 .bar-state {
-  margin-top: 8px;
+  margin-top: 4px;
   flex: 1;
   font-size: 11px;
   color: @text-color-dim;
-  lines: 3;
+  lines: 2;
   text-overflow: ellipsis;
 }
 
@@ -369,43 +377,54 @@
 }
 
 /* ---------- 播放态右栏：弹幕流 ---------- */
-/* v2.8.0 用户指定：原右栏信息（标题/作者/评论区）已移到左栏，右栏改为弹幕竖向滚动。
-   justify-content:flex-end → 内容贴底；新条目从底部加入时整列上移，列表长度有上限
-   （DM_MAX_LINES），顶部溢出由 overflow:hidden 裁掉 —— 这就是「由下至上滚动」的实现。
-   刻意不用 scroller 与 CSS 动画：本设备（单核 A53 + QuickJS）从未使用过 animation/
-   transition，重绘敏感，纯静态重排最稳。 */
+/* v2.8.1 用户指定：右栏是一个带标题「弹幕」的大框，每条弹幕各自包在独立小框里。
+   结构刻意做成**固定槽位**（恒定 DM_MAX_LINES 个框，key 固定）——内容更新时只改 <text>
+   文字、不增删节点，避免每次来弹幕都重建节点树触发大面积重绘（真机表现为画面闪一下）。
+   空槽位保留空框，不隐藏。
+   注意：本项目全仓未使用过 border-width（框架文档明确「不要依赖完整 Web CSS」），
+   所以「框」的观感靠**背景色对比**实现（面板用 card 色、小框用更深的底色 + 圆角）。 */
 .dm-col {
   width: 174px;
   height: 254px;
   flex-direction: column;
-  justify-content: flex-end;
-  padding-left: 8px;
-  padding-right: 8px;
-  padding-top: 6px;
-  padding-bottom: 6px;
+  padding-left: 6px;
+  padding-right: 6px;
+  padding-top: 5px;
+  padding-bottom: 5px;
   background-color: @card-background-color;
-  overflow: hidden;
 }
 
-.dm-line {
-  margin-top: 2px;
+.dm-head {
+  height: 18px;
+  margin-bottom: 2px;
+  flex-direction: row;
+  align-items: center;
+  padding-left: 2px;
+}
+
+.dm-head-text {
   font-size: 12px;
-  color: @text-color;
+  color: @accent;
   lines: 1;
   text-overflow: ellipsis;
 }
 
-/* 空状态（加载中 / 本视频无弹幕）：把唯一一行提示居中，避免空面板看起来像界面坏了 */
-.dm-col-empty {
+.dm-box {
+  width: 162px;
+  height: 22px;
+  margin-top: 2px;
+  border-radius: 3px;
+  background-color: @background-color;
   justify-content: center;
-  align-items: center;
+  padding-left: 5px;
+  padding-right: 5px;
 }
 
-.dm-hint {
+.dm-line {
   font-size: 12px;
-  color: @text-color-dim;
-  text-align: center;
-  lines: 2;
+  color: @text-color;
+  lines: 1;
+  text-overflow: ellipsis;
 }
 
 .info-spacer {

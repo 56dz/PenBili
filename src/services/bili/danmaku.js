@@ -101,8 +101,9 @@ function utf8Decode(bytes) {
 // bytes → [{p, text}]（按 mode 过滤；key/len 全 varint、未知字段按 wire 跳过）
 // 返回 {ok, items} | {ok:false, reason}
 // 入口与 isDanmakuBytes 同一判定：**不强制 0x0A**（段1 elems 可空、以 field4 状态包开头）。
-export function parseDanmakuSeg(a) {
+export function parseDanmakuSeg(a, maxItems) {
   if (!a || !a.length || !isDanmakuBytes(a)) return { ok: false, reason: 'bad head' };
+  const limit = maxItems > 0 ? maxItems : Infinity;
   const out = [];
   let p = 0;
   try {
@@ -146,10 +147,16 @@ export function parseDanmakuSeg(a) {
           }
         }
         if (p !== end) return { ok: false, reason: 'misalign' };
-        if (SHOW_MODES[mode] && content) {
+        if (SHOW_MODES[mode] && content && out.length < limit) {
           // key = 去重键：idStr（field12，字符串形态，无精度损失）优先，退回 id 的十进制串。
           // 同一弹幕在分包边界/重复拉取时可能出现两次，调用方按此键去重。
           out.push({ id: idStr || String(id), p: Math.floor(progress), text: content });
+          // ★ 够了就停：**必须**有这条提前退出，否则会扫描整个缓冲区。
+          // 真机实测（2026-10-03，炮姐 BV1Js411o76u 第 1 包）：该包 3.5MB / 上万条，
+          // 全量扫描会让 QuickJS 崩溃（ANR 报告栈顶 JS_DefinePropertyValue，且反复复现）；
+          // 限制到 600 条后稳定通过。数据在包内的顺序接近随机（实测取前 588 条，
+          // progress 覆盖 2901..357174ms，几乎铺满 6 分钟），所以取前 N 条 = 均匀采样。
+          if (out.length >= limit) break;
         }
       } else if (wt === 2) {
         let l;

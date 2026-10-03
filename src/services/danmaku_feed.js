@@ -15,10 +15,15 @@
 
 import { SEG_DURATION_MS, segUrl, segCount, toBytes, isDanmakuBytes, parseDanmakuSeg } from './bili/danmaku.js';
 
-export const DM_MAX_LINES = 11; /* 右栏可见行数上限（254px 高 / 实测每行约 21px + 上下 padding） */
+export const DM_MAX_LINES = 9; /* 右栏可见行数（固定槽位数，见 DM_SLOTS 说明） */
 export const DM_MAX_PER_TICK = 2; /* 单次推进最多产出条数：密集段落取样，防整屏跳动 */
 export const DM_MAX_CACHE_SEGS = 3; /* 分段缓存上限 */
 export const DM_PREFETCH_MS = 45000; /* 距本段结束不足此值 → 预取下一段 */
+/* ★ 每个分段最多解析/保留的弹幕条数。**这不是显示上限，而是稳定性红线**：
+ * 真机实测某些稿件的分包可达 3.5MB / 上万条，全量解析会让 QuickJS 崩溃
+ * （详见 bili/danmaku.js 里 parseDanmakuSeg 的注释）。600 条足够右栏以 2 条/秒
+ * 滚动 5 分钟，且实测覆盖整个 6 分钟时间轴。 */
+export const DM_MAX_ITEMS_PER_SEG = 600;
 
 // 播放位置 → 分包序号（1 起；每 6 分钟一包）
 export function segIndexOf(positionMs, segMs) {
@@ -238,14 +243,28 @@ export function createDanmakuFeed(opts) {
     return added;
   }
 
-  /* 空状态提示文案。空面板若什么都不显示，看起来像界面坏了 —— 这里给出唯一的一行说明。
-   * 返回 '' 表示"有内容可显示"或"数据已就绪、只是播放头还没走到第一条弹幕"。 */
+  /* 空状态提示（短后缀，供页面拼成「弹幕 · xxx」）。返回 '' 表示有内容可显示。 */
   function hintText() {
     if (!cid) return '';
     if (lines.length) return '';
-    if (!loadedSegs) return '弹幕加载中…';
-    if (itemsTotal === 0) return '本视频无弹幕';
+    if (!loadedSegs) return '加载中…';
+    if (itemsTotal === 0) return '无弹幕';
     return '';
+  }
+
+  /* 固定长度槽位数组（长度恒为 maxLines）。
+   * 为什么不是"返回当前列表"：页面用固定 key 渲染 N 个框，只改文字不增删节点，
+   * 从而避免每次来弹幕都重建节点树触发大面积重绘（真机表现为画面闪一下）。
+   * 底部对齐：不足 N 条时，前面的槽位留空；满时整体前移一位 = 由下至上滚动。 */
+  function getSlots() {
+    const n = maxLines;
+    const slots = new Array(n);
+    const off = lines.length - n;
+    for (let i = 0; i < n; i++) {
+      const j = off + i;
+      slots[i] = j >= 0 && j < lines.length ? lines[j].text : '';
+    }
+    return slots;
   }
 
   /* 显示窗口的廉价指纹（长度 + 末条 id）：用于页面判断是否需要重新赋值触发渲染。
@@ -260,6 +279,7 @@ export function createDanmakuFeed(opts) {
     advance: advance,
     ensure: ensure,
     getLines: () => lines.slice(),
+    getSlots: getSlots,
     lineCount: () => lines.length,
     hintText: hintText,
     signature: signature,
@@ -284,7 +304,7 @@ export function makeSegFetcher(client, cid, aid) {
     if (!r || !r.ok) return { ok: false, message: (r && r.message) || 'HTTP 失败' };
     const bytes = toBytes(r.body);
     if (!isDanmakuBytes(bytes)) return { ok: false, message: '非弹幕数据（魔数不符）' };
-    const parsed = parseDanmakuSeg(bytes);
+    const parsed = parseDanmakuSeg(bytes, DM_MAX_ITEMS_PER_SEG);
     if (!parsed.ok) return { ok: false, message: '解析失败: ' + parsed.reason };
     return { ok: true, items: parsed.items };
   };

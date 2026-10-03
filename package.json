@@ -2,7 +2,7 @@
   "name": "bili-app-x5",
   "appName": "PenBili",
   "appid": "8002026091900004",
-  "version": "2.8.0",
+  "version": "2.8.1",
   "icon": "app_icon.png",
   "description": "PenBili（有道 X5）：推荐/热门/视频搜索 + 点击播放 + 扫码登录 + 评论区",
   "quickjs": {

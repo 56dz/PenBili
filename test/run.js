@@ -139,7 +139,8 @@ async function main() {
     lowerBound,
     sampleEven,
     DM_MAX_LINES,
-    DM_MAX_PER_TICK
+    DM_MAX_PER_TICK,
+    DM_MAX_ITEMS_PER_SEG
   } = await import('../src/services/danmaku_feed.js');
   const fsx = require('fs');
   const pathx = require('path');
@@ -984,7 +985,29 @@ async function main() {
     const sortedRaw = r.items.every((it, i) => i === 0 || r.items[i - 1].p <= it.p);
     assert.strictEqual(sortedRaw, false, 'fixture 原始顺序应为乱序');
   });
-
+  test('danmaku: maxItems 限流（防大包全量扫描崩溃）—— 取前 N 条仍是全时间轴采样', () => {
+    const bytes = new Uint8Array(fsx.readFileSync(pathx.join(__dirname, '..', 'api-mock', 'fixtures', 'dm_seg.bin')));
+    // 限流后条数被严格约束
+    const capped = parseDanmakuSeg(bytes, 600);
+    assert.strictEqual(capped.ok, true, capped.reason);
+    assert.strictEqual(capped.items.length, 600, '恰好取到上限');
+    // 关键性质：被截断的样本仍覆盖整个分包时间轴（包内顺序近似随机）
+    let mn = Infinity;
+    let mx = -1;
+    for (const it of capped.items) {
+      if (it.p < mn) mn = it.p;
+      if (it.p > mx) mx = it.p;
+    }
+    assert.ok(mn < 60000, '样本覆盖到分包前段 mn=' + mn);
+    assert.ok(mx > 300000, '样本覆盖到分包后段 mx=' + mx);
+    // 上限必须显著小于真实包条数，否则失去限流意义
+    assert.ok(capped.items.length < 4500, '限流确实生效');
+    // maxItems 非法值 = 不限流（向后兼容）
+    assert.strictEqual(parseDanmakuSeg(bytes, 0).items.length, 5001);
+    assert.strictEqual(parseDanmakuSeg(bytes, -1).items.length, 5001);
+    // 上限大于总条数时全量返回
+    assert.strictEqual(parseDanmakuSeg(bytes, 999999).items.length, 5001);
+  });
   // ---------------- danmaku_feed 弹幕流（分段调度/去重/游标） ----------------
   test('dmfeed: segIndexOf 分包边界（6 分钟一包，1 起）', () => {
     assert.strictEqual(segIndexOf(0), 1);
@@ -1113,14 +1136,17 @@ async function main() {
     feed2.advance(1000);
     assert.strictEqual(feed2.lineCount(), 1, '窗口=1 时只剩最后一条');
   });
-  test('dmfeed: 空状态文案与显示窗口指纹', async () => {
+  test('dmfeed: 空状态文案 + 固定槽位输出', async () => {
     const empty = createDanmakuFeed({ fetchSeg: async () => ({ ok: true, items: [] }), maxLines: 5, maxPerTick: 2 });
     assert.strictEqual(empty.hintText(), '', '未 start 无文案');
+    // 槽位长度恒为 maxLines，且全空
+    assert.strictEqual(empty.getSlots().length, 5, '槽位长度恒定');
+    assert.ok(empty.getSlots().every((s) => s === ''), '空状态槽位全空');
     empty.start({ cid: 5, aid: 5, durationMs: 600000 });
-    assert.strictEqual(empty.hintText(), '弹幕加载中…', '尚未拉到数据');
+    assert.strictEqual(empty.hintText(), '加载中…', '尚未拉到数据');
     empty.advance(0);
     await new Promise((r) => setTimeout(r, 0));
-    assert.strictEqual(empty.hintText(), '本视频无弹幕', '空段');
+    assert.strictEqual(empty.hintText(), '无弹幕', '空段');
     assert.strictEqual(empty.signature(), '0:', '空列表指纹');
 
     const has = createDanmakuFeed({
@@ -1137,9 +1163,28 @@ async function main() {
     assert.strictEqual(has.lineCount(), 1);
     assert.notStrictEqual(has.signature(), s0, '产出后指纹变化');
     assert.strictEqual(has.hintText(), '', '有内容 → 无文案');
+    // 底部对齐：1 条内容应落在最后一个槽位
+    const slots = has.getSlots();
+    assert.strictEqual(slots.length, 5);
+    assert.deepStrictEqual(slots, ['', '', '', '', 'hi'], '底部对齐');
     // stats 暴露加载计数（供诊断/空状态判定）
     assert.strictEqual(has.stats().loadedSegs, 1);
     assert.strictEqual(has.stats().itemsTotal, 1);
+  });
+  test('dmfeed: 槽位随窗口前移（由下至上滚动）且长度恒定', async () => {
+    const items = [];
+    for (let i = 0; i < 8; i++) items.push({ id: 'q' + i, p: i * 1000, text: 'T' + i });
+    const feed = createDanmakuFeed({ fetchSeg: async () => ({ ok: true, items: items }), maxLines: 4, maxPerTick: 3 });
+    feed.start({ cid: 1, aid: 1, durationMs: 600000 });
+    feed.advance(0);
+    await new Promise((r) => setTimeout(r, 0));
+    for (let s = 1; s <= 8; s++) feed.advance(s * 1000);
+    const slots = feed.getSlots();
+    assert.strictEqual(slots.length, 4, '槽位长度恒为 maxLines');
+    // 最新一条应在最后（底部）
+    assert.strictEqual(slots[3], 'T7', '最新在底部: ' + JSON.stringify(slots));
+    // 槽位内容递增（未出现空槽说明已满）
+    assert.ok(slots.every((s) => s !== ''), '满屏无空槽');
   });
   test('dmfeed: 跨分包切换 + 换视频重置', async () => {
     const mk = (base) => {
@@ -1183,8 +1228,10 @@ async function main() {
     assert.strictEqual(f2.advance(1000), 0);
   });
   test('dmfeed: 常量与真机屏约束一致（右栏 174 宽 / 254 高）', () => {
-    assert.ok(DM_MAX_LINES >= 10 && DM_MAX_LINES <= 18, '可见行数合理: ' + DM_MAX_LINES);
+    assert.ok(DM_MAX_LINES >= 8 && DM_MAX_LINES <= 12, '可见行数合理: ' + DM_MAX_LINES);
     assert.ok(DM_MAX_PER_TICK >= 1 && DM_MAX_PER_TICK <= 4, '单 tick 产出受控: ' + DM_MAX_PER_TICK);
+    assert.ok(DM_MAX_ITEMS_PER_SEG >= 200 && DM_MAX_ITEMS_PER_SEG <= 1500,
+      '每包解析上限需兼顾"够用"与"不崩": ' + DM_MAX_ITEMS_PER_SEG);
     assert.strictEqual(SEG_DURATION_MS, 360000, '6 分钟一包');
   });
 
