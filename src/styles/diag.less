@@ -1,0 +1,170 @@
+@import "var.less";
+
+// 链路自检页（diag）样式 —— 从原 base.less 拆出，只服务 pages/diag。
+// 坐标全部来自 profiles/youdao-x5.md：逻辑 800x254。
+// 布局：左列 452px = 视频洞（native 写 fb 的逻辑矩形 {0,0,452,254}，
+// 对应物理 {0,174,254,452}，见 services/screen.js::probeVideoRects）；
+// 右列 348px = 步骤面板。
+.page {
+  width: 800px;
+  height: 254px;
+  flex-direction: row;
+  background-color: @background-color;
+}
+
+.video-col {
+  width: 452px;
+  height: 254px;
+}
+
+.video-hole {
+  width: 452px;
+  height: 254px;
+  background-color: rgba(0, 0, 0, 0);
+}
+
+.video-idle {
+  width: 452px;
+  height: 254px;
+  justify-content: center;
+  align-items: center;
+}
+
+.video-idle-text {
+  font-size: 14px;
+  color: @text-color-dim;
+}
+
+.panel {
+  width: 348px;
+  height: 254px;
+  flex-direction: column;
+  padding-left: 10px;
+  padding-right: 8px;
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+
+.head {
+  height: 22px;
+  flex-direction: row;
+  align-items: center;
+}
+
+.title {
+  flex: 1;
+  font-size: 15px;
+  color: @text-color;
+  lines: 1;
+  text-overflow: ellipsis;
+}
+
+.head-meta {
+  font-size: 11px;
+  color: @text-color-dim;
+}
+
+.steps {
+  flex-direction: column;
+}
+
+.row {
+  height: 21px;
+  flex-direction: row;
+  align-items: center;
+}
+
+.glyph {
+  width: 16px;
+  font-size: 13px;
+  color: @text-color-dim;
+}
+
+.label {
+  width: 74px;
+  font-size: 13px;
+  color: @text-color;
+  lines: 1;
+  text-overflow: ellipsis;
+}
+
+.detail {
+  flex: 1;
+  font-size: 12px;
+  color: @text-color-dim;
+  lines: 1;
+  text-overflow: ellipsis;
+}
+
+// 状态着色全部用扁平单类（运行时不保证后代选择器支持）
+.g-running {
+  color: @accent;
+}
+
+.d-running {
+  color: @accent;
+}
+
+.g-ok {
+  color: #4caf7d;
+}
+
+.g-fail {
+  color: @danger;
+}
+
+.d-fail {
+  color: @danger;
+}
+
+.g-skip {
+  color: @text-color-dim;
+}
+
+.d-skip {
+  color: @text-color-dim;
+}
+
+.l-skip {
+  color: @text-color-dim;
+}
+
+.foot {
+  margin-top: 4px;
+  height: 30px;
+  flex-direction: row;
+  align-items: center;
+}
+
+.summary {
+  flex: 1;
+  font-size: 12px;
+  color: @text-color;
+  lines: 2;
+  text-overflow: ellipsis;
+}
+
+.btn {
+  width: 72px;
+  height: 28px;
+  margin-left: 8px;
+  border-radius: 6px;
+  background-color: @accent-dim;
+  align-items: center;
+  justify-content: center;
+}
+
+.btn-dim {
+  background-color: @card-border-color;
+}
+
+.btn-text {
+  width: 72px;
+  font-size: 14px;
+  color: #ffffff;
+  text-align: center;
+}
+
+.btn:active {
+  opacity: 0.6;
+}

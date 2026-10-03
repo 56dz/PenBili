@@ -1,0 +1,756 @@
+@import "var.less";
+
+// PenBili 主界面骨架（坐标全部来自 profiles/youdao-x5.md：逻辑 800x254）
+//   浏览态：bar 174 + content 626 = 800
+//   播放态：bar 174 + 视频列 452（逻辑 {174,0,452,254} 居中 ↔ 物理 {0,174,254,452}）+ 信息列 174
+// 铁律：每个 .vue 必须自带 <style lang="less" scoped> 并 @import 本文件——
+//       没有 style 块时样式规则不会进 bundle（2026-09-22 真机黑屏证据）。
+
+/* ---------- 根 ---------- */
+.page {
+  width: 800px;
+  height: 254px;
+  flex-direction: row;
+  background-color: @background-color;
+}
+
+/* 播放态根容器透明 —— 闪烁根因修复（2026-09-24 推演+待真机）：
+ * falcon 大面积重绘（scroller 滚动位移必清视口）会用 page 背景色清扫全页，
+ * 把 fb 上的视频像素盖掉 → 下一帧 blit 33ms 才恢复 → 可见闪。
+ * 透明后清扫保留 fb 原像素（透出视频）；浏览态保持黑底（遮 fb 残留帧）。 */
+.page-live {
+  background-color: rgba(0, 0, 0, 0);
+}
+
+/* ---------- 左侧栏（浏览=选项栏 / 播放=控制栏）---------- */
+.bar {
+  width: 174px;
+  height: 254px;
+  flex-direction: column;
+  padding-left: 8px;
+  padding-right: 8px;
+  padding-top: 6px;
+  padding-bottom: 6px;
+  background-color: @card-background-color;
+}
+
+.brand {
+  height: 24px;
+  font-size: 16px;
+  color: @accent;
+  lines: 1;
+}
+
+.tab {
+  width: 158px;
+  height: 40px;
+  margin-top: 4px;
+  border-radius: 6px;
+  justify-content: center;
+  align-items: center;
+  background-color: @background-color;
+}
+
+.tab-on {
+  background-color: @accent-dim;
+}
+
+.tab-text {
+  font-size: 15px;
+  color: @text-color-dim;
+  text-align: center;
+}
+
+.tab-text-on {
+  color: #ffffff;
+}
+
+.tab:active {
+  opacity: 0.7;
+}
+
+.bar-status {
+  margin-top: 6px;
+  flex: 1;
+  font-size: 11px;
+  color: @text-color-dim;
+  lines: 4;
+  text-overflow: ellipsis;
+}
+
+.ctrl {
+  width: 158px;
+  height: 34px;
+  margin-top: 6px;
+  border-radius: 6px;
+  background-color: @background-color;
+  justify-content: center;
+  align-items: center;
+}
+
+.ctrl-main {
+  background-color: @accent-dim;
+}
+
+.ctrl-text {
+  font-size: 14px;
+  color: #ffffff;
+  text-align: center;
+}
+
+.ctrl:active {
+  opacity: 0.7;
+}
+
+.ctrl-row {
+  flex-direction: row;
+  justify-content: space-between;
+  margin-top: 6px;
+}
+
+.ctrl-half {
+  width: 76px;
+  margin-top: 0;
+}
+
+.bar-state {
+  margin-top: 8px;
+  flex: 1;
+  font-size: 11px;
+  color: @text-color-dim;
+  lines: 3;
+  text-overflow: ellipsis;
+}
+
+/* ---------- 浏览内容 ---------- */
+.content {
+  width: 626px;
+  height: 254px;
+  flex-direction: column;
+}
+
+.list {
+  width: 626px;
+  height: 254px;
+  flex-direction: column;
+}
+
+.vrow {
+  width: 626px;
+  height: 72px;
+  flex-direction: row;
+  align-items: center;
+  padding-left: 8px;
+  padding-right: 8px;
+}
+
+.vrow:active {
+  opacity: 0.7;
+}
+
+.thumb {
+  width: 112px;
+  height: 63px;
+  border-radius: 4px;
+  background-color: @card-border-color;
+}
+
+// 头像方图（直播行）；定义在 .thumb 之后 → 尺寸后者生效
+.thumb-sq {
+  width: 63px;
+  height: 63px;
+}
+
+.vinfo {
+  flex: 1;
+  margin-left: 10px;
+  flex-direction: column;
+}
+
+.vtitle {
+  font-size: 14px;
+  color: @text-color;
+  lines: 2;
+  text-overflow: ellipsis;
+}
+
+.vmeta {
+  margin-top: 4px;
+  font-size: 12px;
+  color: @text-color-dim;
+  lines: 1;
+  text-overflow: ellipsis;
+}
+
+.more {
+  width: 626px;
+  height: 34px;
+  justify-content: center;
+  align-items: center;
+}
+
+.more-text {
+  font-size: 13px;
+  color: @accent;
+  text-align: center;
+}
+
+.more:active {
+  opacity: 0.7;
+}
+
+.empty {
+  width: 626px;
+  height: 200px;
+  justify-content: center;
+  align-items: center;
+}
+
+.empty-text {
+  font-size: 14px;
+  color: @text-color-dim;
+  text-align: center;
+}
+
+/* ---------- 我的 ---------- */
+.mine-head {
+  width: 626px;
+  padding-left: 10px;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+.mine-id {
+  font-size: 11px;
+  color: @text-color-dim;
+  lines: 1;
+  text-overflow: ellipsis;
+}
+
+.mine-sec {
+  margin-top: 6px;
+  font-size: 13px;
+  color: @accent;
+  lines: 1;
+}
+
+.mine-row {
+  width: 610px;
+  height: 40px;
+  margin-left: 8px;
+  margin-top: 6px;
+  flex-direction: row;
+  align-items: center;
+  padding-left: 12px;
+  padding-right: 12px;
+  border-radius: 8px;
+  background-color: @card-background-color;
+}
+
+.mine-row:active {
+  opacity: 0.7;
+}
+
+.mine-label {
+  flex: 1;
+  font-size: 14px;
+  color: @text-color;
+  lines: 1;
+  text-overflow: ellipsis;
+}
+
+.mine-value {
+  font-size: 12px;
+  color: @text-color-dim;
+  lines: 1;
+}
+
+/* 视频搜索：关键词行（width 留 8px 左右边距，不贴左侧导航栏） */
+.searchbar {
+  width: 610px;
+  margin-left: 8px;
+  height: 44px;
+  margin-top: 6px;
+  margin-bottom: 4px;
+  flex-direction: row;
+  align-items: center;
+  padding-left: 12px;
+  padding-right: 6px;
+  border-radius: 8px;
+  background-color: @card-background-color;
+}
+
+.search-kw {
+  flex: 1;
+  font-size: 14px;
+  color: @text-color;
+  lines: 1;
+  text-overflow: ellipsis;
+}
+
+/* 搜索按钮：容器 + 内部 text 居中（裸 text 会顶部对齐偏上） */
+.search-btn {
+  width: 64px;
+  height: 32px;
+  border-radius: 6px;
+  background-color: @accent-dim;
+  justify-content: center;
+  align-items: center;
+}
+
+.search-btn-text {
+  font-size: 14px;
+  color: #ffffff;
+  text-align: center;
+}
+
+.search-btn:active {
+  opacity: 0.7;
+}
+
+/* 推荐/热门 底部（刷新 | 加载更多）双按钮行 */
+.more-row {
+  width: 610px;
+  margin-left: 8px;
+  height: 40px;
+  flex-direction: row;
+  justify-content: space-between;
+  margin-top: 4px;
+  margin-bottom: 8px;
+}
+
+.more-half {
+  width: 297px;
+  height: 40px;
+  border-radius: 8px;
+  background-color: @card-background-color;
+  justify-content: center;
+  align-items: center;
+}
+
+.more-half:active {
+  opacity: 0.7;
+}
+
+/* ---------- 播放态 ---------- */
+.play-col {
+  width: 452px;
+  height: 254px;
+}
+
+.video-hole {
+  width: 452px;
+  height: 254px;
+  background-color: rgba(0, 0, 0, 0); /* 显式全透明：防容器默认填充在滚动重绘的中间态盖住视频 */
+}
+
+.play-idle {
+  width: 452px;
+  height: 254px;
+  justify-content: center;
+  align-items: center;
+}
+
+.play-idle-text {
+  font-size: 14px;
+  color: @text-color-dim;
+  text-align: center;
+}
+
+.info-col {
+  width: 174px;
+  height: 254px;
+  flex-direction: column;
+  padding-left: 8px;
+  padding-right: 8px;
+  padding-top: 8px;
+  padding-bottom: 8px;
+  background-color: @card-background-color;
+}
+
+.info-title {
+  font-size: 14px;
+  color: @text-color;
+  lines: 4;
+  text-overflow: ellipsis;
+}
+
+.info-up {
+  margin-top: 4px;
+  font-size: 12px;
+  color: @text-color-dim;
+  lines: 1;
+  text-overflow: ellipsis;
+}
+
+.info-spacer {
+  flex: 1;
+}
+
+.info-state {
+  margin-top: 4px;
+  font-size: 12px;
+  color: @text-color-dim;
+  lines: 3;
+  text-overflow: ellipsis;
+}
+
+.info-hint {
+  margin-top: 6px;
+  font-size: 11px;
+  color: @text-color-dim;
+  lines: 2;
+}
+
+/* ---------- 我的：登录 / 扫码 ---------- */
+.mine-head {
+  flex-direction: row;
+  align-items: center;
+}
+
+.avatar {
+  width: 40px;
+  height: 40px;
+  margin-right: 10px;
+  border-radius: 20px;
+  background-color: @card-border-color;
+}
+
+.mine-idcol {
+  flex: 1;
+  flex-direction: column;
+}
+
+.mine-name {
+  font-size: 16px;
+  color: @text-color;
+  lines: 1;
+  text-overflow: ellipsis;
+}
+
+.mine-secrow {
+  width: 626px;
+  padding-left: 10px;
+  padding-top: 8px;
+  padding-bottom: 2px;
+}
+
+/* 扫码视图：qr-box 228x228（v8 码 49+2×4 quiet ×4px），段宽全由 qr-l-N 静态类驱动（零 inline style） */
+.qr-wrap {
+  width: 626px;
+  height: 254px;
+  flex-direction: row;
+}
+
+.qr-box {
+  width: 228px;
+  height: 228px;
+  margin-top: 13px; /* (254-228)/2 垂直居中；水平由左右等宽弹力列夹持居中 */
+  flex-direction: column;
+  /* 内容(45+2*quiet)*4=212px < 228 白底 → 双向居中对齐，否则默认左上贴角 */
+  align-items: center;
+  justify-content: center;
+  background-color: #ffffff;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.qr-row {
+  height: 4px;
+  flex-direction: row;
+}
+
+.qr-seg {
+  height: 4px;
+}
+
+.qr-dark {
+  background-color: #000000;
+}
+
+/* 左右等宽弹力列（flex:1）把 qr-box 顶到内容区真正水平居中（626 区中心） */
+.qr-left {
+  flex: 1;
+  flex-direction: column;
+  padding-right: 6px;
+  padding-top: 14px;
+  padding-bottom: 12px;
+}
+
+.qr-right {
+  flex: 1;
+}
+
+.qr-state {
+  font-size: 15px;
+  color: @text-color;
+  lines: 3;
+  text-overflow: ellipsis;
+}
+
+.qr-hint {
+  margin-top: 8px;
+  font-size: 12px;
+  color: @text-color-dim;
+  lines: 2;
+}
+
+.qr-btn {
+  width: 180px;
+  /* qr-left 底色与 .ctrl 默认底色同为 @background-color → 默认隐形只剩文字，这里强制强调色 */
+  background-color: @accent-dim;
+}
+
+/* 左栏播放进度（±20 下方；由信息列迁来） */
+.bar-time {
+  margin-top: 4px;
+  font-size: 16px;
+  color: @accent;
+  text-align: center;
+  lines: 1;
+}
+
+/* 播放信息列专用按钮：容器 flex 双轴居中（数字/文案变长也不偏；区别于 ctrl 依赖文本自身对齐） */
+.info-ctrl {
+  width: 158px;
+  height: 34px;
+  margin-top: 4px;
+  border-radius: 6px;
+  background-color: @background-color;
+  justify-content: center;
+  align-items: center;
+}
+
+.info-ctrl:active {
+  opacity: 0.7;
+}
+
+.info-ctrl-text {
+  font-size: 13px;
+  color: @text-color;
+  text-align: center;
+}
+
+/* 评论覆盖面板（626 不透明覆盖播放内容区，左栏控制保留）→ 面板内滑动无视频可闪 */
+.comments-col {
+  width: 626px;
+  height: 254px;
+  flex-direction: column;
+  padding-left: 8px;
+  padding-right: 8px;
+  padding-top: 2px;
+  background-color: @background-color;
+}
+
+.comments-head {
+  width: 610px;
+  height: 32px;
+  flex-direction: row;
+  align-items: center;
+}
+
+.comments-title {
+  flex: 1;
+  font-size: 14px;
+  color: @text-color;
+  lines: 1;
+}
+
+.comments-close {
+  width: 96px;
+}
+
+.comments-scroll {
+  flex: 1;
+}
+
+/* 未登录提示（我的页扫码行下方 / 评论面板写评论旁） */
+.mine-notice {
+  width: 610px;
+  margin-left: 8px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: @text-color-dim;
+  lines: 2;
+  text-overflow: ellipsis;
+}
+
+.reply-writeline {
+  width: 610px;
+  flex-direction: row;
+  align-items: center;
+}
+
+.reply-login-hint {
+  flex: 1;
+  margin-left: 8px;
+  font-size: 11px;
+  color: @text-color-dim;
+  lines: 2;
+  text-overflow: ellipsis;
+}
+
+.reply-write {
+  width: 142px;
+  height: 28px;
+  border-radius: 6px;
+  background-color: @accent-dim;
+  justify-content: center;
+  align-items: center;
+}
+
+.reply-write-text {
+  font-size: 12px;
+  color: #ffffff;
+  text-align: center;
+}
+
+.reply-status {
+  margin-top: 4px;
+  margin-bottom: 2px;
+  font-size: 11px;
+  color: @text-color-dim;
+  lines: 2;
+  text-overflow: ellipsis;
+}
+
+.reply-item {
+  margin-top: 6px;
+  padding: 6px;
+  border-radius: 6px;
+  /* 卡片框：信息列底为 card 色 → 用页面底色(background)形成可见的"框" */
+  background-color: @background-color;
+}
+
+/* 子楼展开区（二级卡片，缩进）——与 .reply-item 是兄弟节点，点击不与父卡片 toggle 冒泡纠缠 */
+.reply-children {
+  margin-top: 3px;
+  margin-left: 10px;
+  padding: 4px;
+  border-radius: 6px;
+  background-color: @card-border-color;
+}
+
+.reply-child {
+  margin-top: 4px;
+}
+
+.reply-sub-status {
+  margin-top: 2px;
+  margin-bottom: 2px;
+  font-size: 10px;
+  color: @text-color-dim;
+  lines: 1;
+}
+
+.reply-name {
+  font-size: 11px;
+  color: @accent;
+  lines: 1;
+  text-overflow: ellipsis;
+}
+
+.reply-msg {
+  margin-top: 2px;
+  font-size: 11px;
+  color: @text-color;
+  lines: 3;
+  text-overflow: ellipsis;
+}
+
+.reply-meta {
+  margin-top: 2px;
+  font-size: 10px;
+  color: @text-color-dim;
+  lines: 1;
+}
+
+.reply-more {
+  margin-top: 8px;
+  margin-bottom: 8px;
+  height: 24px;
+  justify-content: center;
+}
+
+.reply-more-text {
+  font-size: 11px;
+  color: @accent;
+  text-align: center;
+}
+
+
+
+/* 详情态子楼卡片（二级底色，缩进） */
+.reply-child {
+  margin-top: 4px;
+  padding: 4px;
+  border-radius: 6px;
+  background-color: @card-border-color;
+}
+
+/* 段宽表 qr-l-1..65（×4px）追加在文件末尾 */
+.qr-l-1 { width: 4px; }
+.qr-l-2 { width: 8px; }
+.qr-l-3 { width: 12px; }
+.qr-l-4 { width: 16px; }
+.qr-l-5 { width: 20px; }
+.qr-l-6 { width: 24px; }
+.qr-l-7 { width: 28px; }
+.qr-l-8 { width: 32px; }
+.qr-l-9 { width: 36px; }
+.qr-l-10 { width: 40px; }
+.qr-l-11 { width: 44px; }
+.qr-l-12 { width: 48px; }
+.qr-l-13 { width: 52px; }
+.qr-l-14 { width: 56px; }
+.qr-l-15 { width: 60px; }
+.qr-l-16 { width: 64px; }
+.qr-l-17 { width: 68px; }
+.qr-l-18 { width: 72px; }
+.qr-l-19 { width: 76px; }
+.qr-l-20 { width: 80px; }
+.qr-l-21 { width: 84px; }
+.qr-l-22 { width: 88px; }
+.qr-l-23 { width: 92px; }
+.qr-l-24 { width: 96px; }
+.qr-l-25 { width: 100px; }
+.qr-l-26 { width: 104px; }
+.qr-l-27 { width: 108px; }
+.qr-l-28 { width: 112px; }
+.qr-l-29 { width: 116px; }
+.qr-l-30 { width: 120px; }
+.qr-l-31 { width: 124px; }
+.qr-l-32 { width: 128px; }
+.qr-l-33 { width: 132px; }
+.qr-l-34 { width: 136px; }
+.qr-l-35 { width: 140px; }
+.qr-l-36 { width: 144px; }
+.qr-l-37 { width: 148px; }
+.qr-l-38 { width: 152px; }
+.qr-l-39 { width: 156px; }
+.qr-l-40 { width: 160px; }
+.qr-l-41 { width: 164px; }
+.qr-l-42 { width: 168px; }
+.qr-l-43 { width: 172px; }
+.qr-l-44 { width: 176px; }
+.qr-l-45 { width: 180px; }
+.qr-l-46 { width: 184px; }
+.qr-l-47 { width: 188px; }
+.qr-l-48 { width: 192px; }
+.qr-l-49 { width: 196px; }
+.qr-l-50 { width: 200px; }
+.qr-l-51 { width: 204px; }
+.qr-l-52 { width: 208px; }
+.qr-l-53 { width: 212px; }
+.qr-l-54 { width: 216px; }
+.qr-l-55 { width: 220px; }
+.qr-l-56 { width: 224px; }
+.qr-l-57 { width: 228px; }
+.qr-l-58 { width: 232px; }
+.qr-l-59 { width: 236px; }
+.qr-l-60 { width: 240px; }
+.qr-l-61 { width: 244px; }
+.qr-l-62 { width: 248px; }
+.qr-l-63 { width: 252px; }
+.qr-l-64 { width: 256px; }
+.qr-l-65 { width: 260px; }

@@ -1,0 +1,25 @@
+# 依赖与构建产物
+node_modules/
+.falcon_/
+.falcon_tmp/
+*.log
+
+# 本地工具（便携 git 等，不入库）
+.tools/
+
+# Release 附件的本地副本（附件挂在 GitHub Release 页）
+PenBili.zip
+
+# 运行时/本地状态（种子与设备状态，不含凭据，但不入库）
+.deploy/
+
+# 本地设备画像、真机证据（可能包含设备标识、账号信息或网络信息）
+profiles/
+
+# 编辑器/系统
+.DS_Store
+Thumbs.db
+*.swp
+
+# 中间迭代构建产物（仅发布件 PenBili.amr 入库）
+8002026091900004.*.amr
