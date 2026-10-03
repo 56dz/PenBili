@@ -124,6 +124,23 @@ async function main() {
     SEEK_STEP_MS
   } = await import('../src/services/play_session.js');
   const { fetchReplies, addReply, parseReplies, normalizeReply } = await import('../src/services/bili/reply.js');
+  const {
+    parseDanmakuSeg,
+    toBytes,
+    segUrl,
+    segCount,
+    isDanmakuBytes,
+    SEG_DURATION_MS
+  } = await import('../src/services/bili/danmaku.js');
+  const {
+    createDanmakuFeed,
+    segIndexOf,
+    normalizeSeg,
+    lowerBound,
+    sampleEven,
+    DM_MAX_LINES,
+    DM_MAX_PER_TICK
+  } = await import('../src/services/danmaku_feed.js');
   const fsx = require('fs');
   const pathx = require('path');
   const fixture = (n) => JSON.parse(fsx.readFileSync(pathx.join(__dirname, '..', 'api-mock', 'fixtures', n), 'utf8'));
@@ -912,6 +929,263 @@ async function main() {
     assert.strictEqual(bad.code, -111);
     // 未收录码 → describeBiliCode 兜底 'B站 code=-111'（含码值；-111 人话收录待真机命中补）
     assert.ok(bad.message.indexOf('-111') >= 0, bad.message);
+  });
+
+  // ---------------- danmaku 真实弹幕（protobuf） ----------------
+  test('danmaku: fixture 全量解码 + wire 判定 + 分包参数', () => {
+    const raw = fsx.readFileSync(pathx.join(__dirname, '..', 'api-mock', 'fixtures', 'dm_seg.bin'));
+    const bytes = new Uint8Array(raw);
+    assert.strictEqual(isDanmakuBytes(bytes), true, '0x0A 头放行');
+    const r = parseDanmakuSeg(bytes);
+    assert.strictEqual(r.ok, true, r.reason);
+    // 炮姐分包1：5863 条原始 → mode 7（高级 862 条）被过滤
+    assert.ok(r.items.length >= 4500, 'n=' + r.items.length);
+    assert.ok(r.items.length <= 5863);
+    let mx = -1;
+    for (const it of r.items) {
+      assert.ok(it.p >= 0 && it.text.length > 0);
+      if (it.p > mx) mx = it.p;
+    }
+    assert.ok(mx < 360000, 'progress 限定 6min 分包 mx=' + mx);
+    assert.ok(r.items.some((it) => it.text.indexOf('前方高能') >= 0), '中文 UTF-8 解码');
+    // 坏输入：HTML/JSON 头被 wire 判定排除；field4 状态包（0x22）放行给解析器双保险
+    assert.strictEqual(parseDanmakuSeg(null).ok, false);
+    assert.strictEqual(parseDanmakuSeg(new Uint8Array([0x3c, 0x21])).ok, false);
+    assert.strictEqual(isDanmakuBytes(new Uint8Array([0x3c, 0x21])), false, '<头 wire4 排除');
+    assert.strictEqual(isDanmakuBytes(new Uint8Array([0x7b])), false, '{头 wire3 排除');
+    assert.strictEqual(isDanmakuBytes(new Uint8Array([0x22, 0x04, 0x00, 0xc0, 0xfc, 0x15])), true, 'field4 状态包放行');
+    // 空 elems 状态包（真机 193 字节形态）→ 0 条不报错（空段续拉由调用方负责）
+    const stat = parseDanmakuSeg(new Uint8Array([0x22, 0x04, 0x00, 0xc0, 0xfc, 0x15, 0x2a, 0xb8, 0x03, 0xff, 0xff, 0x7f]));
+    assert.strictEqual(stat.ok, true, stat.reason);
+    assert.strictEqual(stat.items.length, 0);
+    // toBytes 字符串 latin1 降级
+    const s = toBytes('A');
+    assert.strictEqual(s.length, 1);
+    assert.strictEqual(s[0], 65);
+    // segUrl 形态：oid=cid（collect 契约；传 aid 得空段——实测踩坑）
+    const u = segUrl(1176840, 810872, 2);
+    assert.ok(u.indexOf('type=1') > 0, u);
+    assert.ok(u.indexOf('oid=1176840') > 0, u);
+    assert.ok(u.indexOf('pid=810872') > 0, u);
+    assert.ok(u.indexOf('segment_index=2') > 0, u);
+    assert.strictEqual(segCount(360000), 1);
+    assert.strictEqual(segCount(360001), 2);
+    assert.strictEqual(segCount(7200000), 20, '2h=20 包');
+  });
+  test('danmaku: 每条都带非空去重键 id，且包内顺序不保证递增（消费方须排序）', () => {
+    const bytes = new Uint8Array(fsx.readFileSync(pathx.join(__dirname, '..', 'api-mock', 'fixtures', 'dm_seg.bin')));
+    const r = parseDanmakuSeg(bytes);
+    assert.strictEqual(r.ok, true, r.reason);
+    assert.ok(r.items.every((it) => typeof it.id === 'string' && it.id.length > 0), 'id 非空');
+    // 去重键在真实包内唯一
+    const ids = new Set(r.items.map((it) => it.id));
+    assert.strictEqual(ids.size, r.items.length, 'id 唯一 ' + ids.size + '/' + r.items.length);
+    // 原始顺序确实不是按 p 递增的（否则 normalizeSeg 的排序就是多余的）
+    const sortedRaw = r.items.every((it, i) => i === 0 || r.items[i - 1].p <= it.p);
+    assert.strictEqual(sortedRaw, false, 'fixture 原始顺序应为乱序');
+  });
+
+  // ---------------- danmaku_feed 弹幕流（分段调度/去重/游标） ----------------
+  test('dmfeed: segIndexOf 分包边界（6 分钟一包，1 起）', () => {
+    assert.strictEqual(segIndexOf(0), 1);
+    assert.strictEqual(segIndexOf(1), 1);
+    assert.strictEqual(segIndexOf(359999), 1);
+    assert.strictEqual(segIndexOf(360000), 2);
+    assert.strictEqual(segIndexOf(360001), 2);
+    assert.strictEqual(segIndexOf(720000), 3);
+    assert.strictEqual(segIndexOf(-5), 1, '负数钳到 1');
+    assert.strictEqual(segIndexOf(0, 1000), 1);
+    assert.strictEqual(segIndexOf(1000, 1000), 2);
+  });
+  test('dmfeed: lowerBound 首个 p>=t', () => {
+    const arr = [{ p: 0 }, { p: 10 }, { p: 10 }, { p: 30 }];
+    assert.strictEqual(lowerBound(arr, -1), 0);
+    assert.strictEqual(lowerBound(arr, 0), 0);
+    assert.strictEqual(lowerBound(arr, 1), 1);
+    assert.strictEqual(lowerBound(arr, 10), 1, '重复值取首个');
+    assert.strictEqual(lowerBound(arr, 11), 3);
+    assert.strictEqual(lowerBound(arr, 999), 4);
+    assert.strictEqual(lowerBound([], 5), 0);
+  });
+  test('dmfeed: sampleEven 不超量且保持时间顺序', () => {
+    const a = [{ p: 1 }, { p: 2 }, { p: 3 }];
+    assert.deepStrictEqual(sampleEven(a, 5).map((x) => x.p), [1, 2, 3], '不足则全取');
+    const b = [];
+    for (let i = 0; i < 10; i++) b.push({ p: i });
+    const s2 = sampleEven(b, 2);
+    assert.strictEqual(s2.length, 2);
+    assert.ok(s2[0].p < s2[1].p, '保持递增');
+    assert.strictEqual(s2[0].p, 0);
+    assert.strictEqual(s2[1].p, 5);
+    assert.strictEqual(sampleEven([], 3).length, 0);
+    assert.strictEqual(sampleEven(b, 0).length, 0);
+  });
+  test('dmfeed: normalizeSeg 按时间去重+排序（同 id 只留一条）', () => {
+    const raw = [
+      { id: 'c', p: 300, text: 'C' },
+      { id: 'a', p: 100, text: 'A' },
+      { id: 'b', p: 200, text: 'B' },
+      { id: 'a', p: 100, text: 'A' }, // 重复
+      { id: '', p: 400, text: 'D' }, // 无 id → 用 p:text 兜底
+      { id: 'e', p: 500, text: '' } // 空文本丢弃
+    ];
+    const out = normalizeSeg(raw);
+    assert.deepStrictEqual(out.map((x) => x.text), ['A', 'B', 'C', 'D']);
+    assert.deepStrictEqual(out.map((x) => x.p), [100, 200, 300, 400]);
+    assert.strictEqual(normalizeSeg(null).length, 0);
+    assert.strictEqual(normalizeSeg([]).length, 0);
+  });
+  test('dmfeed: 推进产出 + 单 tick 限流 + 显示列表封顶 + 不重复', async () => {
+    // 造 1 个分段：0~9s 每秒 10 条（共 100 条）
+    const items = [];
+    for (let s = 0; s < 10; s++) {
+      for (let k = 0; k < 10; k++) items.push({ id: 'd' + s + '_' + k, p: s * 1000 + k * 10, text: 't' + s + '_' + k });
+    }
+    const feed = createDanmakuFeed({
+      fetchSeg: async () => ({ ok: true, items: items }),
+      maxLines: 5,
+      maxPerTick: 2
+    });
+    feed.start({ cid: 123, aid: 456, durationMs: 600000 });
+    // 首 tick：段未加载 → 触发后台拉取，本次 0 条
+    assert.strictEqual(feed.advance(0), 0);
+    await new Promise((r) => setTimeout(r, 0)); // 让 fetch 落地
+    // 推进到 3s：本应积压 30 条 → 限流到 2 条
+    const added = feed.advance(3000);
+    assert.strictEqual(added, 2, '单 tick 限流 2 条');
+    assert.strictEqual(feed.lineCount(), 2);
+    // 连续推进到 10s：显示列表封顶 5
+    for (let s = 4; s <= 10; s++) feed.advance(s * 1000);
+    assert.ok(feed.lineCount() <= 5, '封顶 lineCount=' + feed.lineCount());
+    const ls = feed.getLines();
+    assert.strictEqual(new Set(ls.map((x) => x.id)).size, ls.length, '显示列表内无重复 id');
+    // 同一位置反复推进不应再产出（游标已过）
+    assert.strictEqual(feed.advance(10000), 0, '重复推进 0 条');
+    assert.strictEqual(feed.advance(10000), 0);
+  });
+  test('dmfeed: 后退 seek 重置游标，但已在屏的弹幕不重复进屏', async () => {
+    const items = [];
+    for (let s = 0; s < 20; s++) items.push({ id: 'x' + s, p: s * 1000, text: 'v' + s });
+    const feed = createDanmakuFeed({
+      fetchSeg: async () => ({ ok: true, items: items }),
+      maxLines: 50,
+      maxPerTick: 3
+    });
+    feed.start({ cid: 1, aid: 1, durationMs: 600000 });
+    feed.advance(0);
+    await new Promise((r) => setTimeout(r, 0));
+    for (let s = 1; s <= 10; s++) feed.advance(s * 1000);
+    const before = feed.getLines().map((x) => x.id);
+    assert.ok(before.length > 0, '已有弹幕在屏');
+    // 后退到 2s：游标回到 2s，重新收集 2s..10s 的弹幕
+    feed.advance(2000);
+    for (let s = 3; s <= 10; s++) feed.advance(s * 1000);
+    const after = feed.getLines().map((x) => x.id);
+    assert.strictEqual(new Set(after).size, after.length, '后退重看后显示列表仍无重复');
+  });
+  test('dmfeed: 可见窗口内按文本去重（不同 id 同文本不并排出现）', async () => {
+    const items = [
+      { id: 'a1', p: 0, text: '我同意' },
+      { id: 'a2', p: 100, text: '我同意' }, // 不同 id、同文本（B 站常见）
+      { id: 'a3', p: 200, text: '别的' },
+      { id: 'a4', p: 300, text: '我同意' }
+    ];
+    const feed = createDanmakuFeed({
+      fetchSeg: async () => ({ ok: true, items: items }),
+      maxLines: 10,
+      maxPerTick: 10
+    });
+    feed.start({ cid: 1, aid: 1, durationMs: 600000 });
+    feed.advance(0);
+    await new Promise((r) => setTimeout(r, 0));
+    feed.advance(1000);
+    const texts = feed.getLines().map((x) => x.text);
+    assert.deepStrictEqual(texts, ['我同意', '别的'], '同文本只留一条: ' + JSON.stringify(texts));
+    // 滚出窗口后允许再次出现（不永久屏蔽该文本）
+    const feed2 = createDanmakuFeed({
+      fetchSeg: async () => ({ ok: true, items: items }),
+      maxLines: 1,
+      maxPerTick: 10
+    });
+    feed2.start({ cid: 1, aid: 1, durationMs: 600000 });
+    feed2.advance(0);
+    await new Promise((r) => setTimeout(r, 0));
+    feed2.advance(1000);
+    assert.strictEqual(feed2.lineCount(), 1, '窗口=1 时只剩最后一条');
+  });
+  test('dmfeed: 空状态文案与显示窗口指纹', async () => {
+    const empty = createDanmakuFeed({ fetchSeg: async () => ({ ok: true, items: [] }), maxLines: 5, maxPerTick: 2 });
+    assert.strictEqual(empty.hintText(), '', '未 start 无文案');
+    empty.start({ cid: 5, aid: 5, durationMs: 600000 });
+    assert.strictEqual(empty.hintText(), '弹幕加载中…', '尚未拉到数据');
+    empty.advance(0);
+    await new Promise((r) => setTimeout(r, 0));
+    assert.strictEqual(empty.hintText(), '本视频无弹幕', '空段');
+    assert.strictEqual(empty.signature(), '0:', '空列表指纹');
+
+    const has = createDanmakuFeed({
+      fetchSeg: async () => ({ ok: true, items: [{ id: 'z', p: 5000, text: 'hi' }] }),
+      maxLines: 5,
+      maxPerTick: 2
+    });
+    has.start({ cid: 6, aid: 6, durationMs: 600000 });
+    has.advance(0);
+    await new Promise((r) => setTimeout(r, 0));
+    assert.strictEqual(has.hintText(), '', '有数据但播放头未到 → 不提示');
+    const s0 = has.signature();
+    has.advance(6000);
+    assert.strictEqual(has.lineCount(), 1);
+    assert.notStrictEqual(has.signature(), s0, '产出后指纹变化');
+    assert.strictEqual(has.hintText(), '', '有内容 → 无文案');
+    // stats 暴露加载计数（供诊断/空状态判定）
+    assert.strictEqual(has.stats().loadedSegs, 1);
+    assert.strictEqual(has.stats().itemsTotal, 1);
+  });
+  test('dmfeed: 跨分包切换 + 换视频重置', async () => {
+    const mk = (base) => {
+      const a = [];
+      for (let i = 0; i < 5; i++) a.push({ id: 's' + base + '_' + i, p: base * SEG_DURATION_MS + i * 1000, text: 'n' + base + '_' + i });
+      return a;
+    };
+    const calls = [];
+    const feed = createDanmakuFeed({
+      fetchSeg: async (idx) => {
+        calls.push(idx);
+        return { ok: true, items: mk(idx) };
+      },
+      maxLines: 50,
+      maxPerTick: 5
+    });
+    feed.start({ cid: 9, aid: 9, durationMs: SEG_DURATION_MS * 2 });
+    feed.advance(0);
+    await new Promise((r) => setTimeout(r, 0));
+    assert.ok(calls.indexOf(1) >= 0, '拉了第 1 包');
+    // 跳到第 2 包
+    feed.advance(SEG_DURATION_MS + 3000);
+    await new Promise((r) => setTimeout(r, 0));
+    assert.ok(calls.indexOf(2) >= 0, '拉了第 2 包: ' + calls.join(','));
+    assert.ok(feed.stats().seg === 2, '当前段=2');
+    // 换视频：清空
+    feed.start({ cid: 77, aid: 77, durationMs: 60000 });
+    assert.strictEqual(feed.lineCount(), 0, '换视频清空显示列表');
+    assert.strictEqual(feed.stats().cid, 77);
+  });
+  test('dmfeed: 抓取失败不阻塞（返回 0 条，不抛）', async () => {
+    const feed = createDanmakuFeed({ fetchSeg: async () => ({ ok: false, message: 'boom' }), maxLines: 5, maxPerTick: 2 });
+    feed.start({ cid: 5, aid: 5, durationMs: 600000 });
+    assert.strictEqual(feed.advance(0), 0);
+    await new Promise((r) => setTimeout(r, 0));
+    assert.strictEqual(feed.advance(5000), 0, '失败段不产出');
+    assert.ok(feed.stats().failed >= 1, '记录失败数');
+    // 无 cid 时 advance 直接返回 0
+    const f2 = createDanmakuFeed({ fetchSeg: async () => ({ ok: true, items: [] }) });
+    f2.start({ cid: 0 });
+    assert.strictEqual(f2.advance(1000), 0);
+  });
+  test('dmfeed: 常量与真机屏约束一致（右栏 174 宽 / 254 高）', () => {
+    assert.ok(DM_MAX_LINES >= 10 && DM_MAX_LINES <= 18, '可见行数合理: ' + DM_MAX_LINES);
+    assert.ok(DM_MAX_PER_TICK >= 1 && DM_MAX_PER_TICK <= 4, '单 tick 产出受控: ' + DM_MAX_PER_TICK);
+    assert.strictEqual(SEG_DURATION_MS, 360000, '6 分钟一包');
   });
 
   // ---------------- history ----------------

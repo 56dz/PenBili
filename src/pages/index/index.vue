@@ -15,21 +15,19 @@
         <text class="bar-status">{{ statusText }}</text>
       </template>
       <template v-else>
+        <!-- 播放态左栏：标题/作者/评论区置顶（v2.8.0 用户指定），下方才是返回与播放控制 -->
+        <text class="play-title">{{ infoTitle }}</text>
+        <text class="play-up">{{ infoUp }}</text>
+        <div class="ctrl play-comment" @click="openComments">
+          <text class="ctrl-text">评论区{{ replyCount ? ' · ' + replyCount : '' }}</text>
+        </div>
         <div class="ctrl" @click="onBack">
           <text class="ctrl-text">返回列表</text>
         </div>
         <div class="ctrl ctrl-main" @click="onTogglePlay">
           <text class="ctrl-text">{{ btnText }}</text>
         </div>
-        <div class="ctrl-row">
-          <div class="ctrl ctrl-half" @click="onSeek(-seekStepSec)">
-            <text class="ctrl-text">{{ '-' + seekStepSec + 's' }}</text>
-          </div>
-          <div class="ctrl ctrl-half" @click="onSeek(seekStepSec)">
-            <text class="ctrl-text">{{ '+' + seekStepSec + 's' }}</text>
-          </div>
-        </div>
-        <!-- 播放进度移至左栏 ±20 下方（用户指定布局） -->
+        <!-- v2.8.0：±20s 按钮已按用户要求移除（seek 能力保留给自动恢复/自检内部调用） -->
         <text class="bar-time">{{ timeText }}</text>
         <text class="bar-state">{{ stateLabel }}{{ play.note ? ' · ' + play.note : '' }}</text>
       </template>
@@ -199,24 +197,19 @@
       </scroller>
     </div>
 
-    <!-- 播放内容：中列视频洞 + 右列信息（评论面板打开时两列收起） -->
+    <!-- 播放内容：中列视频洞 + 右列弹幕流（评论面板打开时两列收起） -->
     <div v-if="mode === 'play' && !commentsOpen" class="play-col">
       <hole v-if="holeVisible" class="video-hole"></hole>
       <div v-else class="play-idle">
         <text class="play-idle-text">{{ idleText }}</text>
       </div>
     </div>
-    <div v-if="mode === 'play' && !commentsOpen" class="info-col">
-      <text class="info-title">{{ infoTitle }}</text>
-      <text class="info-up">{{ infoUp }}</text>
-      <!-- 右栏按钮：评论区入口（容器 flex 居中，数字变长也不偏）。弹幕功能已于 v2.7.0 移除
-           （drawtext×4 逐帧渲染占解码预算 ~20%，弱稿件软解跌破实时 → 卡顿，用户决策移除） -->
-      <div class="info-ctrl" @click="openComments">
-        <text class="info-ctrl-text">评论区{{ replyCount ? ' · ' + replyCount : '' }}</text>
-      </div>
-      <div class="info-spacer"></div>
-      <text class="info-state">{{ play.note }}</text>
-      <text class="info-hint">左侧：暂停/开始 · ±{{ seekStepSec }}s</text>
+    <!-- 右列：弹幕流（v2.8.0 用户指定）。新条目自底部进入、整列上移（justify-content:flex-end
+         + 列表封顶 → 顶部溢出裁掉）。纯 UI 层文本渲染，与 v2.7.0 移除的 native drawtext 烧帧
+         方案完全不同，不占解码预算。条目按 id 去重（同文本在可见窗口内也只留一条）。 -->
+    <div v-if="mode === 'play' && !commentsOpen" :class="dmLines.length ? 'dm-col' : 'dm-col dm-col-empty'">
+      <text v-if="dmHint" class="dm-hint">{{ dmHint }}</text>
+      <text v-for="l in dmLines" :key="l.id" class="dm-line">{{ l.text }}</text>
     </div>
   </div>
 </template>
@@ -262,6 +255,7 @@ import {
   SEEK_STEP_MS
 } from '../../services/play_session.js';
 import * as player from '../../services/player.js';
+import { createDanmakuFeed, makeSegFetcher, DM_MAX_LINES } from '../../services/danmaku_feed.js';
 
 const TABS = [
   { id: 'rcmd', label: '推荐' },
@@ -362,8 +356,12 @@ export default {
       replyCount: 0,
       // 展开中的子楼（单实例：root=0 收起）
       replyOpen: { root: 0, items: [], shown: 0, page: 1, noMore: false, loading: false },
-      // 评论面板（弹幕功能已于 v2.7.0 移除：drawtext 烧帧拖垮弱稿软解）
-      commentsOpen: false
+      // 评论覆盖面板
+      commentsOpen: false,
+      // 右栏弹幕显示列表（v2.8.0）：由 danmaku_feed 推进，按 id 去重、行数有上限
+      dmLines: [],
+      // 右栏空状态文案（加载中 / 本视频无弹幕）；有内容时为空串
+      dmHint: ''
     };
   },
   computed: {
@@ -423,6 +421,12 @@ export default {
     this._poll = 0;
     this.mixinMemo = {}; // WBI 密钥会话级缓存（播放与搜索共享）
     this.client = createClient({});
+    // 弹幕流（右栏）：fetchSeg 在 start() 时按 cid/aid 绑定；advance() 由播放轮询驱动，
+    // 不额外起定时器。日志走 logWarn（与 [bili] 前缀一致，便于真机 grep）。
+    this.dm = createDanmakuFeed({
+      fetchSeg: () => Promise.resolve({ ok: false, message: '未绑定稿件' }),
+      log: logWarn
+    });
     // 关键顺序：先恢复登录 Cookie（loadLocal），其末尾才发起首屏加载 ——
     // 否则首屏 rcmd 会以匿名身份发出，拿到的是默认推荐而非账号个性化推荐
     await this.loadLocal();
@@ -778,6 +782,15 @@ export default {
       ).items;
       saveHistory({ version: 1, items: this.history });
       this.loadReplies(r.session.aid || 0); // 评论首屏（不阻塞播放；无 aid 内部直接返回）
+      // 弹幕：按本稿件的 cid/aid 重建抓取器（cid 是 oid，传 aid 会拿到空段），并清空上一稿列表
+      this.dmLines = [];
+      this.dmHint = '';
+      this._dmSig = '';
+      this.dm = createDanmakuFeed({
+        fetchSeg: makeSegFetcher(this.client, r.session.cid, r.session.aid || 0),
+        log: logWarn
+      });
+      this.dm.start({ cid: r.session.cid, aid: r.session.aid || 0, durationMs: r.session.durationMs });
       this.startPoll(myGen);
       logWarn('[bili] play start ' + r.session.bvid + ' qn=' + r.session.qn + ' dur=' + r.session.durationMs + 'ms');
     },
@@ -929,6 +942,19 @@ export default {
         }
         this.play.positionMs = st.positionMs;
         this.play.frames = st.frames;
+        // 弹幕推进（v2.8.0）：只在播放中推进 —— 暂停/播完时位置不动，弹幕自然停住。
+        // advance() 是同步的：分段未就绪只触发后台拉取并返回 0，绝不阻塞轮询。
+        // 用 signature（长度+末条 id）判断是否需要重新赋值，避免每秒无谓重绘。
+        if (st.state === 'playing') {
+          this.dm.advance(st.positionMs);
+          const sig = this.dm.signature();
+          if (sig !== this._dmSig) {
+            this._dmSig = sig;
+            this.dmLines = this.dm.getLines();
+          }
+          const hint = this.dm.hintText();
+          if (hint !== this.dmHint) this.dmHint = hint;
+        }
         if (st.state === 'ended') {
           this.play.state = 'ended';
           this.play.note = ''; // 播完时清掉残留提示。
@@ -1344,6 +1370,11 @@ export default {
         );
         this.mode = 'browse';
         this.play = idlePlay();
+        // 弹幕：随播放会话一起清空。gen++ 已使在途的分段拉取结果被丢弃（feed 内部同样按 gen 守卫）
+        if (this.dm) this.dm.reset();
+        this.dmLines = [];
+        this.dmHint = '';
+        this._dmSig = '';
       }
       if (note) this.statusText = note;
     },

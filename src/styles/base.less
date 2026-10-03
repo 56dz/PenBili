@@ -2,7 +2,7 @@
 
 // PenBili 主界面骨架（坐标全部来自 profiles/youdao-x5.md：逻辑 800x254）
 //   浏览态：bar 174 + content 626 = 800
-//   播放态：bar 174 + 视频列 452（逻辑 {174,0,452,254} 居中 ↔ 物理 {0,174,254,452}）+ 信息列 174
+//   播放态：bar 174 + 视频列 452（逻辑 {174,0,452,254} 居中 ↔ 物理 {0,174,254,452}）+ 弹幕列 174
 // 铁律：每个 .vue 必须自带 <style lang="less" scoped> 并 @import 本文件——
 //       没有 style 块时样式规则不会进 bundle（2026-09-22 真机黑屏证据）。
 
@@ -102,17 +102,6 @@
   opacity: 0.7;
 }
 
-.ctrl-row {
-  flex-direction: row;
-  justify-content: space-between;
-  margin-top: 6px;
-}
-
-.ctrl-half {
-  width: 76px;
-  margin-top: 0;
-}
-
 .bar-state {
   margin-top: 8px;
   flex: 1;
@@ -120,6 +109,28 @@
   color: @text-color-dim;
   lines: 3;
   text-overflow: ellipsis;
+}
+
+/* 播放态左栏顶部：标题 / 作者 / 评论区入口（v2.8.0 用户指定：从右栏移到左上，
+   位于「返回列表」「暂停/开始」之上）。字体比浏览态紧凑，为下方三个按钮留高度。 */
+.play-title {
+  margin-top: 2px;
+  font-size: 13px;
+  color: @text-color;
+  lines: 2;
+  text-overflow: ellipsis;
+}
+
+.play-up {
+  margin-top: 2px;
+  font-size: 11px;
+  color: @text-color-dim;
+  lines: 1;
+  text-overflow: ellipsis;
+}
+
+.play-comment {
+  background-color: @accent-dim;
 }
 
 /* ---------- 浏览内容 ---------- */
@@ -357,49 +368,48 @@
   text-align: center;
 }
 
-.info-col {
+/* ---------- 播放态右栏：弹幕流 ---------- */
+/* v2.8.0 用户指定：原右栏信息（标题/作者/评论区）已移到左栏，右栏改为弹幕竖向滚动。
+   justify-content:flex-end → 内容贴底；新条目从底部加入时整列上移，列表长度有上限
+   （DM_MAX_LINES），顶部溢出由 overflow:hidden 裁掉 —— 这就是「由下至上滚动」的实现。
+   刻意不用 scroller 与 CSS 动画：本设备（单核 A53 + QuickJS）从未使用过 animation/
+   transition，重绘敏感，纯静态重排最稳。 */
+.dm-col {
   width: 174px;
   height: 254px;
   flex-direction: column;
+  justify-content: flex-end;
   padding-left: 8px;
   padding-right: 8px;
-  padding-top: 8px;
-  padding-bottom: 8px;
+  padding-top: 6px;
+  padding-bottom: 6px;
   background-color: @card-background-color;
+  overflow: hidden;
 }
 
-.info-title {
-  font-size: 14px;
-  color: @text-color;
-  lines: 4;
-  text-overflow: ellipsis;
-}
-
-.info-up {
-  margin-top: 4px;
+.dm-line {
+  margin-top: 2px;
   font-size: 12px;
-  color: @text-color-dim;
+  color: @text-color;
   lines: 1;
   text-overflow: ellipsis;
 }
 
-.info-spacer {
-  flex: 1;
+/* 空状态（加载中 / 本视频无弹幕）：把唯一一行提示居中，避免空面板看起来像界面坏了 */
+.dm-col-empty {
+  justify-content: center;
+  align-items: center;
 }
 
-.info-state {
-  margin-top: 4px;
+.dm-hint {
   font-size: 12px;
   color: @text-color-dim;
-  lines: 3;
-  text-overflow: ellipsis;
+  text-align: center;
+  lines: 2;
 }
 
-.info-hint {
-  margin-top: 6px;
-  font-size: 11px;
-  color: @text-color-dim;
-  lines: 2;
+.info-spacer {
+  flex: 1;
 }
 
 /* ---------- 我的：登录 / 扫码 ---------- */
@@ -508,27 +518,6 @@
   color: @accent;
   text-align: center;
   lines: 1;
-}
-
-/* 播放信息列专用按钮：容器 flex 双轴居中（数字/文案变长也不偏；区别于 ctrl 依赖文本自身对齐） */
-.info-ctrl {
-  width: 158px;
-  height: 34px;
-  margin-top: 4px;
-  border-radius: 6px;
-  background-color: @background-color;
-  justify-content: center;
-  align-items: center;
-}
-
-.info-ctrl:active {
-  opacity: 0.7;
-}
-
-.info-ctrl-text {
-  font-size: 13px;
-  color: @text-color;
-  text-align: center;
 }
 
 /* 评论覆盖面板（626 不透明覆盖播放内容区，左栏控制保留）→ 面板内滑动无视频可闪 */
