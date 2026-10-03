@@ -954,20 +954,42 @@ export default {
         }
         this.play.positionMs = st.positionMs;
         this.play.frames = st.frames;
-        // 弹幕推进（v2.8.0）：只在播放中推进 —— 暂停/播完时位置不动，弹幕自然停住。
+        // 弹幕推进（v2.8.2）：只在播放中推进 —— 暂停/播完时位置不动，弹幕自然停住。
         // advance() 是同步的：分段未就绪只触发后台拉取并返回 0，绝不阻塞轮询。
-        // 用 signature（长度+末条 id）判断是否需要重新赋值；dmSlots 长度恒定，
-        // 赋值后 Vue 复用同一批节点、只改文字（防闪烁）。
+        //
+        // ★ 关键：**画面不健康时绝不重绘弹幕面板**。
+        // 真机实测（2026-10-03 像素级监测，14Hz 采样视频区非零字节数）：
+        //   弹幕开 → 800 样本里 131 个视频区全黑（16.4%），黑屏段持续 0.4~2.4s；
+        //   弹幕关 → 0/800 全黑，同一稿件、同一网络。
+        // 结论：弹幕面板重绘会把视频区擦成黑色，正常播放时下一帧（33ms）补回来只闪一下，
+        // 但视频流重启/停帧期间没有新帧可补 → 持续黑屏（用户看到的"卡 + 黑"）。
+        // 故在 resyncing（视频流重启中）或 videoStallMs 偏大（无新帧）时跳过本次更新，
+        // 让面板停在上一次的内容，不去擦画面。
         if (st.state === 'playing') {
           this.dm.advance(st.positionMs);
-          const sig = this.dm.signature();
-          if (sig !== this._dmSig) {
-            this._dmSig = sig;
-            this.dmSlots = this.dm.getSlots();
+          // 健康判定收紧：重启中 / 停帧>400ms / 本 tick 帧数未增长，任一命中就跳过重绘。
+          // 停帧判据用 videoStallMs 之外再加"帧数是否增长"——轮询是 1s 一次，
+          // 只看 videoStallMs 会有最多 1s 的盲区，够擦一次画面。
+          const framesGrew = st.frames > (this._dmLastFrames || 0);
+          const healthy = !st.resyncing && (st.videoStallMs || 0) < 400 && framesGrew;
+          this._dmLastFrames = st.frames;
+          if (healthy) {
+            const sig = this.dm.signature();
+            if (sig !== this._dmSig) {
+              this._dmSig = sig;
+              this.dmSlots = this.dm.getSlots();
+            }
+            const hint = this.dm.hintText();
+            const head = hint ? '弹幕 · ' + hint : '弹幕';
+            if (head !== this.dmHeadText) this.dmHeadText = head;
+          } else if (!this._dmHoldLogged) {
+            this._dmHoldLogged = true;
+            logWarn(
+              '[bili] dm 面板暂缓重绘 resync=' + !!st.resyncing +
+              ' stall=' + (st.videoStallMs || 0) + ' framesGrew=' + framesGrew
+            );
           }
-          const hint = this.dm.hintText();
-          const head = hint ? '弹幕 · ' + hint : '弹幕';
-          if (head !== this.dmHeadText) this.dmHeadText = head;
+          if (healthy) this._dmHoldLogged = false;
         }
         if (st.state === 'ended') {
           this.play.state = 'ended';
