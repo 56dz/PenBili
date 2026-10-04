@@ -144,9 +144,11 @@ export function createClient(opts) {
     // 绝对地址原样透传（直播域 api.live.bilibili.com 不在主域前缀下）
     const url = /^https?:\/\//i.test(path) ? path + qs : BILI_API + path + qs;
     const t0 = now();
+    // ro.get 可注入替代传输（如 native libcurl 文本 GET：指纹敏感接口绕 jsapi.http -352）
+    const getter = ro.get || get;
     let res;
     try {
-      res = await get(url, { headers: headers, timeout: ro.timeout || timeout });
+      res = await getter(url, { headers: headers, timeout: ro.timeout || timeout });
     } catch (e) {
       return fail('transport', { message: (e && e.message) || String(e), ms: now() - t0 });
     }

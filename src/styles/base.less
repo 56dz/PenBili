@@ -280,6 +280,101 @@
   background-color: @card-background-color;
 }
 
+/* ---------- 搜索三分栏（视频/图文/直播） ---------- */
+.stype-row {
+  width: 610px;
+  margin-left: 8px;
+  height: 34px;
+  margin-bottom: 4px;
+  flex-direction: row;
+}
+
+.stype {
+  width: 90px;
+  height: 30px;
+  margin-right: 8px;
+  border-radius: 6px;
+  justify-content: center;
+  align-items: center;
+  background-color: @background-color;
+}
+
+.stype-on {
+  background-color: @accent-dim;
+}
+
+.stype-text {
+  font-size: 13px;
+  color: @text-color-dim;
+}
+
+.stype-text-on {
+  color: @text-color;
+}
+
+/* ---------- 图文详情（正文列 452 + 信息列 174，与播放布局同构） ---------- */
+.art-scroll {
+  width: 452px;
+  height: 254px;
+  padding-left: 8px;
+  padding-right: 8px;
+}
+
+.art-loading {
+  width: 436px;
+  height: 254px;
+  justify-content: center;
+  align-items: center;
+}
+
+.art-cover {
+  margin-top: 6px;
+  /* 尺寸三保险（dsh bilibili_x5 实证：falcon image 以样式定尺寸，属性不足以撑开）：
+     inline style 精确每图宽高 > 此处 class 兜底 > 属性 */
+  width: 436px;
+  height: 140px;
+  background-color: @card-border-color; /* 加载占位灰底 */
+}
+
+.art-title {
+  margin-top: 8px;
+  font-size: 16px;
+  color: @text-color;
+  lines: 2;
+  text-overflow: ellipsis;
+}
+
+.art-author {
+  margin-top: 4px;
+  font-size: 11px;
+  color: @text-color-dim;
+  lines: 1;
+}
+
+.art-p {
+  margin-top: 6px;
+  font-size: 12px;
+  color: @text-color;
+  lines: 30;
+}
+
+/* 正文混排图片：固定 436 宽（列内边距 8），高度取 16:9 近似（源图无尺寸元数据） */
+.art-img {
+  margin-top: 8px;
+  /* 兜底尺寸（实际以 inline style 每图精确宽高为准，见 dsh bilibili_x5 实证） */
+  width: 436px;
+  height: 240px;
+  background-color: @card-border-color; /* 加载占位灰底 */
+}
+
+.art-end {
+  margin-top: 10px;
+  margin-bottom: 10px;
+  font-size: 11px;
+  color: @text-color-dim;
+  text-align: center;
+}
+
 .search-kw {
   flex: 1;
   font-size: 14px;
@@ -530,7 +625,6 @@
   color: @text-color;
   text-align: center;
 }
-
 /* 评论覆盖面板（626 不透明覆盖播放内容区，左栏控制保留）→ 面板内滑动无视频可闪 */
 .comments-col {
   width: 626px;

@@ -106,6 +106,7 @@ export function normalizeSearch(raw) {
   if (Number(raw.roomid) > 0) return null;
   return {
     kind: 'video',
+    key: 'v:' + bvid,
     bvid: bvid,
     cid: 0,
     title: stripHtml(raw.title) || '未命名',
@@ -117,20 +118,63 @@ export function normalizeSearch(raw) {
   };
 }
 
-// 按 bvid 去重追加；总长受 MAX_ITEMS 限制 → 返回 {items, added, capped}
+// 图文（专栏）搜索条目（search_type=article）→ {kind:'article', id=专栏aid, ...} | null
+//   字段（2026-10-04 探针 tools/probe_search.mjs 实测）：id（专栏aid）、title(<em>)、desc、
+//   image_urls[]（封面数组，**无 pic 字段**）、author、view(阅读)、reply(评论数)、category_name
+export function normalizeSearchArticle(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const id = Number(raw.aid || raw.id) || 0;
+  if (!(id > 0)) return null;
+  const imgs = Array.isArray(raw.image_urls) ? raw.image_urls : [];
+  return {
+    kind: 'article',
+    key: 'a:' + id,
+    id: id,
+    title: stripHtml(raw.title) || '未命名图文',
+    cover: normalizeCover(imgs[0] || raw.pic || raw.cover || ''),
+    up: stripHtml(raw.author) || '',
+    summary: stripHtml(raw.desc).slice(0, 60),
+    view: Number(raw.view) || 0,
+    reply: Number(raw.reply) || 0,
+    source: 'search'
+  };
+}
+
+// 直播间搜索条目（search_type=live）→ {kind:'live', roomid, ...} | null
+//   字段（2026-10-04 探针实测）：roomid、title(<em>)、cover/user_cover、uname、online、cate_name
+export function normalizeSearchLive(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const roomid = Number(raw.roomid) || 0;
+  if (!(roomid > 0)) return null;
+  return {
+    kind: 'live',
+    key: 'l:' + roomid,
+    roomid: roomid,
+    title: stripHtml(raw.title) || '未命名直播间',
+    cover: normalizeCover(raw.cover || raw.user_cover || ''),
+    up: stripHtml(raw.uname) || '',
+    online: Number(raw.online) || 0,
+    cate: stripHtml(raw.cate_name) || '',
+    source: 'search'
+  };
+}
+
+// 按 key 去重追加（三类条目统一 key）；总长受 MAX_ITEMS 限制 → 返回 {items, added, capped}
 export function appendDeduped(existing, incoming) {
   const seen = {};
   const out = [];
   (existing || []).forEach((x) => {
-    if (x && x.bvid && !seen[x.bvid]) {
-      seen[x.bvid] = 1;
+    const k = x && (x.key || x.bvid);
+    if (x && k && !seen[k]) {
+      seen[k] = 1;
       out.push(x);
     }
   });
   let added = 0;
   (incoming || []).forEach((x) => {
-    if (x && x.bvid && !seen[x.bvid]) {
-      seen[x.bvid] = 1;
+    const k = x && (x.key || x.bvid);
+    if (x && k && !seen[k]) {
+      seen[k] = 1;
       out.push(x);
       added++;
     }
@@ -179,9 +223,15 @@ export async function fetchPopular(client, pn) {
   return { ok: true, items: items, noMore: data.no_more === true || items.length === 0 };
 }
 
-// 视频搜索（WBI 签名；mixinKey 由 play_session.ensureMixin 提供会话级缓存）
+// 搜索（WBI 签名；mixinKey 由 play_session.ensureMixin 提供会话级缓存）
+// searchType: 'video' | 'article'(图文/专栏) | 'live'(直播间)
 // → {ok, items, page, noMore, total} | {ok:false, stage, message}
-export async function searchVideos(client, mixinKey, keyword, page) {
+export function searchBili(client, mixinKey, keyword, page, searchType) {
+  const st = searchType === 'article' || searchType === 'live' ? searchType : 'video';
+  return _searchType(client, mixinKey, keyword, page, st);
+}
+
+function _searchType(client, mixinKey, keyword, page, searchType) {
   const kw = String(keyword == null ? '' : keyword).trim();
   if (!kw) return { ok: false, stage: 'param', message: '关键词为空' };
   if (!/^[0-9a-f]{32}$/.test(String(mixinKey || ''))) {
@@ -189,32 +239,47 @@ export async function searchVideos(client, mixinKey, keyword, page) {
   }
   const pageNum = Math.max(1, Math.floor(Number(page) || 1));
   const params = {
-    search_type: 'video',
+    search_type: searchType,
     keyword: kw,
     order: 'totalrank',
     page: pageNum
   };
   const query = buildSignedQuery(params, mixinKey, Math.floor(Date.now() / 1000));
-  const res = await client.request(SEARCH_PATH, query);
-  if (!res.ok) return failFrom(res);
-  const d = res.data || {};
-  const arr = d.result || [];
-  const items = [];
-  arr.forEach((raw) => {
-    const it = normalizeSearch(raw);
-    if (it) items.push(it);
-  });
-  if (items.length === 0) {
-    return { ok: false, stage: 'parse', message: pageNum > 1 ? '没有更多结果' : '无搜索结果' };
-  }
-  const numPages = Number(d.numPages) || 1;
-  return {
-    ok: true,
-    items: items,
-    page: pageNum,
-    noMore: pageNum >= numPages,
-    total: Number(d.numResults) || 0
-  };
+  return client
+    .request(SEARCH_PATH, query)
+    .then((res) => {
+      if (!res.ok) return failFrom(res);
+      const d = res.data || {};
+      // video/article：result 为数组；live：result 为按子类型分组的对象（2026-10-04 探针实测）
+      let arr = d.result || [];
+      if (!Array.isArray(arr)) {
+        arr = (searchType === 'live' && arr && arr.live_room) || [];
+      }
+      const items = [];
+      arr.forEach((raw) => {
+        let it = null;
+        if (searchType === 'article') it = normalizeSearchArticle(raw);
+        else if (searchType === 'live') it = normalizeSearchLive(raw);
+        else it = normalizeSearch(raw);
+        if (it) items.push(it);
+      });
+      if (items.length === 0) {
+        return { ok: false, stage: 'parse', message: pageNum > 1 ? '没有更多结果' : '无搜索结果' };
+      }
+      const numPages = Number(d.numPages) || 1;
+      return {
+        ok: true,
+        items: items,
+        page: pageNum,
+        noMore: pageNum >= numPages,
+        total: Number(d.numResults) || 0
+      };
+    });
+}
+
+// 视频搜索（兼容入口；autotest 与历史调用使用）
+export function searchVideos(client, mixinKey, keyword, page) {
+  return searchBili(client, mixinKey, keyword, page, 'video');
 }
 
 // 四段错误 → 面板一行文案

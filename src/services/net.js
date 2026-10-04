@@ -251,3 +251,39 @@ export async function httpGetBinary(url, opts) {
   }
   return { statusCode: r.status, body: r.buf, errorMessage: '' };
 }
+
+// QuickJS 无 TextDecoder：手写 UTF-8 → JS 字符串（含 4 字节代理对）
+export function utf8Decode(buf) {
+  const u = new Uint8Array(buf);
+  let out = '';
+  let i = 0;
+  const n = u.length;
+  while (i < n) {
+    const c = u[i];
+    if (c < 0x80) {
+      out += String.fromCharCode(c);
+      i++;
+    } else if ((c & 0xe0) === 0xc0 && i + 1 < n) {
+      out += String.fromCharCode(((c & 0x1f) << 6) | (u[i + 1] & 0x3f));
+      i += 2;
+    } else if ((c & 0xf0) === 0xe0 && i + 2 < n) {
+      out += String.fromCharCode(((c & 0x0f) << 12) | ((u[i + 1] & 0x3f) << 6) | (u[i + 2] & 0x3f));
+      i += 3;
+    } else if ((c & 0xf8) === 0xf0 && i + 3 < n) {
+      const cp = ((c & 0x07) << 18) | ((u[i + 1] & 0x3f) << 12) | ((u[i + 2] & 0x3f) << 6) | (u[i + 3] & 0x3f);
+      out += String.fromCharCode(0xd800 + ((cp - 0x10000) >> 10), 0xdc00 + ((cp - 0x10000) & 0x3ff));
+      i += 4;
+    } else {
+      i++; // 非法字节跳过
+    }
+  }
+  return out;
+}
+
+// native libcurl 文本 GET（返回 {statusCode, body:string, errorMessage}，与 jsapi http 响应同构）。
+// 用途：article/view 等对 TLS/HTTP 指纹风控敏感的接口——jsapi.http 栈会吃 -352，libcurl 栈可过
+//（2026-10-04 笔上对拍：同签名 URL，curl code=0，jsapi.http -352）。
+export async function httpGetTextNative(url, opts) {
+  const r = await httpGetBinary(url, opts);
+  return { statusCode: r.statusCode, body: utf8Decode(r.body), errorMessage: r.errorMessage };
+}

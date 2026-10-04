@@ -1,6 +1,6 @@
 <template>
   <div :class="mode === 'play' ? 'page page-live' : 'page'">
-    <!-- 左侧栏：浏览态=选项栏，播放态=播放控制 -->
+    <!-- 左侧栏：浏览态=选项栏，播放态=播放控制，图文态=详情返回 -->
     <div class="bar">
       <text class="brand">PenBili</text>
       <template v-if="mode === 'browse'">
@@ -13,6 +13,13 @@
           <text :class="tab === t.id ? 'tab-text tab-text-on' : 'tab-text'">{{ t.label }}</text>
         </div>
         <text class="bar-status">{{ statusText }}</text>
+      </template>
+      <template v-else-if="mode === 'article'">
+        <div class="ctrl" @click="onBackArticle">
+          <text class="ctrl-text">返回图文列表</text>
+        </div>
+        <text class="bar-time">图文详情</text>
+        <text class="bar-state">评论区可在右栏进入</text>
       </template>
       <template v-else>
         <div class="ctrl" @click="onBack">
@@ -59,22 +66,44 @@
         </div>
       </scroller>
 
-      <!-- 视频搜索：关键词行 + 结果（直播 tab 的替代，2026-09-23 用户决策） -->
+      <!-- 搜索：关键词行 + 三分栏（视频/图文/直播）+ 结果 -->
       <scroller v-else-if="tab === 'search'" class="list">
         <div class="searchbar" @click="onOpenInput">
-          <text class="search-kw">{{ keyword || '点此输入关键词搜索 B 站视频' }}</text>
+          <text class="search-kw">{{ keyword || '点此输入关键词搜索 B 站' }}</text>
           <div class="search-btn">
             <text class="search-btn-text">搜索</text>
           </div>
         </div>
-        <div v-for="it in searchItems" :key="'s' + it.bvid" class="vrow" @click="onPlayItem(it)">
-          <image class="thumb" :src="it.cover" :width="112" :height="63"></image>
-          <div class="vinfo">
-            <text class="vtitle">{{ it.title }}</text>
-            <text class="vmeta">{{ vmeta(it) }}</text>
+        <!-- 类型三分栏：切换零请求（各类型独立缓存），有关键词且该类型无结果时自动补拉 -->
+        <div class="stype-row">
+          <div
+            v-for="st in searchTypes"
+            :key="'st' + st.id"
+            :class="searchType === st.id ? 'stype stype-on' : 'stype'"
+            @click="setSearchType(st.id)"
+          >
+            <text :class="searchType === st.id ? 'stype-text stype-text-on' : 'stype-text'">{{ st.label }}</text>
           </div>
         </div>
-        <!-- 与推荐/热门同款（刷新 | 加载更多）双按钮 -->
+        <!-- 视频：与推荐/热门同款卡片 -->
+        <template v-for="it in searchItems">
+          <div v-if="it.kind === 'video'" :key="it.key" class="vrow" @click="onPlayItem(it)">
+            <image class="thumb" :src="it.cover" :width="112" :height="63"></image>
+            <div class="vinfo">
+              <text class="vtitle">{{ it.title }}</text>
+              <text class="vmeta">{{ vmeta(it) }}</text>
+            </div>
+          </div>
+          <!-- 图文：同款卡片，进入图文详情（评论区与视频同族 type=17） -->
+          <div v-else-if="it.kind === 'article'" :key="it.key" class="vrow" @click="openArticle(it)">
+            <image class="thumb" :src="it.cover" :width="112" :height="63"></image>
+            <div class="vinfo">
+              <text class="vtitle">{{ it.title }}</text>
+              <text class="vmeta">{{ it.up }}{{ it.view ? ' · 阅读 ' + formatCount(it.view) : '' }}{{ it.reply ? ' · 评论 ' + it.reply : '' }}</text>
+            </div>
+          </div>
+          </template>
+          <!-- 与推荐/热门同款（刷新 | 加载更多）双按钮 -->
         <div v-if="searchItems.length" class="more-row">
           <div class="more-half" @click="onRefreshTab">
             <text class="more-text">刷新</text>
@@ -127,7 +156,7 @@
         </div>
         <div class="mine-row">
           <text class="mine-label">PenBili</text>
-          <text class="mine-value">v2.3.0 · {{ profile ? '已登录' : '匿名' }}</text>
+          <text class="mine-value">v2.8.0 · {{ profile ? '已登录' : '匿名' }}</text>
         </div>
       </scroller>
 
@@ -156,12 +185,12 @@
       </div>
     </div>
 
-    <!-- 评论覆盖面板：不透明覆盖播放内容区（左栏控制保留；视频被盖 → 面板内滑动无视频可闪） -->
-    <div v-if="mode === 'play' && commentsOpen" class="comments-col">
+    <!-- 评论覆盖面板：不透明覆盖播放/图文内容区（左栏控制保留；视频被盖 → 面板内滑动无视频可闪） -->
+    <div v-if="(mode === 'play' || mode === 'article') && commentsOpen" class="comments-col">
       <div class="comments-head">
         <text class="comments-title">评论{{ replyCount ? ' · ' + replyCount : '' }}</text>
         <div class="ctrl comments-close" @click="closeComments">
-          <text class="ctrl-text">返回播放</text>
+          <text class="ctrl-text">{{ commentsBackLabel }}</text>
         </div>
       </div>
       <scroller class="comments-scroll">
@@ -218,6 +247,53 @@
       <text class="info-state">{{ play.note }}</text>
       <text class="info-hint">左侧：暂停/开始 · ±{{ seekStepSec }}s</text>
     </div>
+
+    <!-- 图文详情：中列正文滚动 + 右列信息（评论面板打开时两列收起；评论区与视频同族 type=17） -->
+    <div v-if="mode === 'article' && !commentsOpen" class="play-col">
+      <scroller class="art-scroll">
+        <div v-if="article.state === 'loading'" class="art-loading">
+          <text class="play-idle-text">图文加载中…</text>
+        </div>
+        <div v-else-if="article.state === 'error'" class="art-loading">
+          <text class="play-idle-text">{{ article.note || '图文加载失败 · 返回列表' }}</text>
+        </div>
+        <template v-else>
+          <image
+            v-if="article.cover"
+            class="art-cover"
+            :src="article.cover"
+            :width="436"
+            :height="article.coverDh || 140"
+            :style="{ width: '436px', height: (article.coverDh || 140) + 'px' }"
+          ></image>
+          <text class="art-title">{{ article.title }}</text>
+          <text class="art-author">{{ article.author }}{{ article.read ? ' · 阅读 ' + formatCount(article.read) : '' }}{{ article.like ? ' · 点赞 ' + formatCount(article.like) : '' }}</text>
+          <template v-for="(b, bi) in article.blocks">
+            <image
+              v-if="b.t === 'img'"
+              :key="'ab' + bi"
+              class="art-img"
+              :src="b.src"
+              :width="b.dw || 436"
+              :height="b.dh || 240"
+              :style="{ width: (b.dw || 436) + 'px', height: (b.dh || 240) + 'px' }"
+            ></image>
+            <text v-else :key="'ab' + bi" class="art-p">{{ b.text }}</text>
+          </template>
+          <text class="art-end">— 全文完 —</text>
+        </template>
+      </scroller>
+    </div>
+    <div v-if="mode === 'article' && !commentsOpen" class="info-col">
+      <text class="info-title">{{ article.title }}</text>
+      <text class="info-up">{{ article.author }}{{ article.words ? ' · ' + article.words + ' 字' : '' }}</text>
+      <div class="info-ctrl" @click="openComments">
+        <text class="info-ctrl-text">评论区{{ replyCount ? ' · ' + replyCount : '' }}</text>
+      </div>
+      <div class="info-spacer"></div>
+      <text class="info-state">{{ article.state === 'ok' ? '图文详情' : article.note }}</text>
+      <text class="info-hint">左侧：返回图文列表</text>
+    </div>
   </div>
 </template>
 
@@ -226,11 +302,13 @@ import {
   fetchRecommended,
   fetchPopular,
   searchVideos,
+  searchBili,
   appendDeduped,
   describeListError,
   formatDuration,
   formatCount
 } from '../../services/feed.js';
+import { fetchArticle } from '../../services/bili/article.js';
 import { createClient, cookieFromSession, DEFAULT_UA, REFERER } from '../../services/bili/client.js';
 import { KEYS, getJson, setJson, loadSession, logWarn } from '../../services/storage.js';
 import { loadHistory, saveHistory, pushHistory, formatHistoryTime } from '../../services/history.js';
@@ -269,6 +347,12 @@ const TABS = [
   { id: 'search', label: '搜索' },
   { id: 'mine', label: '我的' }
 ];
+
+// 搜索三分栏（与 feed.js searchBili 的 search_type 对应）
+const SEARCH_TYPES_UI = [
+  { id: 'video', label: '视频' },
+  { id: 'article', label: '图文' }
+]; // 直播入口暂缓（2026-10-04 用户决策）：searchBili 已支持 search_type=live（feed.js），播放链路接入后再上按钮
 
 // 二维码内容 = TV 变体 url（cookie 在 poll 响应 body 的 cookie_info；取证注释见 qrlogin.js）
 const QR_CELL = 4;
@@ -330,20 +414,27 @@ export default {
   data() {
     return {
       tabs: TABS,
+      searchTypes: SEARCH_TYPES_UI,
       tab: 'rcmd',
-      mode: 'browse',
+      mode: 'browse', // browse=列表 | play=视频 | article=图文详情
       rcmdItems: [],
       hotItems: [],
-      searchItems: [],
+      // 搜索三分栏（视频/图文/直播）：按类型独立缓存结果与分页；searchItems 为 computed 活跃视图
+      searchType: 'video',
+      searchResults: { video: [], article: [], live: [] },
+      searchPages: { video: 1, article: 1, live: 1 },
+      searchNoMoreMap: { video: false, article: false, live: false },
       hotPn: 1,
       hotNoMore: false,
       hotMorePn: 0, // 推荐耗尽后用热门续底的页码（与 hot tab 独立）
       moreNoMore: false,
       keyword: '',
-      searchPage: 1,
-      searchNoMore: false,
       loading: false,
       statusText: '',
+      // 评论上下文：视频=type 1（oid=aid）、图文=type 17（oid=专栏 aid）——回复/加载共用
+      replyCtx: { oid: 0, type: 1 },
+      // 图文详情（mode=article）：blocks = 文本/图片混排块（{t:'text',text} | {t:'img',src,dw,dh}）
+      article: { aid: 0, title: '', author: '', cover: '', coverDh: 140, blocks: [], read: 0, like: 0, state: 'idle', note: '' },
       history: [],
       buvidShort: '',
       seekStepSec: SEEK_STEP_MS / 1000,
@@ -369,6 +460,14 @@ export default {
   computed: {
     currentItems() {
       return this.tab === 'hot' ? this.hotItems : this.rcmdItems;
+    },
+    // 搜索活跃类型的条目视图（三分栏：视频/图文/直播各自缓存，切换零请求）
+    searchItems() {
+      return this.searchResults[this.searchType] || [];
+    },
+    // 评论面板返回按钮文案（跟随所在模式）
+    commentsBackLabel() {
+      return this.mode === 'article' ? '返回图文' : '返回播放';
     },
     stateLabel() {
       return STATE_LABELS[this.play.state] || '';
@@ -403,7 +502,7 @@ export default {
     // 昵称/等级仍由 profile 展示）
     moreBtnText() {
       if (this.tab === 'rcmd') return this.moreNoMore ? '没有更多了' : '加载更多';
-      if (this.tab === 'search') return this.searchNoMore ? '没有更多了' : '加载更多';
+      if (this.tab === 'search') return this.searchNoMoreMap[this.searchType] ? '没有更多了' : '加载更多';
       return this.hotNoMore ? '没有更多了' : '加载更多';
     },
     // 已登录判定（以 nav 验证过的档案为准：过期 cookie 等同未登录，提示文案一致）
@@ -466,6 +565,10 @@ export default {
       const d = formatDuration(it.durationSec);
       if (d) parts.push(d);
       return parts.join(' · ');
+    },
+    // 模板不能直接用模块导入 → 方法转发（图文/直播卡片计数展示）
+    formatCount(n) {
+      return formatCount(n);
     },
     historyTime(at) {
       return formatHistoryTime(at, Date.now());
@@ -533,10 +636,10 @@ export default {
           if (!this.keyword) return { ok: false, stage: 'param', message: '未输入关键词' };
           const mixin = await ensureMixin(this.makeCtx(this.gen));
           if (!mixin) return { ok: false, stage: 'wbi', message: 'WBI 密钥获取失败' };
-          const r = await searchVideos(this.client, mixin, this.keyword, 1);
+          const r = await searchBili(this.client, mixin, this.keyword, 1, this.searchType);
           if (r.ok) {
-            this.searchPage = 1;
-            this.searchNoMore = r.noMore;
+            this.searchPages[this.searchType] = 1;
+            this.searchNoMoreMap[this.searchType] = r.noMore;
           }
           return r;
         }
@@ -582,7 +685,7 @@ export default {
       }
       if (id === 'rcmd') this.rcmdItems = r.items;
       else if (id === 'hot') this.hotItems = r.items;
-      else if (id === 'search') this.searchItems = r.items;
+      else if (id === 'search') this.searchResults[this.searchType] = r.items;
       this.statusText = '';
       logWarn('[bili] load ' + id + ' ok n=' + r.items.length);
     },
@@ -631,7 +734,10 @@ export default {
           return;
         }
         this.keyword = kw;
-        this.searchItems = [];
+        // 新关键词：三分栏全部重置（切到 search tab 由 loadTab 拉当前类型首屏）
+        this.searchResults = { video: [], article: [], live: [] };
+        this.searchPages = { video: 1, article: 1, live: 1 };
+        this.searchNoMoreMap = { video: false, article: false, live: false };
         this.statusText = '搜索「' + kw + '」…';
         await this.selectTab('search');
       } finally {
@@ -647,10 +753,10 @@ export default {
       if (id === 'rcmd') this.rcmdItems = [];
       else if (id === 'hot') this.hotItems = [];
       else {
-        // 搜索刷新：保留关键词，重置分页重拉第一页
-        this.searchItems = [];
-        this.searchPage = 1;
-        this.searchNoMore = false;
+        // 搜索刷新：保留关键词，当前类型重置分页重拉第一页（其它类型缓存保留）
+        this.searchResults[this.searchType] = [];
+        this.searchPages[this.searchType] = 1;
+        this.searchNoMoreMap[this.searchType] = false;
       }
       logWarn('[bili] refresh ' + id);
       await this.loadTab(id, myGen);
@@ -679,9 +785,10 @@ export default {
       this.statusText = merged.added === 0 ? '没有更多了' : '';
       logWarn('[bili] rcmd+hot 续底 +' + merged.added + ' total=' + merged.items.length + ' pn=' + this.hotMorePn);
     },
-    // 搜索翻页（search/type 支持 page）
+    // 搜索翻页（search/type 支持 page；三分栏各自独立分页）
     async loadMoreSearch() {
-      if (this.searchNoMore || !this.keyword) return;
+      const st = this.searchType;
+      if (this.searchNoMoreMap[st] || !this.keyword) return;
       const myGen = ++this.gen;
       this.loading = true;
       this.statusText = '加载更多…';
@@ -695,7 +802,7 @@ export default {
         this.statusText = 'WBI 密钥失败';
         return;
       }
-      const r = await searchVideos(this.client, mixin, this.keyword, this.searchPage + 1);
+      const r = await searchBili(this.client, mixin, this.keyword, this.searchPages[st] + 1, st);
       if (this.gen !== myGen) {
         this.loading = false;
         return;
@@ -706,12 +813,97 @@ export default {
         logWarn('[bili] search more fail: ' + this.statusText);
         return;
       }
-      this.searchPage = r.page;
-      this.searchNoMore = r.noMore;
-      const merged = appendDeduped(this.searchItems, r.items);
-      this.searchItems = merged.items;
+      this.searchPages[st] = r.page;
+      this.searchNoMoreMap[st] = r.noMore;
+      const merged = appendDeduped(this.searchResults[st], r.items);
+      this.searchResults[st] = merged.items;
       this.statusText = merged.added === 0 ? '没有更多了' : '';
-      logWarn('[bili] search page ' + r.page + ' +' + merged.added + ' total=' + merged.items.length);
+      logWarn('[bili] search(' + st + ') page ' + r.page + ' +' + merged.added + ' total=' + merged.items.length);
+    },
+
+    /* ---------- 搜索三分栏切换 / 图文 / 直播 ---------- */
+    // 切换类型：有缓存零请求；有关键词且该类型为空 → 自动补拉首屏
+    setSearchType(id) {
+      if (this.searchType === id) return;
+      this.searchType = id;
+      if (this.tab !== 'search') return;
+      if (this.keyword && !this.searchResults[id].length && !this.loading) {
+        const myGen = ++this.gen;
+        this.loadTab('search', myGen);
+      }
+    },
+    // 直播入口暂缓（用户决策）：播放链路（flv/HLS 解码）接入后再上按钮
+    // 图文详情：正文 + 评论区（type=12，与视频评论同族）
+    async openArticle(it) {
+      if (!it || !(it.id > 0)) return;
+      const myGen = ++this.gen;
+      this.mode = 'article';
+      this.article = {
+        aid: it.id,
+        title: it.title,
+        author: it.up || '',
+        cover: it.cover || '',
+        coverDh: 140,
+        blocks: [],
+        read: it.view || 0,
+        like: 0,
+        state: 'loading',
+        note: ''
+      };
+      // 换稿件即清空上一条的评论上下文（专栏评论实测 type=12，17 为旧文档值已 -404）
+      this.replies = [];
+      this.replyStatus = '';
+      this.replyCount = 0;
+      this.commentsOpen = false;
+      this.replyCtx = { oid: it.id, type: 12 };
+      // article/view 有限流/风控（-509/-352 实测）→ 退避重试两次（1.5s / 6s，同 loadTab 策略的加强版）
+      const mixin = await ensureMixin(this.makeCtx(myGen));
+      if (this.gen !== myGen) return;
+      if (!mixin) {
+        this.article.state = 'error';
+        this.article.note = 'WBI 密钥失败';
+        return;
+      }
+      const backoffs = [0, 1500, 6000];
+      let r = { ok: false, stage: 'init' };
+      for (let i = 0; i < backoffs.length; i++) {
+        if (backoffs[i] > 0) {
+          this.article.note = '限流/风控，' + Math.round(backoffs[i] / 1000) + 's 后重试…';
+          await this.sleep(backoffs[i]);
+        }
+        if (this.gen !== myGen) return;
+        r = await fetchArticle(this.client, mixin, it.id);
+        if (this.gen !== myGen) return;
+        if (r.ok) break;
+        if (r.stage === 'param' || r.stage === 'wbi') break; // 非瞬态错误不重试
+      }
+      if (!r.ok) {
+        this.article.state = 'error';
+        this.article.note = describeListError(r);
+        logWarn('[bili] article fail stage=' + r.stage + ': ' + r.message);
+        return;
+      }
+      this.article = {
+        aid: r.article.aid,
+        title: r.article.title,
+        author: r.article.author,
+        cover: r.article.cover || '',
+        coverDh: r.article.coverDh || 140,
+        blocks: r.article.blocks,
+        read: r.article.read,
+        like: r.article.like,
+        state: 'ok',
+        note: ''
+      };
+      this.loadReplies(r.article.aid, 12); // 评论首屏（专栏 type=12；不阻塞正文展示）
+      logWarn('[bili] article open aid=' + r.article.aid + ' blocks=' + r.article.blocks.length);
+    },
+    // 返回图文列表（无播放会话，仅取消图文/评论在途请求）
+    onBackArticle() {
+      const myGen = ++this.gen;
+      this.commentsOpen = false;
+      this.mode = 'browse';
+      this.tab = 'search';
     },
 
     /* ---------- 播放 ---------- */
@@ -728,6 +920,7 @@ export default {
       this.replyPage = 1;
       this.replyCount = 0;
       this.commentsOpen = false;
+      this.replyCtx = { oid: 0, type: 1 };
       this.replyOpen = { root: 0, items: [], shown: 0, page: 1, noMore: false, loading: false };
       this.play = {
         state: 'loading',
@@ -777,7 +970,8 @@ export default {
         Date.now()
       ).items;
       saveHistory({ version: 1, items: this.history });
-      this.loadReplies(r.session.aid || 0); // 评论首屏（不阻塞播放；无 aid 内部直接返回）
+      this.replyCtx = { oid: r.session.aid || 0, type: 1 };
+      this.loadReplies(r.session.aid || 0, 1); // 评论首屏（不阻塞播放；无 aid 内部直接返回）
       this.startPoll(myGen);
       logWarn('[bili] play start ' + r.session.bvid + ' qn=' + r.session.qn + ' dur=' + r.session.durationMs + 'ms');
     },
@@ -989,21 +1183,30 @@ export default {
       this.play.note = '';
       logWarn('[bili] seek ' + (deltaSec > 0 ? '+' : '') + deltaSec + 's → pos=' + r.positionMs + 'ms');
     },
-    /* 评论面板显示权交接：打开=暂停 fb 输出（解码/音频照常）→ UI 独占无闪；关闭恢复 */
+    /* 评论面板显示权交接：打开=暂停 fb 输出（解码/音频照常）→ UI 独占无闪；关闭恢复。
+       图文模式无播放会话，不碰 player。 */
     openComments() {
+      if (!(this.replyCtx && this.replyCtx.oid > 0)) {
+        this.statusText = '评论加载中，请稍候';
+        return;
+      }
       this.commentsOpen = true;
-      player.pauseRender().catch(function (e) {
-        logWarn('[bili] pauseRender: ' + (e && e.message));
-      });
-      logWarn('[bili] comments open → render paused');
+      if (this.mode === 'play') {
+        player.pauseRender().catch(function (e) {
+          logWarn('[bili] pauseRender: ' + (e && e.message));
+        });
+        logWarn('[bili] comments open → render paused');
+      }
     },
     closeComments() {
       if (!this.commentsOpen) return;
       this.commentsOpen = false;
-      player.resumeRender().catch(function (e) {
-        logWarn('[bili] resumeRender: ' + (e && e.message));
-      });
-      logWarn('[bili] comments close → render resumed');
+      if (this.mode === 'play') {
+        player.resumeRender().catch(function (e) {
+          logWarn('[bili] resumeRender: ' + (e && e.message));
+        });
+        logWarn('[bili] comments close → render resumed');
+      }
     },
 
     /* ---------- 评论（覆盖面板 scroller 滑动 + 行内子楼） ---------- */
@@ -1013,8 +1216,8 @@ export default {
       if (rp.rcount > 0) parts.push(rp.rcount + ' 条回复');
       return parts.join(' · ');
     },
-    async loadReplies(aid) {
-      if (!(aid > 0)) return;
+    async loadReplies(oid, type) {
+      if (!(oid > 0)) return;
       const myGen = this.gen;
       this.replyLoading = true;
       this.replyStatus = '';
@@ -1022,7 +1225,7 @@ export default {
       this.replyPage = 1;
       this.replyNoMore = false;
       this.replyOpen = { root: 0, items: [], shown: 0, page: 1, noMore: false, loading: false };
-      const r = await fetchReplies(this.client, aid, 1);
+      const r = await fetchReplies(this.client, oid, 1, type);
       if (this.gen !== myGen) return;
       this.replyLoading = false;
       if (!r.ok) {
@@ -1037,11 +1240,11 @@ export default {
     },
     async loadMoreReplies() {
       if (this.replyLoading || this.replyNoMore) return;
-      const aid = this.play.session && this.play.session.aid;
-      if (!(aid > 0)) return;
+      const ctx = this.replyCtx || { oid: 0, type: 1 };
+      if (!(ctx.oid > 0)) return;
       const myGen = this.gen;
       this.replyLoading = true;
-      const r = await fetchReplies(this.client, aid, this.replyPage + 1);
+      const r = await fetchReplies(this.client, ctx.oid, this.replyPage + 1, ctx.type);
       if (this.gen !== myGen) return;
       this.replyLoading = false;
       if (!r.ok) {
@@ -1064,8 +1267,8 @@ export default {
         this.replyStatus = '请先在「我的」扫码登录后再评论';
         return;
       }
-      const aid = this.play.session && this.play.session.aid;
-      if (!(aid > 0)) {
+      const ctx = this.replyCtx || { oid: 0, type: 1 };
+      if (!(ctx.oid > 0)) {
         this.replyStatus = '当前稿件无评论上下文';
         return;
       }
@@ -1086,7 +1289,7 @@ export default {
           return;
         }
         this.replyStatus = '发送中…';
-        const r = await addReply(this.client, aid, text, csrf);
+        const r = await addReply(this.client, ctx.oid, text, csrf, ctx.type);
         if (this.gen !== myGen) return;
         if (!r.ok) {
           this.replyStatus = '发送失败：' + (r.message || '');
@@ -1116,12 +1319,12 @@ export default {
         this.replyOpen = { root: 0, items: [], shown: 0, page: 1, noMore: false, loading: false };
         return;
       }
-      const aid = this.play.session && this.play.session.aid;
-      if (!(aid > 0)) return;
+      const ctx = this.replyCtx || { oid: 0, type: 1 };
+      if (!(ctx.oid > 0)) return;
       this.replyOpen = { root: rp.rpid, items: [], shown: 0, page: 1, noMore: false, loading: true };
       const myGen = this.gen;
       const myRoot = rp.rpid;
-      const r = await fetchSubReplies(this.client, aid, myRoot, 1);
+      const r = await fetchSubReplies(this.client, ctx.oid, myRoot, 1, ctx.type);
       if (this.gen !== myGen) return;
       if (this.replyOpen.root !== myRoot) return; // 展开目标已切换，丢弃过期结果
       this.replyOpen.loading = false;
@@ -1138,12 +1341,12 @@ export default {
     },
     async loadMoreChildren() {
       if (!this.replyOpen.root || this.replyOpen.loading || this.replyOpen.noMore) return;
-      const aid = this.play.session && this.play.session.aid;
-      if (!(aid > 0)) return;
+      const ctx = this.replyCtx || { oid: 0, type: 1 };
+      if (!(ctx.oid > 0)) return;
       const myGen = this.gen;
       const myRoot = this.replyOpen.root;
       this.replyOpen.loading = true;
-      const r = await fetchSubReplies(this.client, aid, myRoot, this.replyOpen.page + 1);
+      const r = await fetchSubReplies(this.client, ctx.oid, myRoot, this.replyOpen.page + 1, ctx.type);
       if (this.gen !== myGen || this.replyOpen.root !== myRoot) return;
       this.replyOpen.loading = false;
       if (!r.ok) return;

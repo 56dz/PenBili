@@ -5,6 +5,7 @@
 //   on N BVxxx → 再追加 soakBv：soak 固定复播该稿件（跨轮次可复现同一稿件，便于 A/B 对比）
 // 产物：.deploy/preferences.json —— 由 tools/deploy.ps1 推到设备 storage 目录
 //       （storage 值必须是字符串，所以整体再序列化一层）
+// ⚠️ 推送会**整文件覆盖**设备 storage（含登录态）→ 推完需重新扫码登录
 const fs = require('fs');
 const path = require('path');
 

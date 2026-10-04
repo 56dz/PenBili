@@ -137,7 +137,8 @@ static int do_post(const char *url, const char *headersText, const char *body, l
     curl_easy_setopt(h, CURLOPT_CONNECTTIMEOUT_MS, 15000L);
     curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(h, CURLOPT_NOSIGNAL, 1L);
-    curl_easy_setopt(h, CURLOPT_ACCEPT_ENCODING, "");
+    /* Accept-Encoding 不再协商：A-E 头会命中 article/view 等接口的风控连接拒绝（2026-10-04 实测），JSON 无压缩需求 */
+    /* curl_easy_setopt(h, CURLOPT_ACCEPT_ENCODING, ""); */
     if (insecure) {
         curl_easy_setopt(h, CURLOPT_SSL_VERIFYPEER, 0L);
         curl_easy_setopt(h, CURLOPT_SSL_VERIFYHOST, 0L);
@@ -202,7 +203,8 @@ static int do_get(const char *url, const char *headersText, long timeoutMs, int 
     curl_easy_setopt(h, CURLOPT_CONNECTTIMEOUT_MS, 15000L);
     curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(h, CURLOPT_NOSIGNAL, 1L);
-    curl_easy_setopt(h, CURLOPT_ACCEPT_ENCODING, "");
+    /* Accept-Encoding 不再协商：A-E 头会命中 article/view 等接口的风控连接拒绝（2026-10-04 实测），JSON 无压缩需求 */
+    /* curl_easy_setopt(h, CURLOPT_ACCEPT_ENCODING, ""); */
     if (insecure) {
         curl_easy_setopt(h, CURLOPT_SSL_VERIFYPEER, 0L);
         curl_easy_setopt(h, CURLOPT_SSL_VERIFYHOST, 0L);

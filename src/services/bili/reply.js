@@ -1,7 +1,8 @@
 // 评论（读 + 写）
 // 事实来源：api-mock/fixtures/reply.json（开发机 2026-09-24 真响应）+ xieren58/bilibili-API-collect 契约。
 //
-// 读 GET /x/v2/reply?type=1&oid=<aid>&pn=&ps=10&sort=2   （匿名可用，实测 code:0）
+// 读 GET /x/v2/reply?type=&oid=<oid>&pn=&ps=10&sort=2   （匿名可用，实测 code:0）
+//   type 契约（2026-10-04 探针实测）：**1=视频 12=专栏图文**（17 实测 -404，勿用）
 //   data.replies[]: {rpid, mid, ctime, like, rcount,
 //                    member:{uname, face}, content:{message}}   ← message 为纯文本（emoji 为 [文字] 形态）
 //   data.page: {num, size, count, acount}   ← pn/ps 翻页（非 cursor 模式）
@@ -9,7 +10,7 @@
 //   （闪烁根因修复在根容器 page-live 透明——见 base.less，滚动回滚保留）。
 //
 // 写 POST https://api.bilibili.com/x/v2/reply/add   （form + Cookie + csrf=bili_jct）
-//   参数: oid=<aid> type=1 message=<文本> csrf=<bili_jct> platform=web
+//   参数: oid=<oid> type=<1|12> message=<文本> csrf=<bili_jct> platform=web
 //   成功 {code:0, data:{rpid}}；-101 未登录 / -111 csrf 不符 / -412 风控。
 //   无 w_rid（web 表单契约）；若真机被要求签名，按 code 升级为 wbi（回退计划已注释在 client 侧）。
 //   通过 client.postForm 走 native httpjson（原样 form body；jsapi POST 会二次 JSON 化不可用）。
@@ -19,6 +20,11 @@
 export const REPLY_PAGE_SIZE = 10; /* 主楼每页（滑动浏览） */
 export const CHILD_PS = 20; /* 子楼每页（行内展开） */
 export const REPLY_ADD_URL = 'https://api.bilibili.com/x/v2/reply/add';
+
+// 评论类型收敛：仅放行实测可用的 1（视频）/ 12（专栏图文）；其余回落 1
+export function replyType(t) {
+  return t === 12 || t === 17 ? (t === 17 ? 12 : t) : 1;
+}
 
 // 原始回复 → 视图条目 | null（缺 rpid/content 丢弃）
 export function normalizeReply(raw) {
@@ -71,60 +77,61 @@ export function parseReplies(res) {
 }
 
 // 读一页评论 → 同上 | {ok:false, stage, message}
-export async function fetchReplies(client, aid, pn) {
+// type: 评论区类型（B 站评论区契约）：1=视频 17=专栏图文（图文复用同族接口）
+export function fetchReplies(client, oid, pn, type) {
   const page = Math.max(1, Math.floor(Number(pn) || 1));
-  const res = await client.request('/x/v2/reply', {
-    type: 1,
-    oid: Math.floor(Number(aid) || 0),
+  const res = client.request('/x/v2/reply', {
+    type: replyType(type),
+    oid: Math.floor(Number(oid) || 0),
     pn: page,
     ps: REPLY_PAGE_SIZE,
     sort: 2
   });
-  if (!res.ok) return parseReplies(res);
-  return parseReplies(res);
+  return res.then(parseReplies);
 }
 
 // 写评论（form 串：csrf=bili_jct，全部 URL 编码）→ {ok, rpid} | {ok:false, stage, code?, message}
-export async function addReply(client, aid, message, csrf) {
-  const oid = Math.floor(Number(aid) || 0);
+export function addReply(client, oid, message, csrf, type) {
+  const oidNum = Math.floor(Number(oid) || 0);
   const text = String(message == null ? '' : message).trim();
-  if (!(oid > 0)) return { ok: false, stage: 'param', message: '缺少稿件 id' };
-  if (!text) return { ok: false, stage: 'param', message: '评论内容为空' };
-  if (text.length > 1000) return { ok: false, stage: 'param', message: '评论超长（>1000）' };
-  if (!csrf) return { ok: false, stage: 'param', message: '缺少 csrf（需要登录）' };
+  if (!(oidNum > 0)) return Promise.resolve({ ok: false, stage: 'param', message: '缺少稿件 id' });
+  if (!text) return Promise.resolve({ ok: false, stage: 'param', message: '评论内容为空' });
+  if (text.length > 1000) return Promise.resolve({ ok: false, stage: 'param', message: '评论超长（>1000）' });
+  if (!csrf) return Promise.resolve({ ok: false, stage: 'param', message: '缺少 csrf（需要登录）' });
   const form =
-    'oid=' + oid +
-    '&type=1' +
+    'oid=' + oidNum +
+    '&type=' + replyType(type) +
     '&message=' + encodeURIComponent(text) +
     '&csrf=' + encodeURIComponent(csrf) +
     '&platform=web';
-  const res = await client.postForm(REPLY_ADD_URL, form, { acceptCodes: [0] });
-  if (!res || res.ok === false) {
-    return {
-      ok: false,
-      stage: res ? res.stage : 'transport',
-      code: res ? res.code : undefined,
-      message: (res && res.message) || '发送失败'
-    };
-  }
-  const rpid = Number(res.data && res.data.rpid) || 0;
-  if (!(rpid > 0)) return { ok: false, stage: 'parse', message: '响应缺少 rpid' };
-  return { ok: true, rpid: rpid };
+  return client.postForm(REPLY_ADD_URL, form, { acceptCodes: [0] }).then((res) => {
+    if (!res || res.ok === false) {
+      return {
+        ok: false,
+        stage: res ? res.stage : 'transport',
+        code: res ? res.code : undefined,
+        message: (res && res.message) || '发送失败'
+      };
+    }
+    const rpid = Number(res.data && res.data.rpid) || 0;
+    if (!(rpid > 0)) return { ok: false, stage: 'parse', message: '响应缺少 rpid' };
+    return { ok: true, rpid: rpid };
+  });
 }
 
-// 子楼读取 GET /x/v2/reply/reply?oid=&type=1&root=<主楼rpid>&pn=&ps=20
+// 子楼读取 GET /x/v2/reply/reply?oid=&type=&root=<主楼rpid>&pn=&ps=20
 //   响应结构与主接口同构（data.replies + data.page）→ 复用 parseReplies；
 //   root=被展开评论的 rpid；匿名可用（与主接口同族）。
-export async function fetchSubReplies(client, aid, rootRpid, pn) {
+export function fetchSubReplies(client, oid, rootRpid, pn, type) {
   const page = Math.max(1, Math.floor(Number(pn) || 1));
   const root = Math.floor(Number(rootRpid) || 0);
-  if (!(root > 0)) return { ok: false, stage: 'param', message: '缺少 root rpid' };
-  const res = await client.request('/x/v2/reply/reply', {
-    type: 1,
-    oid: Math.floor(Number(aid) || 0),
+  if (!(root > 0)) return Promise.resolve({ ok: false, stage: 'param', message: '缺少 root rpid' });
+  const res = client.request('/x/v2/reply/reply', {
+    type: replyType(type),
+    oid: Math.floor(Number(oid) || 0),
     root: root,
     pn: page,
     ps: CHILD_PS
   });
-  return parseReplies(res);
+  return res.then(parseReplies);
 }
