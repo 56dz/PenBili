@@ -34,8 +34,75 @@ function cancelled(ctx) {
   return !!(ctx.cancelled && ctx.cancelled());
 }
 
+// ============ 直播（2026-10-07 恢复入口）============
+// 链路：搜索(kind=live) → GET /live?room=N（转码代理）→ player 单输入打开。
+// 三个真机实测约束决定了这个形态：
+//   ① URL 必须短：native `char input[1024]` + MAX_INPUT_LEN=1024；带 CDN `u=` 的代理 URL 实测
+//      超 1000 字符会撞上限 → **只传 room**，由服务端 getRoomPlayInfo v2 自解析线路 —— 顺带
+//      天然没有"CDN 直链过期"问题（重启/重连永远拿新鲜地址）。
+//   ② 不可直连播：getRoomPlayInfo 唯一 avc 档 720p，软解 0.76x 不实时（见文件头技术留档）
+//      → 必须经服务端转码成 360p（服务端已强制 yuv420p / 44100 / 30fps）。
+//   ③ 不能做 playUrl 预检：离线房 playUrl 同样返回 code=0 + durl 有 URL（2026-10-07 实测）
+//      → 开播判据交给转码服务（离线 → 服务端 403/无线路 → 开流验证失败）。
+//   ④ 隧道偶发 502/断口（实测 15s 1152KB 0 断口、25s 分段偶发 >1s 断口与 502）
+//      → openVideo 内做"等首帧 + 换地址重试"。
+// 同网直连优先（真机实测笔=192.168.5.119 与服务器同段）：省隧道缓冲与首字节延迟——
+// 外网域名作为回退（离网漫游时内网地址会快速失败后落到它）
+export const LIVE_SERVERS = ['http://192.168.5.224:2050', 'http://penbili.560726.best'];
+
+// 纯函数（可测）：直播代理地址；room-only ≈ 48 字符
+export function buildLiveUrl(roomid, server) {
+  const room = Math.floor(Number(roomid) || 0);
+  if (!(room > 0)) return '';
+  return String(server || LIVE_SERVERS[0]) + '/live?room=' + room + '&lanes=0';
+}
+
+// attempt=0..N 用于开流重试时轮换服务器（域名优先，失败切内网直连）
+export async function resolveLiveUrl(ctx, item, attempt) {
+  const roomid = Number(item && item.roomid) || 0;
+  if (!(roomid > 0)) return { ok: false, stage: 'param', message: '直播间 id 无效' };
+  const idx = Math.max(0, Math.floor(Number(attempt) || 0));
+  const server = LIVE_SERVERS[idx % LIVE_SERVERS.length];
+  return {
+    ok: true,
+    live: true,
+    url: buildLiveUrl(roomid, server),
+    audioUrl: '', /* 单输入 → native durl 路径（单进程）；live 无 stream-resync，掉流由 JS 重连 */
+    fps: 30, /* 转码输出固定 30fps（-vf fps=30 / -framerate 30）；VOD 才用 HTML5_FPS=24 */
+    qn: 0,
+    cid: roomid,
+    roomid: roomid,
+    aid: 0, /* 直播不接评论（reply 无 oid） */
+    durationMs: 0, /* 时长未知 → 不钳制定位、不判"播完"（结束判定在 JS 侧转为重连） */
+    title: (item && item.title) || '',
+    width: 640, /* 服务端 scale=-2:360 的 16:9 输出 → 信箱矩形按此算（竖屏直播罕见，暂不支持） */
+    height: 360,
+    host: server
+  };
+}
+
+function liveDelay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// 直播开流确认：openSession 只 spawn（403/502 也返回 ok=true），**必须等到首帧**才证明链路通。
+// 返回 'ok' | 'error'（native 已判错，等下去没意义）| 'timeout' | 'cancel'
+async function waitForFirstFrame(ctx, maxMs) {
+  const t0 = Date.now();
+  for (;;) {
+    if (cancelled(ctx)) return 'cancel';
+    const st = await readStatus(ctx);
+    if (cancelled(ctx)) return 'cancel';
+    if (st.ok && st.frames > 0) return 'ok';
+    if (!st.ok) return 'error';
+    if (Date.now() - t0 >= maxMs) return 'timeout';
+    await liveDelay(300);
+  }
+}
+
 // → {ok, url, audioUrl, qn, cid, durationMs, title, width, height, host} | {ok:false, stage, message}
 export async function resolveVideoUrl(ctx, item) {
+  if (item && item.kind === 'live') return resolveLiveUrl(ctx, item, 0);
   if (!item || !/^BV[0-9A-Za-z]{10}$/.test(item.bvid || '')) {
     return { ok: false, stage: 'param', message: '稿件标识不合法' };
   }
@@ -174,30 +241,69 @@ export async function resolveVideoUrl(ctx, item) {
 
 // → {ok, session} | {ok:false, stage, message, code?} | {ok:false, stage:'cancel'}
 export async function openVideo(ctx, item) {
-  const rs = await resolveVideoUrl(ctx, item);
-  if (!rs.ok) return rs;
-  if (cancelled(ctx)) return { ok: false, stage: 'cancel', message: '已取消' };
-  // 矩形按**稿件真实显示宽高**做信箱适配（竖屏 → 物理竖柱，不再被拉伸成横屏）
-  const rects = playVideoRects(rs.width, rs.height);
-  const openRes = await ctx.player.openSession({
-    input: rs.url,
-    input2: rs.audioUrl || '', // DASH 音频轨第二输入（空 = durl 回退路径）
-    startMs: 0,
-    durationMs: rs.durationMs,
-    fps: HTML5_FPS,
-    audio: true,
-    transpose: 2,
-    rect: rects.physical,
-    audioDevice: '',
-    userAgent: ctx.mediaUa,
-    referer: ctx.mediaReferer
-  });
-  if (!openRes || openRes.ok !== true) {
+  const isLive = !!(item && item.kind === 'live');
+  /* 直播：开流重试（换地址）。VOD 保持原语义——open 即返回，首帧由 poll 的「加载中」呈现。 */
+  const attempts = isLive ? LIVE_SERVERS.length : 1;
+  let rs = null;
+  let openRes = null;
+  let lastErr = '';
+  let verified = false;
+  for (let i = 0; i < attempts; i++) {
+    rs = isLive ? await resolveLiveUrl(ctx, item, i) : await resolveVideoUrl(ctx, item);
+    if (!rs.ok) return rs;
+    if (cancelled(ctx)) return { ok: false, stage: 'cancel', message: '已取消' };
+    // 矩形按**稿件真实显示宽高**做信箱适配（竖屏 → 物理竖柱，不再被拉伸成横屏）
+    const rects = playVideoRects(rs.width, rs.height);
+    openRes = await ctx.player.openSession({
+      input: rs.url,
+      input2: rs.audioUrl || '', // DASH 音频轨第二输入（空 = durl/直播 单输入路径）
+      startMs: 0,
+      durationMs: rs.durationMs,
+      fps: rs.fps || HTML5_FPS, // 直播=30（转码输出帧率），VOD=HTML5_FPS
+      audio: true,
+      transpose: 2,
+      rect: rects.physical,
+      audioDevice: '',
+      userAgent: ctx.mediaUa,
+      referer: ctx.mediaReferer
+    });
+    if (!openRes || openRes.ok !== true) {
+      lastErr = openRes ? (openRes.code + ': ' + openRes.error) : '播放器无响应';
+      if (ctx.log) ctx.log('[bili] openSession fail #' + (i + 1) + ': ' + lastErr);
+      if (i + 1 < attempts) {
+        await liveDelay(1500);
+        continue;
+      }
+      break;
+    }
+    if (!isLive) {
+      verified = true;
+      break;
+    }
+    /* 直播等首帧：403/502/隧道断/上游停顿在这里才暴露（openSession 恒 ok）→ 失败换下一个地址重开。
+     * 窗口 20s：真机实测冷启动（上游拉流 + 转码 + 笔端探流解码）可达 7s+，v4 服务端"停顿换线"
+     * 场景甚至更久；7s 会把"慢启动"误判成"不可达"（2026-10-05 autotest 实录）。 */
+    const first = await waitForFirstFrame(ctx, 20000);
+    if (first === 'ok') {
+      verified = true;
+      break;
+    }
+    if (first === 'cancel') return { ok: false, stage: 'cancel', message: '已取消' };
+    lastErr = first === 'error' ? '转码服务返回错误（房间未开播？）' : '首帧超时（转码服务不可达？）';
+    if (ctx.log) ctx.log('[bili] live verify #' + (i + 1) + ' → ' + first);
+    await closeSession(ctx); /* 关掉不通的会话，换地址重开 */
+    if (cancelled(ctx)) return { ok: false, stage: 'cancel', message: '已取消' };
+    if (i + 1 < attempts) await liveDelay(1200);
+  }
+  if (!rs || !rs.ok) return rs || { ok: false, stage: 'open', message: '取流失败' };
+  if (!openRes || openRes.ok !== true || !verified) {
     return {
       ok: false,
       stage: 'open',
       code: openRes ? openRes.code : undefined,
-      message: (openRes && (openRes.code + ': ' + openRes.error)) || '播放器启动失败'
+      message: isLive
+        ? '直播间打不开（' + (lastErr || '未开播或转码服务不可达') + '）'
+        : (lastErr || '播放器启动失败')
     };
   }
   if (ctx.log) {
@@ -205,20 +311,22 @@ export async function openVideo(ctx, item) {
       '[bili] open ok out=' + openRes.outWidth + 'x' + openRes.outHeight +
         ' fps=' + openRes.fps +
         ' audio=' + (openRes.audioRate || '?') + (openRes.audioBt ? '(BT)' : '') +
-        (rs.audioUrl ? ' DASH' : ' durl')
+        (rs.live ? ' LIVE' : rs.audioUrl ? ' DASH' : ' durl')
     );
   }
   return {
     ok: true,
     session: {
-      kind: 'video',
-      bvid: item.bvid,
+      kind: isLive ? 'live' : 'video',
+      live: isLive,
+      roomid: rs.roomid || 0,
+      bvid: isLive ? ('live:' + rs.roomid) : item.bvid, /* 无 bvid（直播不入历史，日志用它占位） */
       cid: rs.cid,
       title: rs.title || item.title || '',
       up: item.up || '',
       cover: item.cover || '',
       qn: rs.qn,
-      aid: rs.aid || 0, /* 评论 oid */
+      aid: rs.aid || 0, /* 评论 oid（直播=0 → 评论空转） */
       durationMs: rs.durationMs,
       outWidth: openRes.outWidth,
       outHeight: openRes.outHeight

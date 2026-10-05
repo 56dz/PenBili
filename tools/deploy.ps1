@@ -28,7 +28,10 @@ $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $ev = Join-Path $root 'profiles\evidence'
 $prefsDir = "/userdisk/miniapp/data/mini_app/pkg/$appid/data/sharedpreferences"
 $seedFile = Join-Path $root '.deploy\preferences.json'
-$wait = if ($Autotest) { 45 } else { 12 }   # 慢网络下自检全程可达 40s+（单请求上界 15s）
+# Autotest 现含直播步（地址轮换最坏 2×20s 首帧窗 + 既有 30s/25s 窗口 + 评论停留 7s）
+# → 首轮窗口必须覆盖整轮自检，否则第 5 步切桌面会把跑到一半的自检杀掉
+#   （表现为 AUTOTEST FAIL 且 note 为空 —— 2026-10-05 实录）
+$wait = if ($Autotest) { 120 } else { 12 }
 New-Item -ItemType Directory -Force -Path $ev | Out-Null
 
 function Step($m) { Write-Host "`n=== $m ===" -ForegroundColor Cyan }
@@ -41,8 +44,26 @@ function Pull-Capture([string]$remote, [string]$local) {
 function Push-Seed([string]$mode) {
   node (Join-Path $root 'tools\seed_settings.js') $mode | Out-Null
   & $adb shell "mkdir -p $prefsDir" | Out-Null
+  # seed 文件只含 bili_autotest，整文件覆盖会抹掉登录态(bvp_session)/设置(bvp_settings)，
+  # 还得重新扫码 → 改为**拉取设备现有 prefs 合并后回推**（只增改 bili_autotest 一个键）。
+  $devPref = Join-Path $root '.deploy\prefs_device.json'
+  & $adb pull "$prefsDir/preferences.json" $devPref | Out-Null
+  $seedObj = Get-Content $seedFile -Raw -Encoding UTF8 | ConvertFrom-Json
+  if (Test-Path $devPref) {
+    try {
+      $dev = Get-Content $devPref -Raw -Encoding UTF8 | ConvertFrom-Json
+      foreach ($p in $seedObj.PSObject.Properties) {
+        $dev | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value -Force
+      }
+      [System.IO.File]::WriteAllText($seedFile, ($dev | ConvertTo-Json -Compress), [System.Text.UTF8Encoding]::new($false))
+      Write-Host "seed autotest=$mode (merged into device prefs，保留登录态)"
+    } catch {
+      Write-Host "seed merge failed → 回退整文件推送: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+  } else {
+    Write-Host "seed autotest=$mode (设备尚无 prefs，全新写入)"
+  }
   & $adb push $seedFile "$prefsDir/preferences.json" | Out-Null
-  Write-Host "seed autotest=$mode → $prefsDir/preferences.json"
 }
 
 Step '1/7 设备'

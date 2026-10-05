@@ -102,6 +102,14 @@
               <text class="vmeta">{{ it.up }}{{ it.view ? ' · 阅读 ' + formatCount(it.view) : '' }}{{ it.reply ? ' · 评论 ' + it.reply : '' }}</text>
             </div>
           </div>
+          <!-- 直播：同款卡片 → onPlayItem 内部按 kind 分流到 resolveLiveUrl（转码代理开播） -->
+          <div v-else-if="it.kind === 'live'" :key="it.key" class="vrow" @click="onPlayItem(it)">
+            <image class="thumb" :src="it.cover" :width="112" :height="63"></image>
+            <div class="vinfo">
+              <text class="vtitle">{{ it.title }}</text>
+              <text class="vmeta">{{ lmeta(it) }}</text>
+            </div>
+          </div>
           </template>
           <!-- 与推荐/热门同款（刷新 | 加载更多）双按钮 -->
         <div v-if="searchItems.length" class="more-row">
@@ -351,8 +359,9 @@ const TABS = [
 // 搜索三分栏（与 feed.js searchBili 的 search_type 对应）
 const SEARCH_TYPES_UI = [
   { id: 'video', label: '视频' },
-  { id: 'article', label: '图文' }
-]; // 直播入口暂缓（2026-10-04 用户决策）：searchBili 已支持 search_type=live（feed.js），播放链路接入后再上按钮
+  { id: 'article', label: '图文' },
+  { id: 'live', label: '直播' } // 2026-10-07：播放链路（转码代理 /live?room=N）接入后开放入口
+];
 
 // 二维码内容 = TV 变体 url（cookie 在 poll 响应 body 的 cookie_info；取证注释见 qrlogin.js）
 const QR_CELL = 4;
@@ -495,6 +504,7 @@ export default {
       const s = this.play.session;
       if (!s) return '';
       const cur = formatDuration(Math.floor(this.play.positionMs / 1000));
+      if (s.live) return '直播 ' + cur; /* 直播无时长：只显示已播时长 + 前缀 */
       const dur = formatDuration(Math.floor((s.durationMs || 0) / 1000));
       return dur ? cur + ' / ' + dur : cur;
     },
@@ -556,6 +566,16 @@ export default {
         log: logWarn,
         cancelled: () => this.gen !== myGen
       };
+    },
+    // 直播卡片 meta：UP · 分类 · 观看数（online 字段实为**累计观看量**，不是实时在线，
+    // 2026-09-26 用户指出 → 文案用"观看"，避免误标"在线"）
+    lmeta(it) {
+      const parts = [];
+      if (it.up) parts.push(it.up);
+      if (it.cate) parts.push(it.cate);
+      const c = formatCount(it.online);
+      if (c) parts.push(c + '观看');
+      return parts.join(' · ') || '直播中';
     },
     vmeta(it) {
       const parts = [];
@@ -932,7 +952,10 @@ export default {
           up: item.up || '',
           cover: item.cover || '',
           durationMs: (item.durationSec || 0) * 1000,
-          qn: 0
+          qn: 0,
+          /* 直播：开流成功前就带上 live/roomid —— 看门狗与进度条在 loading 期也可能读到它 */
+          live: item.kind === 'live',
+          roomid: item.roomid || 0
         },
         positionMs: 0,
         frames: 0,
@@ -957,24 +980,56 @@ export default {
       this.play.session = r.session;
       this.play.state = 'playing';
       this.play.note = '';
-      this.history = pushHistory(
-        this.history,
-        {
-          bvid: r.session.bvid,
-          cid: r.session.cid,
-          title: r.session.title,
-          up: r.session.up,
-          cover: r.session.cover,
-          durationSec: Math.floor((r.session.durationMs || 0) / 1000),
-          at: Date.now()
-        },
-        Date.now()
-      ).items;
-      saveHistory({ version: 1, items: this.history });
-      this.replyCtx = { oid: r.session.aid || 0, type: 1 };
-      this.loadReplies(r.session.aid || 0, 1); // 评论首屏（不阻塞播放；无 aid 内部直接返回）
+      if (!r.session.live) {
+        /* 直播不入历史（无 bvid、重开要走转码代理而非稿件取流；历史列表按 bvid 渲染/去重） */
+        this.history = pushHistory(
+          this.history,
+          {
+            bvid: r.session.bvid,
+            cid: r.session.cid,
+            title: r.session.title,
+            up: r.session.up,
+            cover: r.session.cover,
+            durationSec: Math.floor((r.session.durationMs || 0) / 1000),
+            at: Date.now()
+          },
+          Date.now()
+        ).items;
+        saveHistory({ version: 1, items: this.history });
+        this.replyCtx = { oid: r.session.aid || 0, type: 1 };
+        this.loadReplies(r.session.aid || 0, 1); // 评论首屏（不阻塞播放；无 aid 内部直接返回）
+      }
       this.startPoll(myGen);
       logWarn('[bili] play start ' + r.session.bvid + ' qn=' + r.session.qn + ' dur=' + r.session.durationMs + 'ms');
+    },
+    /* 直播重连（看门狗统一入口）：直播**不能 seek**（durationMs=0 + 单输入流没有
+     * stream-resync 分支，native 只会判 ENDED/ERROR），所以一切"该恢复了"的场景——
+     * 视频停帧、音视频双断、流被服务端断开——都用**重开一条新流**代替 seek。
+     * openVideo 内部已有 3 次地址重试（域名→内网轮换），这里的冷却只防重连风暴。 */
+    async restartLive(reason, cooldownMs) {
+      const s = this.play.session;
+      if (!s || !s.live || !s.roomid) return;
+      const now = Date.now();
+      const cool = cooldownMs || 12000;
+      if (this._liveRestartAt && now - this._liveRestartAt < cool) return;
+      this._liveRestartAt = now;
+      logWarn('[bili] live restart reason=' + reason + ' room=' + s.roomid);
+      this.play.note = '直播重连中…';
+      try {
+        await this.onPlayItem({
+          kind: 'live',
+          key: 'l:' + s.roomid,
+          roomid: s.roomid,
+          title: s.title,
+          up: s.up,
+          cover: s.cover,
+          source: 'search'
+        });
+      } catch (e) {
+        logWarn('[bili] live restart failed: ' + (e && e.message));
+        this.play.state = 'error';
+        this.play.note = '直播间打不开（重连失败）';
+      }
     },
     // 等待帧恢复：起播/seek 后解码重启延迟实测 1.5~2.5s+（网络敏感）→ 轮询至多 maxMs
     async waitForFrames(maxMs) {
@@ -1004,7 +1059,11 @@ export default {
         }
         if (!st.ok) {
           this.play.state = 'error';
-          this.play.note = st.message;
+          /* 直播：native 的终局文案（"解码进程未产出画面"）对用户无意义；openVideo 已做过
+           * 首帧验证 + 3 次地址轮换，能走到这里基本是开播后又断了 → 换人话 */
+          this.play.note = (this.play.session && this.play.session.live)
+            ? '直播已断开（未开播或转码服务不可达）'
+            : st.message;
           this.stopPoll();
           logWarn('[bili] poll error: ' + st.message);
           return;
@@ -1080,12 +1139,16 @@ export default {
           const now = Date.now();
           if (!this._avRecoverAt || now - this._avRecoverAt > 45000) {
             this._avRecoverAt = now;
-            logWarn('[bili] A/V stall: video ' + st.videoStallMs + 'ms 无新帧但音频在播 → seek 恢复 pos=' + st.positionMs);
-            this.play.note = '音画不同步，正在恢复…';
-            this.onSeek(0.001) /* = seek(pos+1)：重启双进程并重新过起播门 */
-              .catch(function (e) {
-                logWarn('[bili] A/V recover seek: ' + (e && e.message));
-              });
+            logWarn('[bili] A/V stall: video ' + st.videoStallMs + 'ms 无新帧但音频在播 → pos=' + st.positionMs);
+            if (this.play.session && this.play.session.live) {
+              this.restartLive('video-stall'); /* 直播无 seek → 重开流对齐 */
+            } else {
+              this.play.note = '音画不同步，正在恢复…';
+              this.onSeek(0.001) /* = seek(pos+1)：重启双进程并重新过起播门 */
+                .catch(function (e) {
+                  logWarn('[bili] A/V recover seek: ' + (e && e.message));
+                });
+            }
           }
         }
         // 僵尸涓流看门狗（v2.6.1）：视频停帧 ≥25s 且音频字节也不再增长 = 双链路假死
@@ -1103,10 +1166,14 @@ export default {
           if (!this._hardStallAt || now2 - this._hardStallAt > 25000) {
             this._hardStallAt = now2;
             logWarn('[bili] hard stall: video ' + st.videoStallMs + 'ms 无帧且音频冻结 → 双重启');
-            this.play.note = '网络不稳定，正在重连…';
-            this.onSeek(0.001).catch(function (e) {
-              logWarn('[bili] hard stall restart: ' + (e && e.message));
-            });
+            if (this.play.session && this.play.session.live) {
+              this.restartLive('hard-stall'); /* 直播无 seek → 重开流 */
+            } else {
+              this.play.note = '网络不稳定，正在重连…';
+              this.onSeek(0.001).catch(function (e) {
+                logWarn('[bili] hard stall restart: ' + (e && e.message));
+              });
+            }
           }
         }
         this._lastAvAudioBytes = st.audioBytes;
@@ -1125,10 +1192,17 @@ export default {
         this.play.positionMs = st.positionMs;
         this.play.frames = st.frames;
         if (st.state === 'ended') {
-          this.play.state = 'ended';
-          this.play.note = ''; // 播完时清掉残留提示。
-          this.stopPoll();
-          logWarn('[bili] video ended frames=' + st.frames);
+          /* 直播的 ended ≠ 播完：单输入流没有 stream-resync 分支，代理断流/上游结束都会让
+           * native 落到 ENDED（player.c L1297）→ 直接重开一条新流（openVideo 内含地址轮换） */
+          if (this.play.session && this.play.session.live) {
+            logWarn('[bili] live ended → 重连 frames=' + st.frames);
+            this.restartLive('ended');
+          } else {
+            this.play.state = 'ended';
+            this.play.note = ''; // 播完时清掉残留提示。
+            this.stopPoll();
+            logWarn('[bili] video ended frames=' + st.frames);
+          }
         } else if (st.state === 'paused') {
           this.play.state = 'paused';
         } else if (st.state === 'playing') {
@@ -1642,6 +1716,33 @@ export default {
         await this.selectTab('search');
         ensure(this.searchItems.length > 0, '搜索结果为空: ' + this.statusText);
         logWarn('[bili] AUTOTEST search n=' + this.searchItems.length);
+
+        /* 直播链路自检（2026-10-07 接入）：search_type=live → 首个直播间 → 转码代理 /live?room=N
+         * 开播 → 出帧。分两级容错：取不到在播结果=基础设施/限频 → 记 skip 不判失败；
+         * 拿到了却开不出流=真 bug → 抛错（openVideo 内部已做 3 次地址轮换 + 首帧验证）。 */
+        this.searchType = 'live';
+        const liveR = await this.loadTabOnce('search');
+        const liveItem = liveR && liveR.ok && liveR.items && liveR.items.length ? liveR.items[0] : null;
+        if (!liveItem) {
+          logWarn('[bili] AUTOTEST live skip（无在播结果）: ' + ((liveR && liveR.message) || ''));
+        } else {
+          logWarn('[bili] AUTOTEST live room=' + liveItem.roomid);
+          await this.onPlayItem(liveItem);
+          if (this.play.state !== 'playing') {
+            logWarn('[bili] AUTOTEST live 首次开流失败(' + this.play.note + ') → 重试一次');
+            await this.onPlayItem(liveItem);
+          }
+          ensure(this.play.state === 'playing', '直播起播失败: ' + (this.play.note || 'state=' + this.play.state));
+          ensure(this.play.session && this.play.session.live, '直播会话缺少 live 标记');
+          ensure(this.play.session.durationMs === 0, '直播时长应为 0: ' + this.play.session.durationMs);
+          ensure(this.play.session.roomid === liveItem.roomid, 'roomid 未回填会话');
+          const wl = await this.waitForFrames(40000); /* 转码冷启动（上游拉流+PIL+下游 x264）实测可达 10s+ */
+          ensure(wl.st.ok && wl.st.frames > 0, '直播 40s 无帧: ' + ((wl.st && wl.st.message) || (wl.st && wl.st.state)));
+          logWarn('[bili] AUTOTEST live ok frames=' + wl.st.frames + ' ms=' + wl.ms + ' pos=' + wl.st.positionMs);
+          await this.onBack();
+          ensure(this.mode === 'browse', '直播返回列表失败');
+        }
+        this.searchType = 'video'; /* 还原搜索类型，避免影响后续步骤与终态截图 */
 
         await this.selectTab('mine');
         ensure(this.history.length >= 1, '播放历史未记录');

@@ -96,6 +96,7 @@ async function main() {
   const {
     normalizeVideo,
     normalizeSearch,
+    normalizeSearchLive,
     normalizeCover,
     formatDuration,
     formatCount,
@@ -115,6 +116,9 @@ async function main() {
   const {
     openVideo,
     resolveVideoUrl,
+    buildLiveUrl,
+    resolveLiveUrl,
+    LIVE_SERVERS,
     togglePlay,
     seekBy,
     readStatus,
@@ -769,6 +773,56 @@ async function main() {
     assert.strictEqual(parseDuration('bad'), 0);
     assert.strictEqual(formatDuration(parseDuration('59:39')), '59:39');
     assert.strictEqual(formatDuration(parseDuration('1:02:03')), '1:02:03');
+  });
+  test('feed: normalizeSearchLive（直播卡归一化）', () => {
+    const l = normalizeSearchLive({
+      roomid: 22547649,
+      title: '<em class="keyword">原神</em>直播间',
+      cover: '//i0.hdslb.com/live/room.jpg',
+      uname: '主播名',
+      online: 123456,
+      cate_name: '单机游戏'
+    });
+    assert.ok(l);
+    assert.strictEqual(l.kind, 'live');
+    assert.strictEqual(l.roomid, 22547649);
+    assert.strictEqual(l.key, 'l:22547649');
+    assert.strictEqual(l.title, '原神直播间');
+    assert.strictEqual(l.up, '主播名');
+    assert.strictEqual(l.online, 123456);
+    assert.strictEqual(l.cate, '单机游戏');
+    assert.strictEqual(l.cover, 'http://i0.hdslb.com/live/room.jpg', '协议相对地址归一 http');
+    assert.strictEqual(normalizeSearchLive({ roomid: 0 }), null, '无 roomid 丢弃');
+    assert.strictEqual(normalizeSearchLive(null), null);
+  });
+  test('play_session: 直播代理 URL 短且只带 room + 开流地址轮换', async () => {
+    const u = buildLiveUrl(22547649, 'http://penbili.560726.best');
+    assert.strictEqual(u, 'http://penbili.560726.best/live?room=22547649&lanes=0');
+    assert.ok(u.length < 96, 'room-only ≈48 字符（带 CDN u= 会超 MAX_INPUT_LEN=1024 / native input[1024]）');
+    assert.ok(u.indexOf('u=') < 0, '不带 CDN 直链：服务端自解析线路 + 天然无 URL 过期');
+    assert.strictEqual(buildLiveUrl(0, 'http://x'), '', 'roomid 非法 → 空串');
+    assert.ok(buildLiveUrl(123).indexOf(LIVE_SERVERS[0]) === 0, '默认首地址=同网直连（省隧道缓冲）');
+    const ctx = {};
+    const a = await resolveLiveUrl(ctx, { kind: 'live', roomid: 123 }, 0);
+    const b = await resolveLiveUrl(ctx, { kind: 'live', roomid: 123 }, 1);
+    assert.strictEqual(a.url, buildLiveUrl(123, LIVE_SERVERS[0]), 'attempt0 → 域名');
+    assert.strictEqual(b.url, buildLiveUrl(123, LIVE_SERVERS[1]), 'attempt1 → 内网直连（开流重试轮换）');
+    assert.strictEqual(a.live, true);
+    assert.strictEqual(a.fps, 30, '直播转码输出 30fps（VOD 才是 HTML5_FPS=24）');
+    assert.strictEqual(a.durationMs, 0, '直播时长未知 → 不钳制定位、不判播完');
+    assert.strictEqual(a.audioUrl, '', '单输入（无 input2）→ native durl 路径');
+    assert.strictEqual(a.width, 640);
+    assert.strictEqual(a.height, 360);
+    assert.strictEqual(a.aid, 0, '直播无评论 oid');
+    // resolveVideoUrl 对 live 项分流：不走 BV/取 view/WBI，直接构造代理地址
+    const r = await resolveVideoUrl(ctx, { kind: 'live', roomid: 777 });
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.live, true);
+    assert.ok(r.url.indexOf('room=777') > 0);
+    // 非法直播项仍被参数校验拦下
+    const bad = await resolveLiveUrl(ctx, { kind: 'live', roomid: 0 }, 0);
+    assert.strictEqual(bad.ok, false);
+    assert.strictEqual(bad.stage, 'param');
   });
   test('feed: fetchRecommended 注入 transport（不碰网络，URL+ps 断言）', async () => {
     const fx = fixture('rcmd.json');
