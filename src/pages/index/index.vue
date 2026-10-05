@@ -32,13 +32,100 @@
         <!-- 播放进度移至左栏 ±20 下方（用户指定布局） -->
         <text class="bar-time">{{ timeText }}</text>
         <text class="bar-state">{{ stateLabel }}{{ play.note ? ' · ' + play.note : '' }}</text>
+        <!-- 左下空白区：直播未开服务器转码的提示（用户需求 5） -->
+        <text v-if="play.session && play.session.live && !liveTranscodeOn" class="bar-hint">未开启服务器转码，播放可能卡顿</text>
       </template>
     </div>
 
     <!-- 浏览内容 -->
     <div v-if="mode === 'browse'" class="content">
+      <div v-if="liveSettingsOpen" class="comments-col">
+        <div class="comments-head">
+          <text class="comments-title">直播设置</text>
+          <div class="ctrl comments-close" @click="closeLiveSettings">
+            <text class="ctrl-text">返回</text>
+          </div>
+        </div>
+        <div class="settings-block">
+          <div class="settings-ctrl" @click="toggleLiveTranscode">
+            <text class="info-ctrl-text">服务器转码：{{ liveTranscodeOn ? '开' : '关' }}</text>
+          </div>
+          <text class="settings-hint">开启后直播流经服务器转 360p（大幅降低软解压力，下次进入直播间生效）。服务端：python3 tools/live_proxy.py --port 8080</text>
+          <div class="settings-row" @click="cycleLiveBuffer">
+            <text class="settings-label">起播缓冲</text>
+            <text class="settings-value">{{ liveBufferLabel }}</text>
+          </div>
+          <text class="settings-hint">缓冲越大越抗网络卡顿、起播越慢（默认 800ms，点行循环切 1.5s / 2s / 2.5s，下次播放生效）</text>
+          <div class="settings-row" @click="onEditLiveServer">
+            <text class="settings-label">服务器地址</text>
+            <text class="settings-value">{{ liveServer || '未设置' }}</text>
+          </div>
+          <div class="settings-ctrl settings-ctrl-sub" @click="testLiveServer">
+            <text class="info-ctrl-text">测试连接</text>
+          </div>
+          <text class="settings-hint">格式 http://主机:端口（提交空=清除）。支持填 302 重定向入口（tools/redirector.js：外网端口变化只需改入口目标，笔端请求自动跟随 302）。</text>
+        </div>
+      </div>
+      <!-- 图文阅读面板：链首顶替列表（正文图文混排 + 底部直接展示专栏评论 type=12；浏览态无视频无闪烁） -->
+      <div v-else-if="articleOpen" class="comments-col article-col">
+        <div class="comments-head">
+          <text class="comments-title">{{ articleTitle || '专栏' }}</text>
+          <div class="ctrl comments-close" @click="closeArticle">
+            <text class="ctrl-text">返回</text>
+          </div>
+        </div>
+        <text v-if="articleLoading" class="reply-status">正文加载中…</text>
+        <scroller v-else class="comments-scroll">
+          <div v-for="(b, bi) in articleBlocks" :key="'ab' + bi" class="article-block">
+            <text v-if="b.type === 'text'" class="article-para">{{ b.text }}</text>
+            <!-- 双显式 v-if；尺寸三保险：inline style 精确（falcon image 以样式定尺寸）→ class 460×258 兜底 → 属性 -->
+            <image
+              v-if="b.type !== 'text'"
+              class="article-img"
+              :src="b.url"
+              :width="b.w"
+              :height="b.h"
+              :style="{ width: b.w + 'px', height: b.h + 'px' }"
+            ></image>
+          </div>
+          <!-- 评论区：直接跟在正文下（写评论 + 列表 + 行内子回复 + 加载更多，与播放面板同构） -->
+          <div class="article-divider">
+            <text class="article-divider-text">评论{{ replyCount ? ' · ' + replyCount : '' }}</text>
+          </div>
+          <div class="reply-writeline">
+            <div class="reply-write" @click="onWriteReply">
+              <text class="reply-write-text">写评论</text>
+            </div>
+            <text v-if="!hasLogin" class="reply-login-hint">未登录 · 评论可能显示不全，登录后可发表评论</text>
+          </div>
+          <text v-if="replyStatus" class="reply-status">{{ replyStatus }}</text>
+          <div v-for="rp in replies" :key="'arp' + rp.rpid" class="reply-block">
+            <div class="reply-item" @click="toggleReply(rp)">
+              <text class="reply-name">{{ rp.name }}</text>
+              <text class="reply-msg">{{ rp.message }}</text>
+              <text class="reply-meta">{{ replyMeta(rp) }}{{ replyOpen.root === rp.rpid ? ' · 收起' : (rp.rcount > 0 ? ' › 查看' + rp.rcount + '回复' : '') }}</text>
+            </div>
+            <div v-if="replyOpen.root === rp.rpid" class="reply-children">
+              <text v-if="replyOpen.loading && !replyOpen.items.length" class="reply-sub-status">回复加载中…</text>
+              <div v-for="ch in replyOpen.items.slice(0, replyOpen.shown)" :key="'ach' + ch.rpid" class="reply-child">
+                <text class="reply-name">{{ ch.name }}</text>
+                <text class="reply-msg">{{ ch.message }}</text>
+              </div>
+              <div v-if="!replyOpen.loading && (replyOpen.shown < replyOpen.items.length || !replyOpen.noMore)" class="reply-more" @click="moreChildren">
+                <text class="reply-more-text">更多回复</text>
+              </div>
+              <text v-if="!replyOpen.items.length && !replyOpen.loading" class="reply-sub-status">暂无回复</text>
+            </div>
+          </div>
+          <div v-if="replies.length && !replyNoMore" class="reply-more" @click="loadMoreReplies">
+            <text class="reply-more-text">{{ replyLoading ? '加载中…' : '加载更多评论' }}</text>
+          </div>
+          <text v-if="!replies.length && !replyLoading && !replyStatus" class="reply-status">暂无评论</text>
+          <text v-if="!replies.length && replyLoading" class="reply-status">评论加载中…</text>
+        </scroller>
+      </div>
       <!-- 推荐 / 热门：视频行 + 底部（刷新 | 加载更多） -->
-      <scroller v-if="tab === 'rcmd' || tab === 'hot'" class="list">
+      <scroller v-else-if="tab === 'rcmd' || tab === 'hot'" class="list">
         <div v-for="it in currentItems" :key="it.bvid" class="vrow" @click="onPlayItem(it)">
           <image class="thumb" :src="it.cover" :width="112" :height="63"></image>
           <div class="vinfo">
@@ -62,9 +149,20 @@
       <!-- 视频搜索：关键词行 + 结果（直播 tab 的替代，2026-09-23 用户决策） -->
       <scroller v-else-if="tab === 'search'" class="list">
         <div class="searchbar" @click="onOpenInput">
-          <text class="search-kw">{{ keyword || '点此输入关键词搜索 B 站视频' }}</text>
+          <text class="search-kw">{{ keyword || '点此输入关键词搜索 B 站内容' }}</text>
           <div class="search-btn">
             <text class="search-btn-text">搜索</text>
+          </div>
+        </div>
+        <!-- 搜索分类三按钮（2026-09-25 需求）：视频/图文(专栏)/直播——默认视频，点选即换类重搜 -->
+        <div class="search-types">
+          <div
+            v-for="t in searchTypeTabs"
+            :key="'st' + t.id"
+            :class="t.id === searchType ? 'search-type search-type-on' : 'search-type'"
+            @click="switchSearchType(t.id)"
+          >
+            <text :class="t.id === searchType ? 'search-type-text search-type-text-on' : 'search-type-text'">{{ t.label }}</text>
           </div>
         </div>
         <div v-for="it in searchItems" :key="'s' + it.bvid" class="vrow" @click="onPlayItem(it)">
@@ -211,9 +309,9 @@
       <text class="info-up">{{ infoUp }}</text>
       <!-- 右栏按钮：弹幕开关（默认开）+ 评论区入口（容器 flex 居中，数字变长也不偏） -->
       <div class="info-ctrl" @click="toggleDanmaku">
-        <text class="info-ctrl-text">弹幕：{{ danmakuLabel }}</text>
+        <text class="info-ctrl-text">{{ danmakuBtnText }}</text>
       </div>
-      <div class="info-ctrl" @click="openComments">
+      <div class="info-ctrl" v-if="play.session && play.session.aid > 0" @click="openComments">
         <text class="info-ctrl-text">评论区{{ replyCount ? ' · ' + replyCount : '' }}</text>
       </div>
       <div class="info-spacer"></div>
@@ -229,7 +327,8 @@
 import {
   fetchRecommended,
   fetchPopular,
-  searchVideos,
+  searchByType,
+  fetchArticle,
   appendDeduped,
   describeListError,
   formatDuration,
@@ -252,7 +351,7 @@ import {
 } from '../../services/bili/qrlogin.js';
 import { cancelNativePosts } from '../../services/net.js';
 import { fetchReplies, addReply, fetchSubReplies } from '../../services/bili/reply.js';
-import { segUrl, segCount, toBytes, isDanmakuBytes, parseDanmakuSeg } from '../../services/bili/danmaku.js';
+import { segUrl, segUrlSigned, segCount, toBytes, isDanmakuBytes, parseDanmakuSeg } from '../../services/bili/danmaku.js';
 import { encodeQr, rowRuns } from '../../services/bili/qrcode.js';
 import { saveSession } from '../../services/storage.js';
 import { input } from '../../services/input.js';
@@ -372,6 +471,18 @@ export default {
       danmakuMode: 2,
       dmList: [], /* 真实弹幕时间轴（seg.so；接口失败=空，无种子兜底） */
       dmError: '', /* 非空=接口错误，弹幕按钮显示"弹幕：接口错误"（切档时自动重试） */
+      searchType: 'video', /* 搜索分类：video|article(图文)|live（默认视频，新关键词重置） */
+      oldKwForReset: '', /* 上次提交的关键词（区分新词/同词，决定是否重置回视频） */
+      articleOpen: false, /* 图文阅读面板 */
+      articleTitle: '',
+      articleParas: [],
+      articleBlocks: [], /* 正文 blocks：{type:'text'|'img'} 交错图文（图片真实显示） */
+      replyCtx: { oid: 0, type: 1 }, /* 当前评论上下文：播放=aid/type1；图文=cvid/type12（专栏） */
+      liveSettingsOpen: false, /* 直播设置面板 */
+      liveTranscodeOn: false, /* 服务器转码开关（持久化；下次直播生效） */
+      liveServer: '', /* 转码服务器地址 http://host:port（持久化） */
+      liveBufferMs: 0, /* 起播缓冲 ms（直播设置"缓冲时间"；0=默认800；可选1500/2000/2500） */
+      articleLoading: false,
       commentsOpen: false
     };
   },
@@ -392,7 +503,7 @@ export default {
     idleText() {
       if (this.play.state === 'loading') return '取流中…';
       if (this.play.state === 'error') return '起播失败 · 返回列表';
-      if (this.play.state === 'ended') return '已播完';
+      if (this.play.state === 'ended') return this.play.session && this.play.session.live ? '直播已结束' : '已播完';
       return '';
     },
     infoTitle() {
@@ -406,7 +517,8 @@ export default {
       if (!s) return '';
       const cur = formatDuration(Math.floor(this.play.positionMs / 1000));
       const dur = formatDuration(Math.floor((s.durationMs || 0) / 1000));
-      return dur ? cur + ' / ' + dur : cur;
+      if (dur) return cur + ' / ' + dur;
+      return s.live ? '直播中' : cur;
     },
     // 头像已按用户决定移除（笔端 ImageLoader 对 face 路径不显示、dev机200 无法复现差异；
     // 昵称/等级仍由 profile 展示）
@@ -419,6 +531,25 @@ export default {
       if (this.dmError) return '接口错误';
       const labels = ['关', '1/4屏', '1/2屏', '全屏'];
       return labels[this.danmakuMode] || '关';
+    },
+    // 播放态按钮文案：直播未开转码 → 提示先开；直播开转码 → 标注服务端融合
+    danmakuBtnText() {
+      const s = this.play.session;
+      if (s && s.live && !this.liveTranscodeOn) return '弹幕：请先开启服务器转码';
+      if (s && s.live) return '弹幕：' + this.danmakuLabel + '（融合）';
+      return '弹幕：' + this.danmakuLabel;
+    },
+    searchTypeTabs() {
+      return [
+        { id: 'video', label: '视频' },
+        { id: 'article', label: '图文' },
+        { id: 'live', label: '直播' },
+        { id: 'settings', label: '直播设置' } /* 功能入口：点击弹面板，不参与分类切换 */
+      ];
+    },
+    liveBufferLabel() {
+      const map = { 0: '默认800ms', 1500: '1.5s', 2000: '2s', 2500: '2.5s' };
+      return map[this.liveBufferMs] || this.liveBufferMs + 'ms';
     },
     // 已登录判定（以 nav 验证过的档案为准：过期 cookie 等同未登录，提示文案一致）
     hasLogin() {
@@ -469,12 +600,34 @@ export default {
         mediaReferer: REFERER,
         nowSec: () => Math.floor(Date.now() / 1000),
         log: logWarn,
-        cancelled: () => this.gen !== myGen
+        cancelled: () => this.gen !== myGen,
+        /* 直播服务器转码（直播设置）：开启且地址有效 → resolveVideoUrl 把 flv 直链改走代理 */
+        liveProxy: this.liveTranscodeOn && this.liveServer ? { on: true, addr: this.liveServer } : null,
+        /* 起播缓冲（直播设置"缓冲时间"）：0=native 默认 800ms */
+        startBufMs: this.liveBufferMs,
+        /* 弹幕档位 → 服务端融合泳道数（关→0, 1/4→1, 1/2→2, 全屏→4） */
+        danmakuLanes: [0, 1, 2, 4][this.danmakuMode] || 0
       };
     },
     vmeta(it) {
       const parts = [];
       if (it.up) parts.push(it.up);
+      /* 按类型换量纲：图文=分区·阅读、直播=分区·在线、视频=播放+时长 */
+      if (it.kind === 'article') {
+        if (it.category) parts.push(it.category);
+        const c = formatCount(it.view);
+        if (c) parts.push(c + '阅读');
+        return parts.join(' · ');
+      }
+      if (it.kind === 'live') {
+        if (it.category) parts.push(it.category);
+        const c = formatCount(it.view);
+        /* 语义勘正（2026-09-26 用户反馈）：搜索 live_room.online 字段实为**累计观看量**
+         * （多少人点进来过），不是实时在线人数 → 文案用"观看"（真在线要 watched_show 且
+         * 那也是历史观众数，无法诚实标"在线"） */
+        if (c) parts.push(c + '观看');
+        return parts.join(' · ');
+      }
       const c = formatCount(it.view);
       if (c) parts.push(c + '播放');
       const d = formatDuration(it.durationSec);
@@ -492,6 +645,11 @@ export default {
         const pref = await getJson(KEYS.settings, null);
         const m = pref && typeof pref.danmakuMode === 'number' && pref.danmakuMode >= 0 && pref.danmakuMode <= 3 ? pref.danmakuMode : 2;
         this.danmakuMode = m;
+        /* 直播服务器转码设置（持久化） */
+        this.liveTranscodeOn = !!(pref && pref.liveTranscode);
+        this.liveServer = pref && typeof pref.liveServer === 'string' ? pref.liveServer : '';
+        const lb = pref && typeof pref.liveBufferMs === 'number' ? Math.round(pref.liveBufferMs) : 0;
+        this.liveBufferMs = lb === 1500 || lb === 2000 || lb === 2500 ? lb : 0;
       } catch (e) {
         this.danmakuMode = 2;
       }
@@ -545,6 +703,140 @@ export default {
         this.qr.state = 'idle';
       }
     },
+    /* 图文阅读面板：拉正文（-509 限流/空 → 降级显示列表摘要）；gen 守卫防切页串台 */
+    async openArticle(item) {
+      const myGen = ++this.gen;
+      this.articleOpen = true;
+      this.articleTitle = item.title || '专栏';
+      this.articleParas = [];
+      this.articleBlocks = [];
+      this.articleLoading = true;
+      this.statusText = '';
+      const cvid = Number(item.cvid) || 0;
+      const r = await fetchArticle(this.client, cvid);
+      if (this.gen !== myGen) return;
+      this.articleLoading = false;
+      if (!r.ok) {
+        this.articleBlocks = [
+          { type: 'text', text: '（正文加载失败：' + (r.message || r.stage) + '）' },
+          { type: 'text', text: '—— 搜索摘要 ——' },
+          { type: 'text', text: item.title || '' }
+        ];
+        logWarn('[bili] article load fail: ' + r.stage + ' ' + r.message);
+      } else {
+        this.articleTitle = r.title || this.articleTitle;
+        this.articleBlocks = r.blocks;
+        /* 取证日志：形态与图块数（imgs=0=提取失败待查；imgs>0 仍无图=渲染层） */
+        const imgs = r.blocks.filter((b) => b.type === 'img').length;
+        const firstImg = r.blocks.find((b) => b.type === 'img');
+        logWarn('[bili] article ok cvid=' + cvid + ' ftype=' + (r.ftype || 0) + ' blocks=' + r.blocks.length + ' imgs=' + imgs +
+          ' firstImg=' + (firstImg ? String(firstImg.url).slice(0, 60) + ' ' + firstImg.w + 'x' + firstImg.h : 'none'));
+      }
+      /* 评论直接展示在图文下面（无按钮）：type=12 专栏评论（collect 类型表+双篇实测定案），复用全链 */
+      if (this.gen !== myGen) return;
+      this.loadReplies(cvid, 12);
+    },
+    closeArticle() {
+      this.gen++; /* 作废在途正文请求 */
+      this.articleOpen = false;
+      this.articleParas = [];
+      this.articleTitle = '';
+    },
+    /* ---------- 直播设置（服务器转码） ---------- */
+    openLiveSettings() {
+      this.liveSettingsOpen = true;
+    },
+    closeLiveSettings() {
+      this.liveSettingsOpen = false;
+    },
+    toggleLiveTranscode() {
+      this.liveTranscodeOn = !this.liveTranscodeOn;
+      this.saveLiveSettings();
+      logWarn('[bili] live transcode -> ' + (this.liveTranscodeOn ? 'on' : 'off'));
+    },
+    // 起播缓冲循环：默认800 → 1.5s → 2s → 2.5s → 默认（越大越抗卡顿、起播越慢）
+    cycleLiveBuffer() {
+      const opts = [0, 1500, 2000, 2500];
+      const i = opts.indexOf(this.liveBufferMs);
+      this.liveBufferMs = opts[(i + 1) % opts.length];
+      this.saveLiveSettings();
+      logWarn('[bili] live buffer -> ' + this.liveBufferMs + 'ms');
+    },
+    // 测连：GET <地址>/health（非 JSON 响应=stage parse 也算到达；transport=连不上）
+    async testLiveServer() {
+      if (!this.liveServer) {
+        this.statusText = '未设置服务器地址';
+        return;
+      }
+      this.statusText = '测试连接…';
+      const t0 = Date.now();
+      const r = await this.client.request(this.liveServer.replace(/\/+$/, '') + '/health', null, { timeout: 4000 });
+      const ms = Date.now() - t0;
+      if (r.ok || r.stage === 'parse') {
+        this.statusText = '服务器可达（' + ms + 'ms）';
+      } else if (r.stage === 'http') {
+        this.statusText = '服务器可达但返回错误（HTTP ' + (r.status || '') + '）';
+      } else {
+        this.statusText = '服务器不可达（' + (r.message || r.stage) + '）';
+      }
+      logWarn('[bili] live server test stage=' + r.stage + ' ms=' + ms);
+    },
+    async onEditLiveServer() {
+      const myGen = this.gen;
+      this.imBusy = true; /* 输入法触发宿主 onHide，同写评论的守卫 */
+      try {
+        const r = await input.open({
+          value: this.liveServer,
+          placeholder: 'http://192.168.1.2:8080',
+          maxlength: 128
+        });
+        if (this.gen !== myGen) return;
+        if (!r || r.error || !r.confirmed) return;
+        const v = String(r.text || '').trim();
+        if (!v) {
+          this.liveServer = '';
+          this.statusText = '转码地址已清除';
+        } else if (!/^https?:\/\/.+/.test(v)) {
+          this.statusText = '地址需以 http(s):// 开头，未保存';
+          return;
+        } else {
+          this.liveServer = v;
+          this.statusText = '转码地址已保存';
+        }
+        await this.saveLiveSettings();
+        logWarn('[bili] live server saved len=' + this.liveServer.length);
+      } finally {
+        this.imBusy = false;
+      }
+    },
+    async saveLiveSettings() {
+      try {
+        const s = (await getJson(KEYS.settings, null)) || {};
+        s.version = s.version || 1;
+        s.liveTranscode = this.liveTranscodeOn;
+        s.liveServer = this.liveServer;
+        s.liveBufferMs = this.liveBufferMs;
+        await setJson(KEYS.settings, s);
+      } catch (e) {
+        logWarn('[bili] save live settings: ' + (e && e.message));
+      }
+    },
+    // 搜索分类切换（同关键词换类重搜）：视频 / 图文(专栏) / 直播（仅列表展示）
+    switchSearchType(t) {
+      if (t === 'settings') {
+        this.openLiveSettings();
+        return; /* 功能入口，不切分类不清列表 */
+      }
+      if (this.searchType === t) return;
+      this.searchType = t;
+      this.searchItems = [];
+      this.searchPage = 1;
+      this.searchNoMore = false;
+      this.statusText = '';
+      /* 必须带本代 gen：loadTab 的过期守卫(this.gen !== myGen)在 undefined 时恒真 → 结果被丢弃（Bug 根因） */
+      const myGen = ++this.gen;
+      this.loadTab('search', myGen);
+    },
     // 单次列表拉取（供 loadTab 重试调用）
     async loadTabOnce(id) {
       try {
@@ -552,14 +844,14 @@ export default {
           if (!this.keyword) return { ok: false, stage: 'param', message: '未输入关键词' };
           const mixin = await ensureMixin(this.makeCtx(this.gen));
           if (!mixin) return { ok: false, stage: 'wbi', message: 'WBI 密钥获取失败' };
-          const r = await searchVideos(this.client, mixin, this.keyword, 1);
+          const r = await searchByType(this.client, mixin, this.keyword, 1, this.searchType);
           if (r.ok) {
             this.searchPage = 1;
             this.searchNoMore = r.noMore;
           }
           return r;
         }
-        return await fetchRecommended(this.client);
+        /* 曾经的死码：此处无条件 return fetchRecommended 会把 hot 永远短路成推荐（2026-09-26 清除） */
         if (id === 'hot') {
           const r = await fetchPopular(this.client, 1);
           if (r.ok) {
@@ -650,6 +942,9 @@ export default {
           return;
         }
         this.keyword = kw;
+        /* 新关键词才回到默认"视频"（同词重提交=按当前分类刷新，不回退） */
+        if (kw !== this.oldKwForReset) this.searchType = 'video';
+        this.oldKwForReset = kw;
         this.searchItems = [];
         this.statusText = '搜索「' + kw + '」…';
         await this.selectTab('search');
@@ -714,7 +1009,7 @@ export default {
         this.statusText = 'WBI 密钥失败';
         return;
       }
-      const r = await searchVideos(this.client, mixin, this.keyword, this.searchPage + 1);
+      const r = await searchByType(this.client, mixin, this.keyword, this.searchPage + 1, this.searchType);
       if (this.gen !== myGen) {
         this.loading = false;
         return;
@@ -736,6 +1031,11 @@ export default {
     /* ---------- 播放 ---------- */
     async onPlayItem(item) {
       if (!item) return;
+      /* 图文：打开阅读面板（独立滚动正文）；直播：放行走播放链（flv 直链 durl 双输出） */
+      if (item.kind === 'article') {
+        this.openArticle(item);
+        return;
+      }
       const myGen = ++this.gen;
       this.stopPoll();
       this.mode = 'play';
@@ -750,6 +1050,8 @@ export default {
       this.replyOpen = { root: 0, items: [], shown: 0, page: 1, noMore: false, loading: false };
       this.dmError = '';
       this.dmList = [];
+      this.articleOpen = false; /* 进播放关阅读面板（state 保留无碍，回浏览时面板应关闭） */
+      this.articleParas = [];
       this.play = {
         state: 'loading',
         session: {
@@ -798,7 +1100,7 @@ export default {
         Date.now()
       ).items;
       saveHistory({ version: 1, items: this.history });
-      this.loadReplies(r.session.aid || 0); // 评论首屏（不阻塞播放；无 aid 内部直接返回）
+      this.loadReplies(r.session.aid || 0, 1); // 评论首屏（不阻塞播放；无 aid 内部直接返回）
       // 弹幕：先用种子秒开，真实弹幕（protobuf 分包）异步到达即接管（失败保留种子）
       this.startDanmaku(r.session.durationMs || 0);
       this.loadDanmaku(r.session.aid || 0, r.session.cid || 0, r.session.durationMs || 0, myGen);
@@ -837,44 +1139,55 @@ export default {
           return;
         }
         // 每秒采样（v1.3.0 音频重写证据链）：ab/ad/u(欠载)w(写失败)rd(环满丢弃)
+        // sync 探针（2026-09-27 修正口径）：用【线程 aposMs（含 start_ms 的绝对音频位置）】直接减
+        // positionMs —— 旧版 writerBytes/rate 减 positionMs 漏了 start_ms，DASH 会系统性偏一个
+        // start_ms（约 6.5s），把我所有早期读数都带偏了。>0=声音超前，<0=声音落后。
+        const apsMs = st.aposMs || 0;
+        const syncMs = apsMs - st.positionMs;
         logWarn(
           '[bili] poll tick frames=' + st.frames + ' pos=' + st.positionMs +
           ' ab=' + st.audioBytes + ' ad=' + st.audioDropped +
           ' u=' + st.audioUnderruns + ' w=' + st.audioWrErrors + ' rd=' + st.audioRingDrops +
+          ' | aps=' + apsMs + ' sync=' + syncMs +
+          ' paced=' + (st.paced ? 1 : 0) + ' ast=' + (st.audioStarted ? 1 : 0) +
+          ' due=' + st.dueMs + ' apos=' + st.aposMs + ' w=' + st.thWaited +
           (st.audioDead ? ' DEAD' : '')
         );
-        // 音频链已断（实测主因：蓝牙被其他应用独占——网易云 SoundPlayer 正在用 bluealsa）
-        if (st.audioDead && !this._audioDeadWarned) {
-          this._audioDeadWarned = true;
-          this.play.note = '无声：蓝牙耳机可能被其他应用占用（请关闭音乐播放器后重试）';
-          logWarn('[bili] audio chain dead → 蓝牙设备可能被其他应用占用');
+        // ===== 统一同步守护（2026-09-27 用户方案：长缓冲 + 简单一致性检测 → 缓冲 → 重新对齐） =====
+        // |aps-pos| > 1500ms 持续 ~2s → 弹"正在缓冲…" + seek 重启（音画重新过门成对开始）。
+        // 视频/直播统一；旧 A/V 8s 巡检与 audioDead 短路**全部并入**（audioDead → aps 停滞 →
+        // sync 超阈同样触发）。45s 冷却防弱网打转；恢复后自动撤提示。
+        // audioStarted=已开声、paced=0=音频钟分支在跑（两者任一不满足时 aposMs 不可信/冻结，
+        // 不可用于判定，否则会拿陈旧数据误触发）
+        if (st.state === 'playing' && !st.gateActive && st.audioStarted && !st.paced) {
+          if (Math.abs(syncMs) > 1500) {
+            const nowG = Date.now();
+            if (!this._syncBadAt) {
+              this._syncBadAt = nowG;
+            } else if (nowG - this._syncBadAt > 1800 &&
+                       (!this._avRecoverAt || nowG - this._avRecoverAt > 45000)) {
+              this._avRecoverAt = nowG;
+              this._syncBadAt = 0;
+              const isLiveSync = this.play.session && this.play.session.live;
+              logWarn('[bili] syncGuard: sync=' + syncMs + 'ms live=' + (isLiveSync ? 1 : 0) + ' → 缓冲对齐 pos=' + st.positionMs);
+              this.play.note = '正在缓冲…';
+              if (!isLiveSync) {
+                this.onSeek(0.001).catch(function (e) {
+                  logWarn('[bili] syncGuard seek: ' + (e && e.message));
+                });
+              }
+              /* 直播无定位：native 已改为"门期不计帧+门末清环+阻塞式节流"从源头对齐，
+               * 此处只提示"正在缓冲…"作为兜底，不调 seek（避免弹"直播中，无法定位"） */
+            }
+          } else {
+            this._syncBadAt = 0;
+            if (this.play.note === '正在缓冲…') this.play.note = ''; /* 对齐成功撤提示 */
+          }
         }
-        // 起播门诊断（v1.7.1）：音频等待视频首帧的时长（正常=首帧耗时；15000=超时放行）
+        // 起播门诊断（仅日志）
         if (st.gateWaitMs > 400 && st.gateWaitMs !== this._lastGateMs) {
           this._lastGateMs = st.gateWaitMs;
           logWarn('[bili] A/V gate wait=' + st.gateWaitMs + 'ms（音频等视频首帧后同步开播）');
-        }
-        // A/V 一致性巡检（v1.7.1）：视频 8s 无新帧而音频仍在写 → seek(pos+1) 重启对齐。
-        // 重开必经起播门 → 音画成对重启；门期(音频未开写, audioBytes 不变)天然不触发；
-        // 评论面板遮挡(commentsOpen)是用户主动暂停画面，跳过；45s 冷却防弱网打转。
-        if (
-          st.state === 'playing' &&
-          !st.gateActive &&
-          st.videoStallMs > 8000 &&
-          st.audioBytes > 0 &&
-          st.audioBytes !== (this._lastAvAudioBytes || 0) &&
-          !this.commentsOpen
-        ) {
-          const now = Date.now();
-          if (!this._avRecoverAt || now - this._avRecoverAt > 45000) {
-            this._avRecoverAt = now;
-            logWarn('[bili] A/V stall: video ' + st.videoStallMs + 'ms 无新帧但音频在播 → seek 恢复 pos=' + st.positionMs);
-            this.play.note = '音画不同步，正在恢复…';
-            this.onSeek(0.001) /* = seek(pos+1)：重启双进程并重新过起播门 */
-              .catch(function (e) {
-                logWarn('[bili] A/V recover seek: ' + (e && e.message));
-              });
-          }
         }
         this._lastAvAudioBytes = st.audioBytes;
         // 起播门期提示（首帧/音频都未到 → 缓冲中；不覆盖恢复/无声等后续提示）
@@ -926,7 +1239,7 @@ export default {
         return;
       }
       if (!s || !(s.durationMs > 0)) {
-        this.play.note = '时长未知，无法定位';
+        this.play.note = this.play.session && this.play.session.live ? '直播中，无法定位' : '时长未知，无法定位';
         return;
       }
       const myGen = this.gen;
@@ -951,21 +1264,42 @@ export default {
       if (!(aid > 0) || !(cid > 0)) return;
       const total = segCount(durationMs);
       const cap = Math.min(total, 20); /* 最多20包=2h 稿件 */
+      /* WBI 版优先（BiliClient 同款，抗接口收紧）；无密钥 → 直接旧端点；单段失败 → 该段回退旧端点 */
+      const mixin = await ensureMixin(this.makeCtx(this.gen));
+      if (this.gen !== myGen) return;
       const all = [];
       for (let i = 1; i <= cap; i++) {
         if (this.gen !== myGen) return;
-        const res = await this.client.getBinary(segUrl(cid, aid, i));
-        if (this.gen !== myGen) return;
-        if (!res.ok) {
-          if (i === 1) logWarn('[bili] danmaku fetch fail: ' + res.stage + ' ' + res.message);
-          this.dmError = '接口错误';
-          break;
+        const wbiUrl = mixin ? segUrlSigned(cid, aid, i, mixin) : null;
+        /* 魔数校验通过才算成功：WBI 端点会 200+错误JSON（真机 len=46 实测），此时 res.ok=true
+         * 不触发回退 → 必须验字节后回退 legacy 再验 */
+        let bytes = null;
+        if (wbiUrl) {
+          const r1 = await this.client.getBinary(wbiUrl);
+          if (this.gen !== myGen) return;
+          if (r1.ok) {
+            const b1 = toBytes(r1.body);
+            if (b1 && isDanmakuBytes(b1)) bytes = b1;
+            else logWarn('[bili] danmaku wbi bad magic len=' + (b1 ? b1.length : 0) + ' → legacy seg=' + i);
+          } else {
+            logWarn('[bili] danmaku wbi fail → legacy: ' + r1.stage + ' ' + r1.message);
+          }
         }
-        const bytes = toBytes(res.body);
-        if (!isDanmakuBytes(bytes)) {
-          logWarn('[bili] danmaku not-protobuf: len=' + (bytes ? bytes.length : 0) + ' seg=' + i);
-          this.dmError = '接口错误';
-          break; /* 非 proto → 按钮显示接口错误（取证史已归档 profile） */
+        if (!bytes) {
+          const r2 = await this.client.getBinary(segUrl(cid, aid, i));
+          if (this.gen !== myGen) return;
+          if (!r2.ok) {
+            if (i === 1) logWarn('[bili] danmaku fetch fail: ' + r2.stage + ' ' + r2.message);
+            this.dmError = '接口错误';
+            break;
+          }
+          const b2 = toBytes(r2.body);
+          if (!isDanmakuBytes(b2)) {
+            logWarn('[bili] danmaku not-protobuf: len=' + (b2 ? b2.length : 0) + ' seg=' + i);
+            this.dmError = '接口错误';
+            break; /* 双通道都非 proto → 按钮显示接口错误 */
+          }
+          bytes = b2;
         }
         const parsed = parseDanmakuSeg(bytes);
         if (!parsed.ok) {
@@ -991,6 +1325,7 @@ export default {
           dedup.push(it);
         }
         this.dmList = dedup;
+        this._dmTextAt = {}; /* 场次级已显文案表：只随新弹幕集重置（不在 seek/恢复的基线重排里清） */
         this.dmError = '';
         logWarn('[bili] danmaku real n=' + dedup.length + '/' + all.length + ' pkgs=' + cap + ' span=' + (dedup[0] ? dedup[0].p : 0) + '..' + (dedup[dedup.length - 1] ? dedup[dedup.length - 1].p : 0));
         this.startDanmaku(durationMs); /* 重启引擎：游标按真实时间轴重排 */
@@ -1004,12 +1339,22 @@ export default {
      * UI 叠层方案已判死：视频矩形归 blit 专属，任何覆盖层都与其交替抢帧（一帧弹幕一帧画面）。
      * 烧进视频帧 = 与 blit 同源 → 永不互踩。x 表达式固定周期滚动，JS 按 positionMs 把
      * 弹幕分派进 4 条泳道（展示期 4.5s 后该泳道可接下一条）。 */
+    /* 弹幕去重 key：剥零宽+合空白+**NFKC 归一**（全角Ａ→a、兼容字形统一——"视觉同文案"
+     * 字符串不等的第二类漏网）；normalize 不可用时回落原串 */
+    dmTextKey(t) {
+      let s = String(t).replace(/[​-‍⁠﻿︎️]/g, '').replace(/\s+/g, ' ').trim();
+      try {
+        s = typeof s.normalize === 'function' ? s.normalize('NFKC') : s;
+      } catch (e) { /* QuickJS 无 normalize → 原串 */ }
+      return s;
+    },
     /* 泳道分派基线：统一游标定位到当前播放位（不回退已播；seek 后对齐新位置） */
     resetDmBaseline() {
       this._dmCursor = this.findDmIndex(this.dmList, Math.max(0, this.play.positionMs || 0));
       this._dmFree = [0, 0, 0, 0];
       this._dmExpire = [0, 0, 0, 0];
-      this._dmTextAt = {}; /* 文案冷却表（按播放位时间戳） */
+      /* 注意：_dmTextAt（场次级已显文案表）**不在这里清** —— 曾在此清空导致 seek/A-V 恢复后
+       * 冷却失效 → 已显文案重新显示（重复弹幕的第二来源）。 */
     },
     findDmIndex(list, p) {
       let i = 0;
@@ -1022,6 +1367,15 @@ export default {
         this._intervals.delete(this._dmTimer);
         this._dmTimer = 0;
       }
+      /* 清相位补偿定时器（否则换台后旧 timer 还会补一次 writeDm('') 打到新内容上） */
+      if (this._dmClearTimers) {
+        for (let i = 0; i < 4; i++) {
+          if (this._dmClearTimers[i]) {
+            clearTimeout(this._dmClearTimers[i]);
+            this._dmClearTimers[i] = 0;
+          }
+        }
+      }
       /* 关/换台清空 4 条泳道（空文本=drawtext 不再绘制） */
       for (let i = 0; i < 4; i++) {
         player.writeDm(i, '').catch(function () {});
@@ -1030,7 +1384,16 @@ export default {
     startDanmaku(durationMs) {
       this.stopDanmaku(); /* 清 4 泳道旧文本（换档/换台都先清干净） */
       if (this.danmakuMode === 0) {
+        this.stopLiveDanmaku(); /* 关档 → 直播轮询一并停 */
         logWarn('[bili] danmaku off');
+        return;
+      }
+      const isLive = !!(this.play.session && this.play.session.live);
+      if (isLive) {
+        /* 服务端融合（2026-09-26）：开转码时弹幕由服务器 drawtext 直接烧进画面；
+         * 未开转码时按钮已提示"请先开启服务器转码" → 两种情形笔端都不再本地渲染 live 弹幕 */
+        this.stopLiveDanmaku();
+        logWarn('[bili] danmaku server-burned (live, lanes=' + ([0, 1, 2, 4][this.danmakuMode] || 0) + ')');
         return;
       }
       if (!this.dmList.length) {
@@ -1066,32 +1429,142 @@ export default {
           if (cursor >= this.dmList.length) break;
           const dm = this.dmList[cursor];
           if (dm.p > pos + 300) break; /* 未到点：后续条目更晚（250ms 轮询粒度） */
-          /* 同文案 15s 冷却：真实弹幕同文本短时密集（"哈哈哈"等）观感即重复 → 跳过 */
-          const lastAt = this._dmTextAt[dm.text];
-          if (lastAt !== undefined && pos - lastAt < 15000) {
+          /* 场次级同文案仅一次（key 见 dmTextKey：零宽+空白+NFKC 归一）。
+           * 值存 p+1（p=0 也 truthy）：护栏只淘汰**被播放位远远越过**的（>120s 前）——
+           * 旧式"超 2000 条删最旧"会把仍在列表后段的文案的 key 删掉 → 同文案再现 =
+           * "有些两次/更多次"（次数=文案种类越过上限的次数）根因 */
+          const dmKey = this.dmTextKey(dm.text);
+          if (this._dmTextAt[dmKey]) {
             this._dmCursor = cursor + 1;
             continue;
           }
-          player.writeDm(l, dm.text).catch(function (e) {
+          /* text_w 按码点分级（emoji≈2fs/ASCII≈0.55fs/CJK≈fs/其余0.6fs）→ Tpx=452+tw */
+          let tw = 0;
+          for (let ci = 0; ci < dm.text.length; ci++) {
+            const cp = dm.text.codePointAt(ci);
+            if (cp > 0xffff) ci++; /* 代理对：按 1 个码点计 */
+            if (cp < 0x80) tw += 9;
+            else if ((cp >= 0x1f300 && cp <= 0x1faff) || (cp >= 0x2600 && cp <= 0x27bf) ||
+                     (cp >= 0x2b00 && cp <= 0x2bff) || cp === 0xfe0f || (cp >= 0x1f000 && cp <= 0x1f2ff)) tw += 34;
+            else if (cp >= 0x2e80 || (cp >= 0x3000 && cp <= 0x303f) || (cp >= 0xff00 && cp <= 0xffef)) tw += 17;
+            else tw += 10;
+          }
+          const Tpx = 452 + tw;
+          const spd = SPD[l];
+          /* 相位补偿清除（"两遍/中间出现/中间消失"同根修复）：mod 写入相位 m0 随机，固定比例
+           * 展示期对真实显示窗 (T-m0) 不对齐 → m0 大者回卷出第二遍、清除点落在第二遍中部。
+           * writeDm 返回本段滤镜 t（native）→ m0=mod(t*spd,Tpx) → clear=(T-m0)/spd-350ms
+           *（出屏前0.35s 清，吸收 t 估算与 250ms tick 粒度）；先按保守期占位，精确值回调更新。 */
+          const fallbackMs = Math.max(500, Math.ceil((Tpx / spd) * 1000) * 0.9 - 250);
+          if (!this._dmClearTimers) this._dmClearTimers = {};
+          const clearLane = () => {
+            player.writeDm(l, '').catch(function () {});
+            this._dmExpire[l] = 0;
+            if (this._dmClearTimers[l]) {
+              clearTimeout(this._dmClearTimers[l]);
+              this._dmClearTimers[l] = 0;
+            }
+          };
+          this._dmFree[l] = now + fallbackMs;
+          this._dmExpire[l] = now + fallbackMs;
+          player.writeDm(l, dm.text).then(function (r) {
+            if (this.mode !== 'play' || !this._dmTimer) return;
+            const tt = r && typeof r.t === 'number' ? r.t : -1;
+            let clearMs = fallbackMs;
+            if (tt >= 0) {
+              const m0 = ((tt * spd) % Tpx + Tpx) % Tpx;
+              clearMs = Math.max(500, ((Tpx - m0) / spd) * 1000 - 350);
+            }
+            this._dmFree[l] = Date.now() + clearMs;
+            this._dmExpire[l] = Date.now() + clearMs;
+            if (this._dmClearTimers[l]) clearTimeout(this._dmClearTimers[l]);
+            this._dmClearTimers[l] = setTimeout(clearLane, clearMs);
+            /* 带参重写同文本：native 起独立清除线程在 clearMs 恰好写空（无 JS 事件循环延迟，
+             * 误差 33ms 级）；上面的 setTimeout 降级为兜底（幂等） */
+            player.writeDm(l, dm.text, Math.round(clearMs)).catch(function () {});
+          }.bind(this)).catch(function (e) {
             logWarn('[bili] writeDm: ' + (e && e.message));
           });
-          if (Object.keys(this._dmTextAt).length > 400) this._dmTextAt = {}; /* 冷却表内存护栏 */
-          this._dmTextAt[dm.text] = pos;
+          this._dmTextAt[dmKey] = dm.p + 1;
+          if (Object.keys(this._dmTextAt).length > 5000) {
+            const cut = pos - 120000;
+            Object.keys(this._dmTextAt).forEach((k) => {
+              if (this._dmTextAt[k] - 1 < cut) delete this._dmTextAt[k];
+            });
+          }
           this._dmCursor = cursor + 1;
-          /* 展示期 = 单程滚完（17px/字符估宽；偏宽多留无害——出屏后不可见） */
-          const periodMs = Math.ceil(((452 + 17 * dm.text.length) / SPD[l]) * 1000);
-          this._dmFree[l] = now + periodMs;
-          this._dmExpire[l] = now + periodMs;
         }
       }, 250);
       this._dmTimer = t;
       this._intervals.add(t);
       logWarn('[bili] danmaku engine start mode=' + this.danmakuMode + ' lanes=' + (this.dmList ? this.dmList.length : 0) + ' dur=' + durationMs);
     },
+    // 直播弹幕（方案B）：笔端无 WebSocket → 每 1.5s 轮询转码服务器 /danmaku，
+    // 注入为"立即到期"条目（p=positionMs+60ms 错峰）走既有泳道消费链（writeDm/15s冷却全复用）
+    stopLiveDanmaku() {
+      if (this._liveDmTimer) {
+        clearInterval(this._liveDmTimer);
+        this._intervals.delete(this._liveDmTimer);
+        this._liveDmTimer = null;
+      }
+      this._liveDmSince = 0;
+    },
+    startLiveDanmaku(roomid) {
+      this.stopLiveDanmaku();
+      if (!(roomid > 0) || !this.liveTranscodeOn || !this.liveServer || this.danmakuMode === 0) return;
+      const pull = async () => {
+        if (this.mode !== 'play' || !this.play.session || !this.play.session.live || this.danmakuMode === 0) {
+          this.stopLiveDanmaku();
+          return;
+        }
+        const addr = String(this.liveServer).replace(/\/+$/, '');
+        try {
+          const r = await this.client.request(addr + '/danmaku',
+            { room: roomid, since: this._liveDmSince || 0 }, { timeout: 4000 });
+          if (r.ok && r.data && r.data.ok) {
+            this._liveDmSince = r.data.cursor || this._liveDmSince;
+            const base = this.play.positionMs || 0;
+            const msgs = r.data.msgs || [];
+            for (let i = 0; i < msgs.length; i++) {
+              const txt = String(msgs[i].text || '').slice(0, 60);
+              if (txt) this.dmList.push({ p: base + i * 60, text: txt });
+            }
+            /* 长直播内存护栏：截头部会移动索引 → 游标同步回退 */
+            const cut = this.dmList.length - 1500;
+            if (cut > 0) {
+              this.dmList.splice(0, cut);
+              this._dmCursor = Math.max(0, (this._dmCursor || 0) - cut);
+            }
+            if (msgs.length) logWarn('[bili] live dm +' + msgs.length + ' total=' + this.dmList.length);
+          } else {
+            /* 静默失败是上一轮弹幕不显示的根因（缺 code 字段被 normalizeJson 拒）→ 必须留痕 */
+            logWarn('[bili] live dm bad stage=' + r.stage + ' code=' + r.code + ' msg=' + (r.message || ''));
+          }
+        } catch (e) {
+          logWarn('[bili] live dm pull: ' + (e && e.message));
+        }
+      };
+      pull();
+      const t = setInterval(pull, 1500);
+      this._liveDmTimer = t;
+      this._intervals.add(t);
+      logWarn('[bili] live dm poll start room=' + roomid);
+    },
     toggleDanmaku() {
+      const s = this.play.session;
+      /* 直播未开转码：弹幕走转码服务器代理 → 拒绝切档并提示（按钮文案同步显示） */
+      if (this.mode === 'play' && s && s.live && !this.liveTranscodeOn) {
+        this.play.note = '请先开启服务器转码';
+        return;
+      }
       this.danmakuMode = (this.danmakuMode + 1) % 4; /* 关→1/4→1/2→全屏→关 */
       this.saveDanmakuPref();
       logWarn('[bili] danmaku mode -> ' + this.danmakuLabel);
+      /* 直播+转码（服务端融合）：档位烧在服务端 filter 里 → 下次开播生效；不重启本地引擎 */
+      if (this.mode === 'play' && this.play.session && this.play.session.live && this.liveTranscodeOn) {
+        this.play.note = '弹幕为服务端融合，档位下次开播生效';
+        return;
+      }
       if (this.mode === 'play') {
         /* 错误态：切档同时自动重试接口（成功后 loadDanmaku 内部重启引擎接管） */
         if (this.dmError && this.play.session && this.play.session.aid > 0) {
@@ -1136,16 +1609,18 @@ export default {
       if (rp.rcount > 0) parts.push(rp.rcount + ' 条回复');
       return parts.join(' · ');
     },
-    async loadReplies(aid) {
-      if (!(aid > 0)) return;
+    // 读一页评论（上下文由 replyCtx 决定：播放=aid/type1；图文=cvid/type11）
+    async loadReplies(oid, replyType) {
+      if (!(oid > 0)) return;
       const myGen = this.gen;
+      this.replyCtx = { oid: oid, type: Math.floor(Number(replyType) || 1) };
       this.replyLoading = true;
       this.replyStatus = '';
       this.replies = [];
       this.replyPage = 1;
       this.replyNoMore = false;
       this.replyOpen = { root: 0, items: [], shown: 0, page: 1, noMore: false, loading: false };
-      const r = await fetchReplies(this.client, aid, 1);
+      const r = await fetchReplies(this.client, oid, 1, this.replyCtx.type);
       if (this.gen !== myGen) return;
       this.replyLoading = false;
       if (!r.ok) {
@@ -1160,11 +1635,11 @@ export default {
     },
     async loadMoreReplies() {
       if (this.replyLoading || this.replyNoMore) return;
-      const aid = this.play.session && this.play.session.aid;
-      if (!(aid > 0)) return;
+      const ctx = this.replyCtx;
+      if (!ctx || !(ctx.oid > 0)) return;
       const myGen = this.gen;
       this.replyLoading = true;
-      const r = await fetchReplies(this.client, aid, this.replyPage + 1);
+      const r = await fetchReplies(this.client, ctx.oid, this.replyPage + 1, ctx.type);
       if (this.gen !== myGen) return;
       this.replyLoading = false;
       if (!r.ok) {
@@ -1187,9 +1662,9 @@ export default {
         this.replyStatus = '请先在「我的」扫码登录后再评论';
         return;
       }
-      const aid = this.play.session && this.play.session.aid;
-      if (!(aid > 0)) {
-        this.replyStatus = '当前稿件无评论上下文';
+      const ctx = this.replyCtx;
+      if (!ctx || !(ctx.oid > 0)) {
+        this.replyStatus = '当前无评论上下文';
         return;
       }
       const myGen = this.gen;
@@ -1209,7 +1684,7 @@ export default {
           return;
         }
         this.replyStatus = '发送中…';
-        const r = await addReply(this.client, aid, text, csrf);
+        const r = await addReply(this.client, ctx.oid, text, csrf, ctx.type);
         if (this.gen !== myGen) return;
         if (!r.ok) {
           this.replyStatus = '发送失败：' + (r.message || '');
@@ -1239,12 +1714,12 @@ export default {
         this.replyOpen = { root: 0, items: [], shown: 0, page: 1, noMore: false, loading: false };
         return;
       }
-      const aid = this.play.session && this.play.session.aid;
-      if (!(aid > 0)) return;
+      const ctx = this.replyCtx;
+      if (!ctx || !(ctx.oid > 0)) return;
       this.replyOpen = { root: rp.rpid, items: [], shown: 0, page: 1, noMore: false, loading: true };
       const myGen = this.gen;
       const myRoot = rp.rpid;
-      const r = await fetchSubReplies(this.client, aid, myRoot, 1);
+      const r = await fetchSubReplies(this.client, ctx.oid, myRoot, 1, ctx.type);
       if (this.gen !== myGen) return;
       if (this.replyOpen.root !== myRoot) return; // 展开目标已切换，丢弃过期结果
       this.replyOpen.loading = false;
@@ -1261,12 +1736,12 @@ export default {
     },
     async loadMoreChildren() {
       if (!this.replyOpen.root || this.replyOpen.loading || this.replyOpen.noMore) return;
-      const aid = this.play.session && this.play.session.aid;
-      if (!(aid > 0)) return;
+      const ctx = this.replyCtx;
+      if (!ctx || !(ctx.oid > 0)) return;
       const myGen = this.gen;
       const myRoot = this.replyOpen.root;
       this.replyOpen.loading = true;
-      const r = await fetchSubReplies(this.client, aid, myRoot, this.replyOpen.page + 1);
+      const r = await fetchSubReplies(this.client, ctx.oid, myRoot, this.replyOpen.page + 1, ctx.type);
       if (this.gen !== myGen || this.replyOpen.root !== myRoot) return;
       this.replyOpen.loading = false;
       if (!r.ok) return;
@@ -1540,6 +2015,9 @@ export default {
         await this.selectTab('search');
         ensure(this.searchItems.length > 0, '搜索结果为空: ' + this.statusText);
         logWarn('[bili] AUTOTEST search n=' + this.searchItems.length);
+
+        // 平台能力探测（直播弹幕可行性定案）：WebSocket 构造是否存在
+        logWarn('[bili] ws-probe WebSocket=' + typeof WebSocket + ' sockjs=' + typeof SockJS);
 
         await this.selectTab('mine');
         ensure(this.history.length >= 1, '播放历史未记录');

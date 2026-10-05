@@ -1,0 +1,182 @@
+{
+ "code": 0,
+ "data": {
+  "result": {
+   "live_room": [
+    {
+     "area": 12,
+     "attentions": 262376,
+     "cate_name": "<em class=\"keyword\">原神</em>",
+     "cover": "//i0.hdslb.com/bfs/live-key-frame/keyframe09252342000004898018daglda.jpg",
+     "hit_columns": [
+      "cate_name"
+     ],
+     "is_live_room_inline": 0,
+     "live_status": 1,
+     "live_time": "2026-09-25 19:45:24",
+     "online": 188615,
+     "rank_index": 1,
+     "rank_offset": 0,
+     "roomid": 4898018,
+     "short_id": 0,
+     "tags": "日常",
+     "title": "中秋快乐痛苦号义诊",
+     "type": "live_room",
+     "uface": "//i0.hdslb.com/bfs/face/9e6423763709a48227e97232353a65976188bdce.jpg",
+     "uid": 12528170,
+     "uname": "大白突突突突",
+     "user_cover": "//i0.hdslb.com/bfs/live/new_room_cover/235e75c2688d8fc607e2688131d438b19f69e380.jpg",
+     "watched_show": {
+      "switch": true,
+      "num": 12307,
+      "text_small": "1.2万",
+      "text_large": "1.2万人看过",
+      "icon": "https://i0.hdslb.com/bfs/live/a725a9e61242ef44d764ac911691a7ce07f36c1d.png",
+      "icon_location": "",
+      "icon_web": "https://i0.hdslb.com/bfs/live/8d9d0f33ef8bf6f308742752d13dd0df731df19c.png"
+     },
+     "cny_flag": 0,
+     "card_status": 1
+    },
+    {
+     "area": 12,
+     "attentions": 208271,
+     "cate_name": "<em class=\"keyword\">原神</em>",
+     "cover": "//i0.hdslb.com/bfs/live-key-frame/keyframe09252340000011790589xo8w09.jpg",
+     "hit_columns": [
+      "cate_name"
+     ],
+     "is_live_room_inline": 0,
+     "live_status": 1,
+     "live_time": "2026-09-25 19:46:29",
+     "online": 131886,
+     "rank_index": 2,
+     "rank_offset": 1,
+     "roomid": 11790589,
+     "short_id": 0,
+     "tags": "原神",
+     "title": "7.1主线 旅行的意义",
+     "type": "live_room",
+     "uface": "//i2.hdslb.com/bfs/face/e092381700bcd0b207ccd6112461b272a47e938b.jpg",
+     "uid": 13552255,
+     "uname": "莉法sama",
+     "user_cover": "//i0.hdslb.com/bfs/live/new_room_cover/e65b9e726fa386cdd97b839d904d2a6f8c118da2.jpg",
+     "watched_show": {
+      "switch": true,
+      "num": 23709,
+      "text_small": "2.3万",
+      "text_large": "2.3万人看过",
+      "icon": "https://i0.hdslb.com/bfs/live/a725a9e61242ef44d764ac911691a7ce07f36c1d.png",
+      "icon_location": "",
+      "icon_web": "https://i0.hdslb.com/bfs/live/8d9d0f33ef8bf6f308742752d13dd0df731df19c.png"
+     },
+     "cny_flag": 0,
+     "card_status": 1
+    },
+    {
+     "area": 12,
+     "attentions": 13239,
+     "cate_name": "<em class=\"keyword\">原神</em>",
+     "cover": "//i0.hdslb.com/bfs/live-key-frame/keyframe09252341000022952362zwa3j2.jpg",
+     "hit_columns": [
+      "cate_name"
+     ],
+     "is_live_room_inline": 0,
+     "live_status": 1,
+     "live_time": "2026-09-25 20:49:15",
+     "online": 4453,
+     "rank_index": 3,
+     "rank_offset": 2,
+     "roomid": 22952362,
+     "short_id": 0,
+     "tags": "肝*,欧皇,有求必应",
+     "title": "中秋快乐 帮帮枪战/看号/打桩",
+     "type": "live_room",
+     "uface": "//i2.hdslb.com/bfs/face/d5a7f69ea2a4007733c347d6b0b9c7b0d793eb38.jpg",
+     "uid": 340289965,
+     "uname": "晚饭吃土",
+     "user_cover": "//i0.hdslb.com/bfs/live/new_room_cover/efb254550a6d0436d6ede26da758848f164b2933.jpg",
+     "watched_show": {
+      "switch": true,
+      "num": 286,
+      "text_small": "286",
+      "text_large": "286人看过",
+      "icon": "https://i0.hdslb.com/bfs/live/a725a9e61242ef44d764ac911691a7ce07f36c1d.png",
+      "icon_location": "",
+      "icon_web": "https://i0.hdslb.com/bfs/live/8d9d0f33ef8bf6f308742752d13dd0df731df19c.png"
+     },
+     "cny_flag": 0,
+     "card_status": 1
+    }
+   ],
+   "live_user": [
+    {
+     "area": 12,
+     "area_v2_id": 321,
+     "attentions": 20865053,
+     "cate_name": "原神",
+     "hit_columns": [
+      "uname"
+     ],
+     "is_live": false,
+     "live_status": 0,
+     "live_time": "0000-00-00 00:00:00",
+     "rank_index": 1,
+     "rank_offset": 0,
+     "roomid": 21987615,
+     "tags": "原神",
+     "type": "live_user",
+     "uface": "//i0.hdslb.com/bfs/face/e63bacc8b9e68f59f401cc41728a99262ba661a3.jpg",
+     "uid": 401742377,
+     "uname": "<em class=\"keyword\">原神</em>",
+     "cny_flag": 0,
+     "card_status": 0
+    },
+    {
+     "area": 12,
+     "area_v2_id": 321,
+     "attentions": 524263,
+     "cate_name": "原神",
+     "hit_columns": [
+      "uname"
+     ],
+     "is_live": false,
+     "live_status": 0,
+     "live_time": "0000-00-00 00:00:00",
+     "rank_index": 2,
+     "rank_offset": 1,
+     "roomid": 22801564,
+     "tags": "",
+     "type": "live_user",
+     "uface": "//i1.hdslb.com/bfs/face/f7f128857373b6789de5e7ff68874dfe7a216c64.jpg",
+     "uid": 2069605488,
+     "uname": "<em class=\"keyword\">原神</em>代肝-芜饷工作室",
+     "cny_flag": 0,
+     "card_status": 0
+    },
+    {
+     "area": 12,
+     "area_v2_id": 321,
+     "attentions": 522186,
+     "cate_name": "原神",
+     "hit_columns": [
+      "uname"
+     ],
+     "is_live": false,
+     "live_status": 0,
+     "live_time": "0000-00-00 00:00:00",
+     "rank_index": 3,
+     "rank_offset": 2,
+     "roomid": 11445312,
+     "tags": "HoYoFair",
+     "type": "live_user",
+     "uface": "//i2.hdslb.com/bfs/face/211cc1102b3cb637b791dc81daab265b2f54909e.jpg",
+     "uid": 276087954,
+     "uname": "GameTips<em class=\"keyword\">原神</em>",
+     "cny_flag": 0,
+     "card_status": 0
+    }
+   ]
+  }
+ }
+}

@@ -10,7 +10,7 @@
 
 import { logWarn } from './storage.js';
 
-export const MAX_INPUT_LEN = 1024;
+export const MAX_INPUT_LEN = 2048; /* 2048：直播转码代理 URL≈1039>旧 1024 → PLAYER_BAD_INPUT（2026-09-26 实测）；native input[4096] 容纳 */
 export const MAX_USER_AGENT_LEN = 255;
 export const MAX_REFERER_LEN = 512;
 
@@ -125,11 +125,12 @@ export function buildOpenArgs(opts) {
     typeof o.audioDevice === 'string' ? o.audioDevice : '',
     typeof o.userAgent === 'string' ? o.userAgent : '',
     typeof o.referer === 'string' ? o.referer : '',
-    typeof o.input2 === 'string' ? o.input2 : ''
+    typeof o.input2 === 'string' ? o.input2 : '',
+    Math.max(0, Math.round(o.startBufMs || 0)) /* argv[14]：起播缓冲 ms（直播设置；0=默认800） */
   ];
 }
 
-// opts: { input, input2, startMs, durationMs, fps, audio, transpose, rect, audioDevice, userAgent, referer }
+// opts: { input, input2, startMs, durationMs, fps, audio, transpose, rect, audioDevice, userAgent, referer, startBufMs }
 export async function openSession(opts) {
   const m = await getPlayerModule();
   if (!m) return fail('PLAYER_NATIVE_MISSING', '播放器模块不可用（未随包安装 libjsapi_player.so）');

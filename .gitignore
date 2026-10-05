@@ -13,6 +13,10 @@ PenBili.zip
 # 运行时/本地状态（种子与设备状态，不含凭据，但不入库）
 .deploy/
 
+# 设备画像与真机取证（README 约定：不随仓库分发；历史提交中的不追溯清理）
+profiles/
+tools/__pycache__/
+
 # 编辑器/系统
 .DS_Store
 Thumbs.db

@@ -104,6 +104,11 @@ async function main() {
     fetchRecommended,
     fetchPopular,
     searchVideos,
+    searchByType,
+    fetchArticle,
+    resolveLiveUrl,
+    htmlToBlocks,
+    opsToBlocks,
     describeListError,
     RCMD_PAGE_SIZE,
     MAX_ITEMS
@@ -424,7 +429,7 @@ async function main() {
   });
 
   // ---------------- player adapter ----------------
-  test('player: buildOpenArgs 顺序与钳制（14 个位置参数，含 DASH 第二输入）', () => {
+  test('player: buildOpenArgs 顺序与钳制（15 个位置参数，含 DASH 第二输入+起播缓冲）', () => {
     const args = buildOpenArgs({
       input: 'https://x/v.mp4',
       input2: 'https://x/a.m4s',
@@ -436,25 +441,31 @@ async function main() {
       rect: { x: 0.4, y: 174, width: 254, height: 452 },
       audioDevice: '',
       userAgent: 'UA',
-      referer: 'https://r/'
+      referer: 'https://r/',
+      startBufMs: 1500
     });
     assert.deepStrictEqual(args, [
       // fps=0 → 回落 24（与 native 侧 `fps<1||fps>60 → 24` 一致）
-      'https://x/v.mp4', 0, 1235, 24, 0, 1, 0, 174, 254, 452, '', 'UA', 'https://r/', 'https://x/a.m4s'
+      'https://x/v.mp4', 0, 1235, 24, 0, 1, 0, 174, 254, 452, '', 'UA', 'https://r/', 'https://x/a.m4s', 1500
     ]);
-    // input2 缺省 → 末位空串（native 据此走单文件 0:a:0）
+    // input2 缺省 → 末位前一位空串（native 据此走单文件 0:a:0）；startBufMs 缺省 → 0（native 用默认 800）
     const solo = buildOpenArgs({ input: 'https://x/v.mp4', startMs: 0, durationMs: 0, fps: 30, rect: { x: 0, y: 0, width: 1, height: 1 } });
-    assert.strictEqual(solo.length, 14);
+    assert.strictEqual(solo.length, 15);
     assert.strictEqual(solo[13], '');
+    assert.strictEqual(solo[14], 0, '起播缓冲缺省=0（native 默认 800ms）');
   });
   test('player: isSafeInput 拒绝空白/../超长/非 http(s)', () => {
     assert.strictEqual(isSafeInput('https://x/v.mp4'), true);
     assert.strictEqual(isSafeInput('/abs/path.mp4'), true);
     assert.strictEqual(isSafeInput('https://x/a b'), false);
     assert.strictEqual(isSafeInput('/a/../etc'), false);
-    assert.strictEqual(isSafeInput('https://x/' + 'a'.repeat(1100)), false);
+    assert.strictEqual(isSafeInput('https://x/' + 'a'.repeat(2100)), false); /* >2048 新上限 */
     assert.strictEqual(isSafeInput('ftp://x/v'), false);
     assert.strictEqual(isSafeInput(123), false);
+    /* 回归：直播转码代理 URL（前缀+encode 原链≈1039 字符，超旧上限 1024）必须合法 */
+    const proxyUrl = 'http://192.168.5.224:8080/live?u=' + 'https%3A%2F%2Fcn-x.bilivideo.com%2Flive-bvc%2F1%2Fx.flv%3Fexpires%3D1790395045%26sign%3D' + 'a'.repeat(950);
+    assert.ok(proxyUrl.length > 1060 && proxyUrl.length < 2048, '代理URL长度=' + proxyUrl.length);
+    assert.strictEqual(isSafeInput(proxyUrl), true, '代理 URL 应通过（旧 1024 上限曾拒 → bad_input）');
   });
   test('player: UA/Referer 校验与 native 规则一致', () => {
     assert.strictEqual(isSafeUserAgent(DEFAULT_UA), true);
@@ -933,6 +944,166 @@ async function main() {
     assert.strictEqual(segCount(360000), 1);
     assert.strictEqual(segCount(360001), 2);
     assert.strictEqual(segCount(7200000), 20, '2h=20 包');
+  });
+
+  // ---------------- feed: 搜索分类 图文(article)/直播(live) ----------------
+  test('feed: searchByType 图文/直播 fixture 归一（kind/em 剥离/字段/参数）', async () => {
+    // 图文（专栏）：search_article.json 外壳 {code,data:{result:[...]}}
+    const fa = fixture('search_article.json');
+    let urlA = '';
+    const ca = createClient({
+      get: async (u) => {
+        urlA = u;
+        return { statusCode: 200, body: JSON.stringify(fa) };
+      }
+    });
+    const ra = await searchByType(ca, 'a'.repeat(32), '原神', 1, 'article');
+    assert.strictEqual(ra.ok, true, ra.message);
+    assert.ok(urlA.indexOf('search_type=article') > 0, urlA);
+    assert.ok(ra.items.length >= 1, 'article n=' + ra.items.length);
+    const a0 = ra.items[0];
+    assert.strictEqual(a0.kind, 'article');
+    assert.ok(a0.bvid.indexOf('article_') === 0, a0.bvid);
+    assert.ok(a0.title.indexOf('<em') < 0, 'em 标签已剥: ' + a0.title);
+    assert.ok(a0.up.length > 0, 'author → up');
+    assert.ok(a0.cover === '' || a0.cover.indexOf('hdslb') > 0, '封面归一: ' + a0.cover);
+    // 直播：search_live.json 外壳 {code,data:{result:{live_room:[],live_user:[]}}}
+    const fl = fixture('search_live.json');
+    let urlL = '';
+    const cl = createClient({
+      get: async (u) => {
+        urlL = u;
+        return { statusCode: 200, body: JSON.stringify(fl) };
+      }
+    });
+    const rl = await searchByType(cl, 'a'.repeat(32), '原神', 1, 'live');
+    assert.strictEqual(rl.ok, true, rl.message);
+    assert.ok(urlL.indexOf('search_type=live') > 0, urlL);
+    assert.ok(rl.items.length >= 1, 'live n=' + rl.items.length);
+    const l0 = rl.items[0];
+    assert.strictEqual(l0.kind, 'live');
+    assert.ok(l0.bvid.indexOf('room_') === 0, l0.bvid);
+    assert.ok(l0.title.indexOf('<em') < 0, l0.title);
+    assert.strictEqual(typeof l0.view, 'number', 'online → view 数值');
+    // 非法类型回落 video + 参数防御
+    assert.strictEqual((await searchByType(ca, 'short', 'x', 1, 'live')).ok, false);
+    assert.strictEqual((await searchByType(ca, 'a'.repeat(32), '   ', 1, 'article')).ok, false);
+  });
+
+  // ---------------- feed: 图文 blocks 图文混排 + 直播流 + 评论 type ----------------
+  test('feed: html/ops blocks 转换 + fetchArticle 图片保留 + resolveLiveUrl + type=11', async () => {
+    // HTML(type=0) → blocks（文本/图交错、保序、图片 https 化带 16:9 尺寸）
+    const hb = htmlToBlocks('<p>甲</p><p>乙<img src="//i0.hdslb.com/bfs/x.png"/>丙</p>');
+    assert.deepStrictEqual(hb, [
+      { type: 'text', text: '甲' },
+      { type: 'text', text: '乙' },
+      { type: 'img', url: 'https://i0.hdslb.com/bfs/x.png', w: 460, h: 258 },
+      { type: 'text', text: '丙' }
+    ]);
+    assert.deepStrictEqual(htmlToBlocks(''), []);
+    assert.deepStrictEqual(htmlToBlocks(null), []);
+    // ops JSON(type=3) → blocks（native-image 按真实宽高比）
+    const ops = JSON.stringify({
+      ops: [
+        { insert: '第一段\n' },
+        { insert: { 'native-image': { url: 'https://i0.hdslb.com/a.png', width: 460, height: 230 } } },
+        { insert: { 'video-card': { id: 'av1' } } }
+      ]
+    });
+    const ob = opsToBlocks(ops);
+    assert.strictEqual(ob[0].type, 'text');
+    assert.strictEqual(ob[1].type, 'img');
+    assert.strictEqual(ob[1].url, 'https://i0.hdslb.com/a.png');
+    assert.strictEqual(ob[1].h, 230);
+    assert.strictEqual(ob[2].text, '[视频卡片]');
+    assert.deepStrictEqual(opsToBlocks('not json'), []);
+    // fetchArticle（注入响应）：图片真实保留并交错
+    const c = createClient({
+      get: async () => ({
+        statusCode: 200,
+        body: JSON.stringify({ code: 0, data: { type: 0, title: '标题', author: { name: '作者' }, content: '<p>正文一</p><img src="https://i0.hdslb.com/b.png"><p>正文二</p>', words: 12 } })
+      })
+    });
+    const r = await fetchArticle(c, 123);
+    assert.strictEqual(r.ok, true, r.message);
+    assert.strictEqual(r.title, '标题');
+    assert.strictEqual(r.blocks[0].text, '正文一');
+    assert.strictEqual(r.blocks[1].type, 'img', '图片保留');
+    assert.strictEqual(r.blocks[2].text, '正文二');
+    assert.strictEqual((await fetchArticle(c, 0)).ok, false, 'cvid 防御');
+    // opus 富文本（type3 新版正文：图只在 paragraphs 里）
+    const { opusToBlocks } = feedMod;
+    const ob2 = opusToBlocks({
+      content: {
+        paragraphs: [
+          { para_type: 1, text: { nodes: [{ word: { words: '标题段' } }] } },
+          { para_type: 2, pic: { pics: [{ url: '//i0.hdslb.com/bfs/new_dyn/p.png', width: 460, height: 345 }] } },
+          { para_type: 1, text: { nodes: [{ word: { words: '图后文' } }] } }
+        ]
+      }
+    });
+    assert.strictEqual(ob2[0].text, '标题段');
+    assert.strictEqual(ob2[1].type, 'img');
+    assert.strictEqual(ob2[1].url, 'https://i0.hdslb.com/bfs/new_dyn/p.png');
+    assert.strictEqual(ob2[1].h, 345, '460×345 比例保真');
+    assert.strictEqual(ob2[2].text, '图后文');
+    // 直播流（真 fixture）+ roomid 透传（'roomid 无效' bug 回归）
+    const fl = fixture('live_playurl.json');
+    const cl = createClient({
+      get: async () => ({ statusCode: 200, body: JSON.stringify(fl) })
+    });
+    const lv = await resolveLiveUrl(cl, 4898018);
+    assert.strictEqual(lv.ok, true, lv.message);
+    assert.ok(/^https:\/\//.test(lv.url), lv.url);
+    assert.ok(lv.qn > 0, 'qn=' + lv.qn);
+    assert.strictEqual((await resolveLiveUrl(cl, 0)).ok, false, 'roomid 防御');
+    const liveRoom = fixture('search_live.json').data.result.live_room[0];
+    const liveItem = feedMod.normalizeSearchLive(liveRoom);
+    assert.strictEqual(liveItem.roomid, 4898018, 'roomid 必须透传（漏存 → roomid 无效 bug 回归）');
+    // 评论 type 参数：图文=11（读接口 URL 断言）
+    let replyUrl = '';
+    const cr = createClient({
+      get: async (u) => {
+        replyUrl = u;
+        return { statusCode: 200, body: JSON.stringify({ code: 0, data: { replies: [], page: { num: 1, size: 10, count: 0 } } }) };
+      }
+    });
+    await fetchReplies(cr, 4743576, 1, 12);
+    assert.ok(replyUrl.indexOf('type=12') > 0, '专栏评论 type=12（collect 类型表+双篇实测；11=相簿）: ' + replyUrl);
+    assert.ok(replyUrl.indexOf('oid=4743576') > 0, replyUrl);
+  });
+
+  // ---------------- play_session: 直播流 + 服务器转码代理改写 ----------------
+  test('play_session: 直播 resolve（flv/live:true/duration0）+ 转码代理改写', async () => {
+    const ps = await import('../src/services/play_session.js');
+    const fx = fixture('live_playurl.json');
+    const c = createClient({
+      get: async () => ({ statusCode: 200, body: JSON.stringify(fx) })
+    });
+    const mkctx = (proxy) => ({ client: c, log: null, cancelled: () => false, liveProxy: proxy });
+    const item = { kind: 'live', roomid: 4898018, title: '测试直播间' };
+    // 未开转码：原 flv 直链
+    const r1 = await ps.resolveVideoUrl(mkctx(null), item);
+    assert.strictEqual(r1.ok, true, r1.message);
+    assert.strictEqual(r1.live, true);
+    assert.strictEqual(r1.durationMs, 0, '直播无时长 → 禁 seek');
+    assert.ok(r1.url.indexOf('bilivideo') > 0 || r1.url.indexOf('.flv') > 0, r1.url.slice(0, 70));
+    assert.strictEqual(r1.aid, 0, 'aid=0 → 评论/稿件弹幕自动跳过');
+    // 开转码：改走代理（地址尾斜杠剥除 + 原链 URL 编码 + room/lanes 融合参数）
+    const r2 = await ps.resolveVideoUrl(
+      { client: c, log: null, cancelled: () => false, liveProxy: { on: true, addr: 'http://192.168.1.2:8080/' }, danmakuLanes: 2 },
+      item);
+    assert.strictEqual(r2.ok, true, r2.message);
+    assert.ok(r2.url.indexOf('http://192.168.1.2:8080/live?u=') === 0, r2.url.slice(0, 90));
+    assert.ok(r2.url.indexOf('&room=4898018') > 0, 'room 参数（服务端融合烧帧依赖）: ' + r2.url.slice(-60));
+    assert.ok(r2.url.indexOf('&lanes=2') > 0, 'lanes 参数（档位映射）');
+    assert.ok(r2.url.indexOf('https%3A%2F%2F') > 0 || r2.url.indexOf(encodeURIComponent('https://')) > 0, '原链已编码');
+    // 开关关 → 原链
+    const r3 = await ps.resolveVideoUrl(mkctx({ on: false, addr: 'http://x' }), item);
+    assert.ok(r3.url.indexOf('/live?u=') < 0, r3.url.slice(0, 70));
+    // roomid 防御
+    const r4 = await ps.resolveVideoUrl(mkctx(null), { kind: 'live', roomid: 0 });
+    assert.strictEqual(r4.ok, false);
   });
 
   // ---------------- history ----------------

@@ -3,11 +3,13 @@
 // 视频链：**无条件 view**（权威 cid/时长/标题/显示宽高）→ WBI 密钥 → playurl html5 qn 阶梯
 //         → player.open(按真实宽高信箱适配的居中矩形 + UA/Referer)。
 // 控制：toggle / seekBy(±20s) / readStatus / closeSession，全部幂等、结构化错误。
-// 直播播放已从 UI 移除（2026-09-23 用户决策：直播 tab 换成视频搜索）。技术留档：
-//       getRoomPlayInfo 实测唯一 avc 档 accept_qn=[10000,250]=720p（720x1280），
-//       本机 720p 软解 0.76x 不实时（profile 基准）→ 即便恢复入口也不可播。
+// 直播播放已恢复（2026-09-26）：search kind=live → playUrl flv 直链 → 单输入复用 durl 双输出
+//       （音视频同流 → 主 ffmpeg 双输出 → 既有 ring/aplay/A-V 门全链生效；aid=0 → 评论/稿件弹幕自动跳过）。
+//       风险留档：playUrl 档位常回落 qn250 超清（accept=['4']，远高于稿件 646kbps 基准）→
+//       高码率直播 A53 软解可能丢帧（音频钟消费自保：画面不丝滑但音频连续）；720p 0.76x 结论为参考上限。
 import { DASH_QN_LADDER, QN_LADDER, HTML5_FPS, buildPlayurlQuery, parseHtml5Response, parseDashResponse, validateStreamUrl } from './bili/playurl.js';
 import { deriveMixinKey } from './bili/wbi.js';
+import { resolveLiveUrl } from './feed.js';
 import { playVideoRects } from './screen.js';
 
 export const SEEK_STEP_MS = 20000;
@@ -32,6 +34,36 @@ function cancelled(ctx) {
 
 // → {ok, url, audioUrl, qn, cid, durationMs, title, width, height, host} | {ok:false, stage, message}
 export async function resolveVideoUrl(ctx, item) {
+  // 直播（search kind=live）：flv 直链单输入 → native 识别为 durl 模式（双输出：视频pipe+音频pipe）
+  if (item && item.kind === 'live') {
+    const lv = await resolveLiveUrl(ctx.client, item.roomid);
+    if (!lv.ok) return lv;
+    /* 服务器转码（直播设置开启+地址有效）：flv 直链改走 live_proxy → 服务端转 360p 回供 */
+    if (ctx.liveProxy && ctx.liveProxy.on && ctx.liveProxy.addr) {
+      /* room+lanes：服务端融合（转码同时 drawtext 烧弹幕；lanes=档位映射 0/1/2/4） */
+      const lanes = Math.max(0, Math.min(4, ctx.danmakuLanes || 0));
+      lv.url = String(ctx.liveProxy.addr).replace(/\/+$/, '') +
+        '/live?u=' + encodeURIComponent(lv.url) +
+        '&room=' + (item.roomid || 0) + '&lanes=' + lanes;
+      if (ctx.log) ctx.log('[bili] live → 转码代理 ' + ctx.liveProxy.addr + ' room=' + item.roomid + ' lanes=' + lanes);
+    }
+    if (ctx.log) ctx.log('[bili] live stream qn=' + lv.qn + ' ' + lv.url.slice(0, 56));
+    return {
+      ok: true,
+      url: lv.url,
+      audioUrl: '', /* 单输入 flv 自带音视频 → 走既有 durl 双输出路径 */
+      live: true,
+      qn: lv.qn,
+      cid: 0,
+      aid: 0,
+      durationMs: 0, /* 直播无时长 → seek 自动禁止、timeText 显示"直播中" */
+      roomid: item.roomid || 0, /* 直播弹幕代理 /danmaku?room= 依赖 */
+      title: item.title || '直播间',
+      width: 1280,
+      height: 720, /* playUrl 不带分辨率 → 16:9 信箱（竖屏直播会拉伸，留档边界） */
+      host: ''
+    };
+  }
   if (!item || !/^BV[0-9A-Za-z]{10}$/.test(item.bvid || '')) {
     return { ok: false, stage: 'param', message: '稿件标识不合法' };
   }
@@ -52,98 +84,99 @@ export async function resolveVideoUrl(ctx, item) {
   const nowSec = () => (ctx.nowSec ? ctx.nowSec() : Math.floor(Date.now() / 1000));
   const fatal = (res) => res && res.stage === 'api' && (res.code === -404 || res.code === 62002 || res.code === 62004);
 
-  // —— 主路径：DASH 双流（fnval=16）
-  //   音频轨独立 ~66kbps（设备实测带宽 646kbps 的 1/10）→ 声音供给不再被稿件码率/带宽
-  //   贴顶拖垮（音频卡顿根因，白噪对照实验已证链路清白）；视频选 avc1 避开 HEVC 软解。
+  // —— 主路径：durl 单文件（fnval=1，html5）=【音画合并，2026-09-27 定案】
+  //   音视频来自**同一条流、同一个 ffmpeg、同一条源时间轴**：门期两侧 content 同步推进、
+  //   门末清环后同点起步 → 音画天然对齐。实测对照：直播(单流)对齐成立(仅轻微慢)；
+  //   点播原走 DASH 双流=**两个独立 ffmpeg 进程**，解码速度不同 → 门末清环后两侧 content
+  //   不等 →【一进来音频就快几秒】。单流同时带来一个隐藏好处：若 A53 解码吃紧，音视频
+  //   会被同一条链一起拖慢（表现为卡顿）而不是"音频独跑、越播越歪"。
+  //   档位 QN_LADDER=[32,16] = 640x360 AVC+AAC（与 DASH 限制的 360p 同级，A53 可实时）。
   let last = null;
   let stop = false;
-  // DASH 只走 [16]=640x360（dash 的 id32 是 480p，A53 软解击穿实时线——见 DASH_QN_LADDER 注释）
-  for (let i = 0; i < DASH_QN_LADDER.length; i++) {
-    const qn = DASH_QN_LADDER[i];
-    const built = buildPlayurlQuery({ bvid: item.bvid, cid: cid, qn: qn, fnval: 16 }, mixin, nowSec());
+  for (let i = 0; i < QN_LADDER.length; i++) {
+    const qn = QN_LADDER[i];
+    const built = buildPlayurlQuery({ bvid: item.bvid, cid: cid, qn: qn }, mixin, nowSec());
     if (!built.ok) return { ok: false, stage: 'param', message: built.message };
     const res = await ctx.client.fetchPlayurl(built.query);
     if (cancelled(ctx)) return { ok: false, stage: 'cancel', message: '已取消' };
-    const parsed = parseDashResponse(res, qn);
+    const parsed = parseHtml5Response(res);
     if (!parsed.ok) {
       last = { stage: parsed.stage === 'api' ? 'playurl' : parsed.stage, message: parsed.message };
-      if (ctx.log) ctx.log('[bili] dash 尝试失败 qn' + qn + ': ' + parsed.message);
-      if (fatal(res)) {
-        stop = true; // 版权/不存在：阶梯与 durl 回退都无意义
-        break;
-      }
+      if (ctx.log) ctx.log('[bili] playurl 尝试失败 qn' + qn + ': ' + parsed.message);
+      if (fatal(res)) { stop = true; break; } /* 版权/不存在：阶梯与 DASH 回退都无意义 */
       continue;
     }
-    const vv = validateStreamUrl(parsed.videoUrl);
-    if (!vv.ok) {
-      last = { stage: 'param', message: 'URL ' + vv.reason };
-      if (ctx.log) ctx.log('[bili] dash 尝试失败 qn' + qn + ': URL ' + vv.reason);
+    const v2 = validateStreamUrl(parsed.url);
+    if (!v2.ok) {
+      last = { stage: 'param', message: 'URL ' + v2.reason };
+      if (ctx.log) ctx.log('[bili] playurl 尝试失败 qn' + qn + ': URL ' + v2.reason);
       continue;
     }
-    let audioUrl = parsed.audioUrl || '';
-    if (audioUrl) {
-      const av = validateStreamUrl(audioUrl);
-      if (!av.ok) {
-        // 音频 URL 坏 → 降级无音轨（宁可静音不中断播放）
-        if (ctx.log) ctx.log('[bili] dash audio URL 弃用: ' + av.reason);
-        audioUrl = '';
-      }
-    }
-    if (ctx.log) {
-      ctx.log(
-        '[bili] stream DASH qn=' + parsed.qn + ' vb=' + parsed.bandwidth + ' ' + parsed.codecs +
-          ' ab=' + parsed.audioBandwidth + ' host=' + vv.host
-      );
-    }
+    if (ctx.log) ctx.log('[bili] stream durl(单流合并) qn=' + (parsed.quality || qn) + ' ' + v2.length + 'c host=' + v2.host);
     return {
       ok: true,
-      url: parsed.videoUrl,
-      audioUrl: audioUrl,
-      qn: parsed.qn || qn,
+      url: parsed.url,
+      audioUrl: '',
+      qn: parsed.quality || qn,
       cid: cid,
       aid: aid,
-      durationMs: parsed.durationMs || Math.max(0, Math.floor(durationSec * 1000)),
+      durationMs: Math.max(0, Math.floor(durationSec * 1000)),
       title: title,
       width: width,
       height: height,
-      host: vv.host
+      host: v2.host
     };
   }
 
-  // —— 回退：durl 单文件（fnval=1，html5 老路径，保底可播）
+  // —— 回退：DASH 双流（fnval=16）。**仅当单流取不到时使用**：两进程两时间轴，音画可能渐进漂移
+  //   （原主路径，正是点播"音频快几秒"的来源）；音频轨独立 ~66kbps 的抗带宽优势在此让位于同步。
   if (!stop) {
-    for (let i = 0; i < QN_LADDER.length; i++) {
-      const qn = QN_LADDER[i];
-      const built = buildPlayurlQuery({ bvid: item.bvid, cid: cid, qn: qn }, mixin, nowSec());
+    // DASH 只走 [16]=640x360（dash 的 id32 是 852x480，A53 软解击穿实时线——见 DASH_QN_LADDER 注释）
+    for (let i = 0; i < DASH_QN_LADDER.length; i++) {
+      const qn = DASH_QN_LADDER[i];
+      const built = buildPlayurlQuery({ bvid: item.bvid, cid: cid, qn: qn, fnval: 16 }, mixin, nowSec());
       if (!built.ok) return { ok: false, stage: 'param', message: built.message };
       const res = await ctx.client.fetchPlayurl(built.query);
       if (cancelled(ctx)) return { ok: false, stage: 'cancel', message: '已取消' };
-      const parsed = parseHtml5Response(res);
+      const parsed = parseDashResponse(res, qn);
       if (!parsed.ok) {
         last = { stage: parsed.stage === 'api' ? 'playurl' : parsed.stage, message: parsed.message };
-        if (ctx.log) ctx.log('[bili] playurl 尝试失败 qn' + qn + ': ' + parsed.message);
-        if (fatal(res)) break;
+        if (ctx.log) ctx.log('[bili] dash 尝试失败 qn' + qn + ': ' + parsed.message);
+        if (fatal(res)) break; /* 版权/不存在：阶梯已无意义 */
         continue;
       }
-      const v2 = validateStreamUrl(parsed.url);
-      if (!v2.ok) {
-        last = { stage: 'param', message: 'URL ' + v2.reason };
-        if (ctx.log) ctx.log('[bili] playurl 尝试失败 qn' + qn + ': URL ' + v2.reason);
+      const vv = validateStreamUrl(parsed.videoUrl);
+      if (!vv.ok) {
+        last = { stage: 'param', message: 'URL ' + vv.reason };
+        if (ctx.log) ctx.log('[bili] dash 尝试失败 qn' + qn + ': URL ' + vv.reason);
         continue;
       }
-      if (ctx.log) ctx.log('[bili] stream durl(回退) qn=' + (parsed.quality || qn) + ' ' + v2.length + 'c host=' + v2.host);
+      let audioUrl = parsed.audioUrl || '';
+      if (audioUrl) {
+        const av = validateStreamUrl(audioUrl);
+        if (!av.ok) {
+          if (ctx.log) ctx.log('[bili] dash audio URL 弃用: ' + av.reason); /* 坏 URL → 降级无音轨 */
+          audioUrl = '';
+        }
+      }
+      if (ctx.log) {
+        ctx.log(
+          '[bili] stream DASH(回退) qn=' + parsed.qn + ' vb=' + parsed.bandwidth + ' ' + parsed.codecs +
+            ' ab=' + parsed.audioBandwidth + ' host=' + vv.host
+        );
+      }
       return {
         ok: true,
-        url: parsed.url,
-        audioUrl: '',
-        qn: parsed.quality || qn,
+        url: parsed.videoUrl,
+        audioUrl: audioUrl,
+        qn: parsed.qn || qn,
         cid: cid,
         aid: aid,
-        durationMs: Math.max(0, Math.floor(durationSec * 1000)),
+        durationMs: parsed.durationMs || Math.max(0, Math.floor(durationSec * 1000)),
         title: title,
         width: width,
         height: height,
-        host: v2.host
+        host: vv.host
       };
     }
   }
@@ -168,7 +201,8 @@ export async function openVideo(ctx, item) {
     rect: rects.physical,
     audioDevice: '',
     userAgent: ctx.mediaUa,
-    referer: ctx.mediaReferer
+    referer: ctx.mediaReferer,
+    startBufMs: Math.max(0, Math.round(ctx.startBufMs || 0)) /* 直播设置"缓冲时间"（0=默认800ms） */
   });
   if (!openRes || openRes.ok !== true) {
     return {
@@ -197,6 +231,8 @@ export async function openVideo(ctx, item) {
       cover: item.cover || '',
       qn: rs.qn,
       aid: rs.aid || 0, /* 评论 oid */
+      live: !!rs.live, /* 直播会话：timeText/idleText 特化、评论按钮隐藏（aid=0） */
+      roomid: rs.roomid || 0, /* 直播弹幕轮询的房间号 */
       durationMs: rs.durationMs,
       outWidth: openRes.outWidth,
       outHeight: openRes.outHeight
@@ -239,7 +275,9 @@ export async function readStatus(ctx) {
     audioDropped: 0,
     audioUnderruns: 0,
     audioWrErrors: 0,
-    audioRingDrops: 0
+    audioRingDrops: 0,
+    writerBytes: 0,
+    audioRate: 0
   };
   if (!st || st.ok === false) {
     return Object.assign(
@@ -281,7 +319,15 @@ export async function readStatus(ctx) {
      * gateActive=门进行中（此时巡检让位，防弱网首帧期被误判打断） */
     videoStallMs: Number(st.videoStallMs) || 0,
     gateWaitMs: Number(st.gateWaitMs) || 0,
-    gateActive: !!st.gateActive
+    gateActive: !!st.gateActive,
+    /* 音画同步探针（2026-09-27）：外放位置(aps=写入量/设备率) vs 视频位置的差值由 JS tick 打印 */
+    writerBytes: Number(st.writerBytes) || 0,
+    audioRate: Number(st.audioRate) || 0,
+    paced: !!st.paced,
+    audioStarted: !!st.audioStarted,
+    dueMs: Number(st.dueMs) || 0,
+    aposMs: Number(st.aposMs) || 0,
+    thWaited: Number(st.thWaited) || 0
   };
 }
 

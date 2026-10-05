@@ -21,7 +21,10 @@
     "native": "powershell -NoProfile -ExecutionPolicy Bypass -File native/build.ps1",
     "test": "node test/run.js",
     "icon": "python tools/make_icon_v2.py favicon.ico tools/icon_colors.json && node tools/make_icon_v2.js",
-    "deploy": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/deploy.ps1"
+    "deploy": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/deploy.ps1",
+    "redirector": "node tools/redirector.js",
+    "test:redirector": "node tools/redirector.test.js",
+    "live-proxy": "python tools/live_proxy.py --port 8080"
   },
   "keywords": [
     "youdao",

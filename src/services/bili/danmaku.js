@@ -1,10 +1,11 @@
 // 真实弹幕（protobuf 二进制）
 //
 // 接口（事实来源：github.com/xieren58/bilibili-API-collect docs/danmaku/ + 开发机实测 2026-09-25）：
-//   GET https://api.bilibili.com/x/v2/dm/web/seg.so?type=1&oid=<cid>&pid=<aid>&segment_index=N
+//   GET https://api.bilibili.com/x/v2/dm/wbi/web/seg.so?type=1&oid=<cid>&pid=<aid>&segment_index=N&w_rid=&wts=
+//   GET https://api.bilibili.com/x/v2/dm/web/seg.so?...（半匿名旧端点，WBI 失败时的回退）
 //     · **oid = 视频 cid**（不是 aid！传 aid 返回空段——12 次全空实测踩坑）
 //     · 认证=半匿名（无 SESSDATA 只返回部分弹幕；登录后全量——headers 自动带 Cookie）
-//     · 6 分钟一包，progress 值域 [0, 360000) 每包；6000 条/包上限
+//     · 6 分钟一包，progress 值域 [0, 360000) 每包；6000 条/包上限；segment_index **1-based**
 //     · 实测该端点 200 application/octet-stream；老 list.so 端点已下线(HTML 404)
 //
 // proto（DmSegMobileReply / DanmakuElem，字段表见 collect danmaku_proto.md）：
@@ -14,11 +15,15 @@
 //   ★ key 是 varint（field≥16 的新字段 key 为多字节——单字节读会错位到非法 wt7；
 //     实测老视频 elem 含 field20/21/26+，外层含 field4）→ key/len 全部 varint 读、未知字段按 wire 跳过。
 //   解码金标准：fixtures/dm_seg.bin（炮姐 av810872/cid=1176840 分包1，1.2MB/5863条）。
+import { buildSignedQuery } from './wbi.js';
 //
 // mode 过滤：1/2/3=普通(滚动) 4=底部 5=顶部 → 显示；
 //   6=逆向 7=高级(定位指令文本语义不明) 8=代码 → 跳过（宁缺勿乱）。
 
 export const SEG_URL = 'https://api.bilibili.com/x/v2/dm/web/seg.so';
+/* WBI 版（BiliClient 同款路径 /dm/wbi/web/seg.so + w_rid/wts）：更抗接口收紧；
+ * 调用方签名失败/412 时回退半匿名旧端点（segUrl）。 */
+export const SEG_URL_WBI = 'https://api.bilibili.com/x/v2/dm/wbi/web/seg.so';
 export const SEG_DURATION_MS = 360000; /* 6 分钟一包 */
 const SHOW_MODES = { 1: 1, 2: 1, 3: 1, 4: 1, 5: 1 };
 
@@ -26,6 +31,21 @@ export function segUrl(cid, aid, segmentIndex) {
   return SEG_URL + '?type=1&oid=' + Math.floor(Number(cid) || 0) +
     (aid ? '&pid=' + Math.floor(Number(aid)) : '') +
     '&segment_index=' + Math.max(1, Math.floor(Number(segmentIndex) || 1));
+}
+
+// WBI 签名版（mixinKey 由 play_session.ensureMixin 提供）——参数值均为安全字符，encodeURIComponent 无损
+export function segUrlSigned(cid, aid, segmentIndex, mixinKey) {
+  const params = buildSignedQuery({
+    type: 1,
+    oid: Math.floor(Number(cid) || 0),
+    pid: Math.floor(Number(aid) || 0),
+    segment_index: Math.max(1, Math.floor(Number(segmentIndex) || 1))
+  }, mixinKey, Math.floor(Date.now() / 1000));
+  const parts = [];
+  Object.keys(params).forEach((k) => {
+    parts.push(k + '=' + encodeURIComponent(params[k]));
+  });
+  return SEG_URL_WBI + '?' + parts.join('&');
 }
 
 export function segCount(durationMs) {

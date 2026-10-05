@@ -71,10 +71,11 @@ export function parseReplies(res) {
 }
 
 // 读一页评论 → 同上 | {ok:false, stage, message}
-export async function fetchReplies(client, aid, pn) {
+// replyType：1=视频/普通、11=专栏（图文）——collect/实测 type 随对象类变化，默认 1 兼容
+export async function fetchReplies(client, aid, pn, replyType) {
   const page = Math.max(1, Math.floor(Number(pn) || 1));
   const res = await client.request('/x/v2/reply', {
-    type: 1,
+    type: Math.floor(Number(replyType) || 1),
     oid: Math.floor(Number(aid) || 0),
     pn: page,
     ps: REPLY_PAGE_SIZE,
@@ -85,7 +86,7 @@ export async function fetchReplies(client, aid, pn) {
 }
 
 // 写评论（form 串：csrf=bili_jct，全部 URL 编码）→ {ok, rpid} | {ok:false, stage, code?, message}
-export async function addReply(client, aid, message, csrf) {
+export async function addReply(client, aid, message, csrf, replyType) {
   const oid = Math.floor(Number(aid) || 0);
   const text = String(message == null ? '' : message).trim();
   if (!(oid > 0)) return { ok: false, stage: 'param', message: '缺少稿件 id' };
@@ -94,7 +95,7 @@ export async function addReply(client, aid, message, csrf) {
   if (!csrf) return { ok: false, stage: 'param', message: '缺少 csrf（需要登录）' };
   const form =
     'oid=' + oid +
-    '&type=1' +
+    '&type=' + (Math.floor(Number(replyType) || 1)) +
     '&message=' + encodeURIComponent(text) +
     '&csrf=' + encodeURIComponent(csrf) +
     '&platform=web';
@@ -115,12 +116,12 @@ export async function addReply(client, aid, message, csrf) {
 // 子楼读取 GET /x/v2/reply/reply?oid=&type=1&root=<主楼rpid>&pn=&ps=20
 //   响应结构与主接口同构（data.replies + data.page）→ 复用 parseReplies；
 //   root=被展开评论的 rpid；匿名可用（与主接口同族）。
-export async function fetchSubReplies(client, aid, rootRpid, pn) {
+export async function fetchSubReplies(client, aid, rootRpid, pn, replyType) {
   const page = Math.max(1, Math.floor(Number(pn) || 1));
   const root = Math.floor(Number(rootRpid) || 0);
   if (!(root > 0)) return { ok: false, stage: 'param', message: '缺少 root rpid' };
   const res = await client.request('/x/v2/reply/reply', {
-    type: 1,
+    type: Math.floor(Number(replyType) || 1),
     oid: Math.floor(Number(aid) || 0),
     root: root,
     pn: page,

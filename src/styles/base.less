@@ -298,10 +298,144 @@
   align-items: center;
 }
 
+/* 左下角直播转码提示（未开启时橙色警示） */
+.bar-hint {
+  margin-top: 6px;
+  font-size: 11px;
+  color: #e6a23c;
+  lines: 3;
+}
+
+/* 直播设置面板 */
+.settings-block {
+  flex: 1;
+  padding: 12px;
+}
+
+.settings-ctrl {
+  width: 100%;
+  height: 36px;
+  border-radius: 6px;
+  background-color: @accent-dim;
+  justify-content: center;
+  align-items: center;
+}
+
+.settings-ctrl-sub {
+  margin-top: 8px;
+  height: 30px;
+  background-color: @background-color;
+}
+
+.settings-row {
+  height: 42px;
+  margin-top: 8px;
+  padding-left: 10px;
+  padding-right: 10px;
+  border-radius: 6px;
+  background-color: @background-color;
+  flex-direction: row;
+  align-items: center;
+}
+
+.settings-label {
+  width: 90px;
+  font-size: 12px;
+  color: @text-color-dim;
+  lines: 1;
+}
+
+.settings-value {
+  flex: 1;
+  font-size: 12px;
+  color: @text-color;
+  text-align: right;
+  lines: 1;
+  text-overflow: ellipsis;
+}
+
+.settings-hint {
+  margin-top: 6px;
+  font-size: 10px;
+  color: @text-color-dim;
+  lines: 3;
+}
+
+/* 图文阅读面板正文段（text 单行默认 → lines 开大防截断） */
+.article-para {
+  font-size: 13px;
+  color: @text-color;
+  lines: 400;
+  margin-bottom: 6px;
+}
+
+/* 图文混排图片块（宽高由 block 属性给定=按比例算好；圆角与列表一致） */
+.article-block {
+  margin-bottom: 4px;
+}
+
+.article-img {
+  /* 根因：falcon image 以样式定尺寸（.thumb 的宽高即 CSS 来的，属性不足以撑开）→
+   * inline style 提供每图精确宽高（优先级更高），本 class 作为 style 绑定不生效时的兜底 */
+  width: 460px;
+  height: 258px;
+  border-radius: 6px;
+  background-color: @card-border-color; /* 加载占位灰底 */
+  margin-bottom: 4px;
+}
+
+/* 正文 / 评论 分隔行 */
+.article-divider {
+  height: 28px;
+  margin-top: 10px;
+  margin-bottom: 4px;
+  flex-direction: row;
+  align-items: center;
+}
+
+.article-divider-text {
+  font-size: 14px;
+  color: @accent;
+  lines: 1;
+}
+
 .search-btn-text {
   font-size: 14px;
   color: #ffffff;
   text-align: center;
+}
+
+/* 搜索分类三按钮：视频 / 图文 / 直播（三等分；选中=强调底+白字） */
+.search-types {
+  width: 610px;
+  margin-left: 8px;
+  margin-bottom: 4px;
+  height: 30px;
+  flex-direction: row;
+}
+
+.search-type {
+  flex: 1;
+  margin-right: 4px;
+  height: 30px;
+  border-radius: 6px;
+  background-color: @card-background-color;
+  justify-content: center;
+  align-items: center;
+}
+
+.search-type-on {
+  background-color: @accent-dim;
+}
+
+.search-type-text {
+  font-size: 12px;
+  color: @text-color-dim;
+  text-align: center;
+}
+
+.search-type-text-on {
+  color: #ffffff;
 }
 
 .search-btn:active {

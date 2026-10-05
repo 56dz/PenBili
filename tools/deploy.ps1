@@ -41,8 +41,24 @@ function Pull-Capture([string]$remote, [string]$local) {
 function Push-Seed([string]$mode) {
   node (Join-Path $root 'tools\seed_settings.js') $mode | Out-Null
   & $adb shell "mkdir -p $prefsDir" | Out-Null
-  & $adb push $seedFile "$prefsDir/preferences.json" | Out-Null
-  Write-Host "seed autotest=$mode → $prefsDir/preferences.json"
+  # 合并推送：只更新 bili_autotest，保留设备上的 bvp_session（登录）/bvp_settings（直播设置/弹幕档）
+  # —— 2026-09-26 修复：整体覆盖会抹掉登录态与用户设置（实测踩坑）
+  $remotePrefs = "$prefsDir/preferences.json"
+  $tmp = Join-Path $env:TEMP 'prefs_merged.json'
+  # 注意：native 命令勿用 2>$null（PS5.1 会把 adb 的进度 stderr 转成 terminating NativeCommandError）
+  & $adb pull $remotePrefs $tmp | Out-Null
+  $merged = [ordered]@{}
+  if (Test-Path $tmp) {
+    try {
+      $cur = Get-Content $tmp -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+      $cur.PSObject.Properties | ForEach-Object { if ($_.Name -ne 'bili_autotest') { $merged[$_.Name] = $_.Value } }
+    } catch { }
+  }
+  $seed = Get-Content $seedFile -Raw -Encoding UTF8 | ConvertFrom-Json
+  $merged['bili_autotest'] = $seed.bili_autotest
+  [System.IO.File]::WriteAllText($tmp, ($merged | ConvertTo-Json -Compress), [System.Text.UTF8Encoding]::new($false))
+  & $adb push $tmp $remotePrefs | Out-Null
+  Write-Host "seed autotest=$mode → $prefsDir/preferences.json（保留 bvp_session/bvp_settings）"
 }
 
 Step '1/7 设备'
