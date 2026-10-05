@@ -643,7 +643,8 @@ export default {
           }
           return r;
         }
-        return await fetchRecommended(this.client);
+        // 注意：此处不能无条件 `return await fetchRecommended()` —— 会把下面 hot 分支变成死代码，
+        // 导致热门首屏写入推荐流数据（而翻页 loadMore 又用 fetchPopular，首屏与翻页内容不一致）。
         if (id === 'hot') {
           const r = await fetchPopular(this.client, 1);
           if (r.ok) {
