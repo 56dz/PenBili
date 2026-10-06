@@ -29,3 +29,6 @@ Thumbs.db
 
 # 服务端 HLS 分片缓存（运行时产物）
 server/hls_cache/
+
+# Python 运行时缓存
+__pycache__/
