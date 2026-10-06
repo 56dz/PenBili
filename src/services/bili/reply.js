@@ -77,7 +77,7 @@ export function parseReplies(res) {
 }
 
 // 读一页评论 → 同上 | {ok:false, stage, message}
-// type: 评论区类型（B 站评论区契约）：1=视频 17=专栏图文（图文复用同族接口）
+// type: 评论区类型（B 站评论区契约）：1=视频 12=专栏图文（图文复用同族接口）
 export function fetchReplies(client, oid, pn, type) {
   const page = Math.max(1, Math.floor(Number(pn) || 1));
   const res = client.request('/x/v2/reply', {

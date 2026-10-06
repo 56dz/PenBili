@@ -122,7 +122,8 @@ export function decodeEntities(s) {
     .replace(/&(amp|lt|gt|quot|#39|nbsp|copy|middot|hellip|ldquo|rdquo|mdash|ensp|emsp);/g, (m) => ENTITIES[m] || m);
 }
 
-// HTML → 混排块[]：<img> 原位成图块（无尺寸元数据 → 默认 16:9），文本按块级标签/换行聚合
+// HTML → 混排块[]：<img> 原位成图块（无尺寸元数据 → 默认 16:9）；
+// 文本按块级标签切段（每段一个块），段内 <br> 为软换行（空格续接）
 export function htmlToBlocks(html, maxBlocks) {
   const cap = Math.max(1, Math.floor(Number(maxBlocks) || 120));
   if (typeof html !== 'string' || !html) return [];
@@ -150,8 +151,11 @@ export function htmlToBlocks(html, maxBlocks) {
 function decodeParagraphs(html, cap) {
   let s = String(html == null ? '' : html)
     .replace(/<(script|style)[\s\S]*?<\/\1>/gi, '')
+    // <br> = 段内软换行（同一文本块内以空格续接）；块级标签结束 = 段落硬边界（切块）
+    // —— 两者必须区分：若都当软换行，整篇正文会合并成**单个**文本块，
+    //    而 .art-p 是 lines:30 截断，长正文（HTML 兜底路径的旧专栏）会被吃掉半篇。
     .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/(p|div|h[1-6]|li|blockquote|figure|figcaption|section)>/gi, '\n')
+    .replace(/<\/(p|div|h[1-6]|li|blockquote|figure|figcaption|section)>/gi, '\n\n')
     .replace(/<[^>]+>/g, '');
   s = decodeEntities(s);
   const out = [];

@@ -94,7 +94,7 @@
               <text class="vmeta">{{ vmeta(it) }}</text>
             </div>
           </div>
-          <!-- 图文：同款卡片，进入图文详情（评论区与视频同族 type=17） -->
+          <!-- 图文：同款卡片，进入图文详情（评论区与视频同族，专栏实测 type=12） -->
           <div v-else-if="it.kind === 'article'" :key="it.key" class="vrow" @click="openArticle(it)">
             <image class="thumb" :src="it.cover" :width="112" :height="63"></image>
             <div class="vinfo">
@@ -113,7 +113,7 @@
           </div>
         </div>
         <div v-if="!searchItems.length && !loading" class="empty">
-          <text class="empty-text">{{ statusText || '输入关键词开始搜索' }}</text>
+          <text class="empty-text">{{ placeholderText || statusText || '输入关键词开始搜索' }}</text>
         </div>
       </scroller>
 
@@ -248,7 +248,7 @@
       <text class="info-hint">左侧：暂停/开始 · ±{{ seekStepSec }}s</text>
     </div>
 
-    <!-- 图文详情：中列正文滚动 + 右列信息（评论面板打开时两列收起；评论区与视频同族 type=17） -->
+    <!-- 图文详情：中列正文滚动 + 右列信息（评论面板打开时两列收起；评论区与视频同族，专栏实测 type=12） -->
     <div v-if="mode === 'article' && !commentsOpen" class="play-col">
       <scroller class="art-scroll">
         <div v-if="article.state === 'loading'" class="art-loading">
@@ -348,11 +348,17 @@ const TABS = [
   { id: 'mine', label: '我的' }
 ];
 
-// 搜索三分栏（与 feed.js searchBili 的 search_type 对应）
+// 搜索三分栏（与 feed.js searchBili 的 search_type 对应）：
+//   video/article = 本版可用；live = 入口占位，只渲染按钮与空态提示，不发检索请求。
+//   下一版本接入直播时：删掉 PLACEHOLDER_TYPES.live 一项，即可复用 feed.js 的 search_type=live。
 const SEARCH_TYPES_UI = [
   { id: 'video', label: '视频' },
-  { id: 'article', label: '图文' }
-]; // 直播入口暂缓（2026-10-04 用户决策）：searchBili 已支持 search_type=live（feed.js），播放链路接入后再上按钮
+  { id: 'article', label: '图文' },
+  { id: 'live', label: '直播' }
+];
+
+// 占位入口（未接入实现的类型）：切换时不发请求，结果区显示提示文案
+const PLACEHOLDER_TYPES = { live: '直播功能开发中，敬请期待' };
 
 // 二维码内容 = TV 变体 url（cookie 在 poll 响应 body 的 cookie_info；取证注释见 qrlogin.js）
 const QR_CELL = 4;
@@ -431,7 +437,7 @@ export default {
       keyword: '',
       loading: false,
       statusText: '',
-      // 评论上下文：视频=type 1（oid=aid）、图文=type 17（oid=专栏 aid）——回复/加载共用
+      // 评论上下文：视频=type 1（oid=aid）、图文=type 12（oid=专栏 aid）——回复/加载共用
       replyCtx: { oid: 0, type: 1 },
       // 图文详情（mode=article）：blocks = 文本/图片混排块（{t:'text',text} | {t:'img',src,dw,dh}）
       article: { aid: 0, title: '', author: '', cover: '', coverDh: 140, blocks: [], read: 0, like: 0, state: 'idle', note: '' },
@@ -464,6 +470,10 @@ export default {
     // 搜索活跃类型的条目视图（三分栏：视频/图文/直播各自缓存，切换零请求）
     searchItems() {
       return this.searchResults[this.searchType] || [];
+    },
+    // 占位类型（直播）的空态文案；已接入类型为空串
+    placeholderText() {
+      return PLACEHOLDER_TYPES[this.searchType] || '';
     },
     // 评论面板返回按钮文案（跟随所在模式）
     commentsBackLabel() {
@@ -617,7 +627,7 @@ export default {
       this.tab = id;
       this.statusText = '';
       if (id === 'mine') return;
-      if (id === 'search' && !this.keyword) return; // 空态显示"输入关键词"，不发请求
+      if (id === 'search' && (!this.keyword || PLACEHOLDER_TYPES[this.searchType])) return; // 空态/占位类型：不发请求
       const list =
         id === 'rcmd' ? this.rcmdItems : id === 'hot' ? this.hotItems : id === 'search' ? this.searchItems : [];
       if (!list.length) await this.loadTab(id, myGen);
@@ -634,6 +644,10 @@ export default {
       try {
         if (id === 'search') {
           if (!this.keyword) return { ok: false, stage: 'param', message: '未输入关键词' };
+          // 占位类型（直播）不发检索请求（下一版本接入）
+          if (PLACEHOLDER_TYPES[this.searchType]) {
+            return { ok: false, stage: 'param', message: PLACEHOLDER_TYPES[this.searchType] };
+          }
           const mixin = await ensureMixin(this.makeCtx(this.gen));
           if (!mixin) return { ok: false, stage: 'wbi', message: 'WBI 密钥获取失败' };
           const r = await searchBili(this.client, mixin, this.keyword, 1, this.searchType);
@@ -790,6 +804,7 @@ export default {
     async loadMoreSearch() {
       const st = this.searchType;
       if (this.searchNoMoreMap[st] || !this.keyword) return;
+      if (PLACEHOLDER_TYPES[st]) return; // 占位类型（直播）：无翻页
       const myGen = ++this.gen;
       this.loading = true;
       this.statusText = '加载更多…';
@@ -827,13 +842,15 @@ export default {
     setSearchType(id) {
       if (this.searchType === id) return;
       this.searchType = id;
+      this.statusText = '';
       if (this.tab !== 'search') return;
+      // 占位类型（直播）：只切换视图，不发检索请求（下一版本接入转码播放链路）
+      if (PLACEHOLDER_TYPES[id]) return;
       if (this.keyword && !this.searchResults[id].length && !this.loading) {
         const myGen = ++this.gen;
         this.loadTab('search', myGen);
       }
     },
-    // 直播入口暂缓（用户决策）：播放链路（flv/HLS 解码）接入后再上按钮
     // 图文详情：正文 + 评论区（type=12，与视频评论同族）
     async openArticle(it) {
       if (!it || !(it.id > 0)) return;

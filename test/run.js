@@ -1,7 +1,8 @@
 // 纯逻辑单测（Node 直接运行：node test/run.js）
 // 覆盖：MD5 对拍/向量、WBI 官方 worked example、net 归一化、client 四段错误语义、
 //       playurl 阶梯与 URL 校验、player 参数映射与 UA/Referer 校验、屏幕几何、
-//       probe 编排（成功/失败/取消）、storage schema。
+//       probe 编排（成功/失败/取消）、storage schema、
+//       搜索三分栏条目归一化（视频/图文/直播）、图文正文三形态解析、评论类型契约（1/12）。
 const assert = require('assert');
 const crypto = require('crypto');
 
@@ -96,6 +97,8 @@ async function main() {
   const {
     normalizeVideo,
     normalizeSearch,
+    normalizeSearchArticle,
+    normalizeSearchLive,
     normalizeCover,
     formatDuration,
     formatCount,
@@ -105,6 +108,7 @@ async function main() {
     fetchRecommended,
     fetchPopular,
     searchVideos,
+    searchBili,
     describeListError,
     RCMD_PAGE_SIZE,
     MAX_ITEMS
@@ -123,7 +127,15 @@ async function main() {
     ensureMixin,
     SEEK_STEP_MS
   } = await import('../src/services/play_session.js');
-  const { fetchReplies, addReply, parseReplies, normalizeReply } = await import('../src/services/bili/reply.js');
+  const { fetchReplies, addReply, parseReplies, normalizeReply, replyType } = await import('../src/services/bili/reply.js');
+  const {
+    opusToBlocks,
+    opsToBlocks,
+    decodeEntities,
+    htmlToBlocks,
+    parseArticle,
+    fetchArticle
+  } = await import('../src/services/bili/article.js');
   const fsx = require('fs');
   const pathx = require('path');
   const fixture = (n) => JSON.parse(fsx.readFileSync(pathx.join(__dirname, '..', 'api-mock', 'fixtures', n), 'utf8'));
@@ -844,6 +856,290 @@ async function main() {
     assert.strictEqual(capped.capped, true);
     assert.strictEqual(capped.items.length, MAX_ITEMS);
   });
+  test('feed: appendDeduped 按 key 跨类型去重（v:/a:/l: 前缀不互相顶掉）', () => {
+    const a = [{ key: 'v:BV1ZCeb6NEyM', bvid: 'BV1ZCeb6NEyM', kind: 'video' }];
+    const b = [
+      { key: 'v:BV1ZCeb6NEyM', bvid: 'BV1ZCeb6NEyM', kind: 'video' }, // 重复 → 丢
+      { key: 'a:117278561535782', id: 117278561535782, kind: 'article' },
+      { key: 'l:88', roomid: 88, kind: 'live' }
+    ];
+    const r = appendDeduped(a, b);
+    assert.strictEqual(r.added, 2);
+    assert.strictEqual(r.items.length, 3);
+    assert.deepStrictEqual(r.items.map((x) => x.kind), ['video', 'article', 'live']);
+  });
+
+  /* ---------------- 搜索三分栏：图文（专栏）与直播条目归一化 ---------------- */
+  // 结果卡片字段来自 2026-10-04 真机探针（tools/probe_search.mjs）：
+  //   图文卡 search_type=article → { id/aid, title(<em>), image_urls[]（无 pic）, author, view, reply }
+  //   直播卡 search_type=live  → { roomid, title(<em>), cover/user_cover, uname, online, cate_name }
+  test('feed: normalizeSearchArticle 字段映射（封面取 image_urls[0]，无 pic 字段）', () => {
+    const it = normalizeSearchArticle({
+      id: 117278561535782,
+      title: '【<em class="keyword">测试</em>】专栏标题',
+      image_urls: ['//i0.hdslb.com/bfs/article/cover.jpg'],
+      author: '作者甲',
+      desc: '摘要',
+      view: 4321,
+      reply: 12
+    });
+    assert.strictEqual(it.kind, 'article');
+    assert.strictEqual(it.key, 'a:117278561535782');
+    assert.strictEqual(it.id, 117278561535782);
+    assert.strictEqual(it.title, '【测试】专栏标题');
+    assert.strictEqual(it.cover, 'http://i0.hdslb.com/bfs/article/cover.jpg');
+    assert.strictEqual(it.up, '作者甲');
+    assert.strictEqual(it.view, 4321);
+    assert.strictEqual(it.reply, 12);
+    assert.strictEqual(it.source, 'search');
+    // 无封面 → cover 空串（不抛）；无 aid/id → null
+    assert.strictEqual(normalizeSearchArticle({ id: 7, title: 'a' }).cover, '');
+    assert.strictEqual(normalizeSearchArticle({ title: 'x' }), null);
+    assert.strictEqual(normalizeSearchArticle(null), null);
+  });
+  test('feed: normalizeSearchLive 字段映射（cover/user_cover 兜底）', () => {
+    const it = normalizeSearchLive({
+      roomid: 88,
+      title: '<em>直播</em>间',
+      cover: '//i0.hdslb.com/live.jpg',
+      uname: '主播乙',
+      online: 9,
+      cate_name: '网游'
+    });
+    assert.strictEqual(it.kind, 'live');
+    assert.strictEqual(it.key, 'l:88');
+    assert.strictEqual(it.roomid, 88);
+    assert.strictEqual(it.title, '直播间');
+    assert.strictEqual(it.up, '主播乙');
+    assert.strictEqual(it.online, 9);
+    assert.strictEqual(it.cate, '网游');
+    assert.strictEqual(normalizeSearchLive({ cover: 'x' }), null); // 无 roomid
+    assert.strictEqual(normalizeSearchLive(null), null);
+  });
+  test('feed: searchBili(article) 全链（search_type=article + WBI 签名 + 解析）', async () => {
+    let seenUrl = '';
+    const body = JSON.stringify({
+      code: 0,
+      data: {
+        result: [{ id: 999, title: '专栏A', image_urls: ['//i0.hdslb.com/a.jpg'], author: 'up', view: 5, reply: 1 }],
+        numPages: 3,
+        numResults: 40
+      }
+    });
+    const c = createClient({
+      get: async (u) => {
+        seenUrl = u;
+        return { statusCode: 200, body: body };
+      }
+    });
+    const r = await searchBili(c, 'a'.repeat(32), '图文', 1, 'article');
+    assert.strictEqual(r.ok, true, r.message);
+    assert.ok(seenUrl.indexOf('/x/web-interface/wbi/search/type') > 0, seenUrl);
+    assert.ok(seenUrl.indexOf('search_type=article') > 0, seenUrl);
+    assert.ok(seenUrl.indexOf('w_rid=') > 0, seenUrl);
+    assert.strictEqual(r.items.length, 1);
+    assert.strictEqual(r.items[0].kind, 'article');
+    assert.strictEqual(r.items[0].id, 999);
+    assert.strictEqual(r.noMore, false);
+    assert.strictEqual(r.total, 40);
+    // 缺 id 的卡片被丢弃 → 全丢时返回 parse 失败（区分"无结果"与"没有更多"）
+    const c2 = createClient({
+      get: async () => ({ statusCode: 200, body: '{"code":0,"data":{"result":[{"title":"x"}],"numPages":1}}' })
+    });
+    const r2 = await searchBili(c2, 'a'.repeat(32), 'kw', 1, 'article');
+    assert.strictEqual(r2.ok, false);
+    assert.strictEqual(r2.stage, 'parse');
+  });
+  test('feed: searchBili 默认回落 video；search_type/参数防御', async () => {
+    let seenUrl = '';
+    const c = createClient({
+      get: async (u) => {
+        seenUrl = u;
+        return { statusCode: 200, body: JSON.stringify(fixture('search.json')) };
+      }
+    });
+    const r = await searchBili(c, 'a'.repeat(32), '测试', 1); // 未传 searchType
+    assert.strictEqual(r.ok, true, r.message);
+    assert.ok(seenUrl.indexOf('search_type=video') > 0, seenUrl);
+    assert.ok(r.items.length >= 5);
+    r.items.forEach((it) => assert.strictEqual(it.kind, 'video'));
+    // 未知类型 → 回落 video（不把非法值透传给接口）
+    let seen2 = '';
+    const c2 = createClient({
+      get: async (u) => {
+        seen2 = u;
+        return { statusCode: 200, body: JSON.stringify(fixture('search.json')) };
+      }
+    });
+    await searchBili(c2, 'a'.repeat(32), 'kw', 1, 'bogus');
+    assert.ok(seen2.indexOf('search_type=video') > 0, seen2);
+    // 参数防御
+    assert.strictEqual((await searchBili(c, 'short', 'x', 1, 'video')).ok, false);
+    assert.strictEqual((await searchBili(c, 'a'.repeat(32), '   ', 1, 'video')).ok, false);
+  });
+  test('feed: searchBili(live) 支持 result 为分组对象（live_room）', async () => {
+    // 直播检索 result 不是数组而是按子类型分组的对象（2026-10-04 探针实测）
+    let seenUrl = '';
+    const body = JSON.stringify({
+      code: 0,
+      data: {
+        result: { live_room: [{ roomid: 5, title: '房', cover: '//i0.hdslb.com/l.jpg', uname: 'u', online: 3 }] },
+        numPages: 1
+      }
+    });
+    const c = createClient({
+      get: async (u) => {
+        seenUrl = u;
+        return { statusCode: 200, body: body };
+      }
+    });
+    const r = await searchBili(c, 'a'.repeat(32), 'l', 1, 'live');
+    assert.strictEqual(r.ok, true, r.message);
+    assert.ok(seenUrl.indexOf('search_type=live') > 0, seenUrl);
+    assert.strictEqual(r.items.length, 1);
+    assert.strictEqual(r.items[0].kind, 'live');
+    assert.strictEqual(r.items[0].roomid, 5);
+    assert.strictEqual(r.noMore, true);
+  });
+
+  /* ---------------- 图文详情（专栏正文三形态解析） ---------------- */
+  test('article: decodeEntities 数字/命名实体', () => {
+    assert.strictEqual(decodeEntities('a&amp;b&#39;c&nbsp;d&hellip;'), 'a&b\'c d…');
+    assert.strictEqual(decodeEntities(null), '');
+    assert.strictEqual(decodeEntities(undefined), '');
+  });
+  test('article: htmlToBlocks 文本/图片混排 + 段落切块 + <br> 软换行 + script 剔除', () => {
+    // 块级标签结束 = 段落硬边界 → 每段独立成块（与 opus/ops 主路径一致；
+    // 若合并成单块，.art-p 的 lines:30 会截断长正文）
+    const blocks = htmlToBlocks('<p>第一段</p><p>第二段</p><img src="//i0.hdslb.com/a.jpg"><p>第三段</p>', 120);
+    assert.strictEqual(blocks.length, 4);
+    assert.strictEqual(blocks[0].t, 'text');
+    assert.strictEqual(blocks[0].text, '第一段');
+    assert.strictEqual(blocks[1].t, 'text');
+    assert.strictEqual(blocks[1].text, '第二段');
+    assert.strictEqual(blocks[2].t, 'img');
+    assert.strictEqual(blocks[2].src, 'https://i0.hdslb.com/a.jpg');
+    assert.strictEqual(blocks[2].dw, 436); // 正文列宽 ART_W
+    assert.ok(blocks[2].dh > 0);
+    assert.strictEqual(blocks[3].t, 'text');
+    assert.strictEqual(blocks[3].text, '第三段');
+    // <br> 为段内软换行 → 同一块内空格续接（不切块）
+    const soft = htmlToBlocks('<p>甲<br>乙</p>', 120);
+    assert.strictEqual(soft.length, 1);
+    assert.strictEqual(soft[0].text, '甲 乙');
+    assert.strictEqual(htmlToBlocks('<script>var a=1</script><style>i{}</style>', 120).length, 0);
+    assert.strictEqual(htmlToBlocks('', 120).length, 0);
+    assert.strictEqual(htmlToBlocks(null, 120).length, 0);
+  });
+  test('article: opusToBlocks 富文本段（text.nodes 拼接 + pic 按原始比例算高）', () => {
+    const opus = {
+      content: {
+        paragraphs: [
+          { para_type: 1, text: { nodes: [{ word: { words: '标题' } }, { word: { words: '正文' } }] } },
+          { para_type: 2, pic: { pics: [{ url: '//i0.hdslb.com/p.jpg', width: 800, height: 400 }] } },
+          { para_type: 1, text: { nodes: [{ word: { words: '   ' } }] } } // 空白段丢弃
+        ]
+      }
+    };
+    const b = opusToBlocks(opus);
+    assert.strictEqual(b.length, 2);
+    assert.strictEqual(b[0].t, 'text');
+    assert.strictEqual(b[0].text, '标题正文');
+    assert.strictEqual(b[1].t, 'img');
+    assert.strictEqual(b[1].src, 'https://i0.hdslb.com/p.jpg');
+    assert.strictEqual(b[1].dw, 436);
+    assert.strictEqual(b[1].dh, 218); // 436*400/800
+    assert.strictEqual(opusToBlocks(null).length, 0);
+    assert.strictEqual(opusToBlocks({}).length, 0);
+  });
+  test('article: opsToBlocks（type3 老版 Quill deltas：软换行合并 + 图块 + 卡片占位）', () => {
+    const b = opsToBlocks(
+      JSON.stringify({
+        ops: [
+          { insert: '第一段' },
+          { insert: '\n第二段' }, // 软换行 → 合并进上一文本块
+          { insert: { 'native-image': { url: '//i0.hdslb.com/n.png', width: 100, height: 100 } } },
+          { insert: { 'video-card': {} } }
+        ]
+      })
+    );
+    assert.strictEqual(b.length, 3);
+    assert.strictEqual(b[0].t, 'text');
+    assert.strictEqual(b[0].text, '第一段第二段');
+    assert.strictEqual(b[1].t, 'img');
+    assert.strictEqual(b[1].src, 'https://i0.hdslb.com/n.png');
+    assert.strictEqual(b[1].dh, 436); // 1:1 → 436 宽对应高
+    assert.strictEqual(b[2].t, 'text');
+    assert.strictEqual(b[2].text, '[视频卡片]');
+    assert.strictEqual(opsToBlocks('{bad json').length, 0);
+    assert.strictEqual(opsToBlocks('').length, 0);
+    assert.strictEqual(opsToBlocks(null).length, 0);
+  });
+  test('article: parseArticle 三形态优先级(opus>ops>html) + id/正文缺失语义', () => {
+    // opus 优先
+    const r1 = parseArticle({
+      ok: true,
+      data: {
+        id: 5,
+        title: 'T',
+        type: 3,
+        opus: { content: { paragraphs: [{ para_type: 1, text: { nodes: [{ word: { words: 'OPUS正文' } }] } }] } },
+        content: '{"ops":[{"insert":"OPS正文"}]}',
+        author: { name: 'A' },
+        stats: { view: 9, like: 2 },
+        words: 100
+      }
+    });
+    assert.strictEqual(r1.ok, true, r1.message);
+    assert.strictEqual(r1.article.aid, 5);
+    assert.strictEqual(r1.article.blocks[0].text, 'OPUS正文');
+    assert.strictEqual(r1.article.author, 'A');
+    assert.strictEqual(r1.article.read, 9);
+    assert.strictEqual(r1.article.like, 2);
+    assert.strictEqual(r1.article.words, 100);
+    // opus 为空 → type3 走 ops
+    const r2 = parseArticle({ ok: true, data: { id: 6, title: '', type: 3, content: '{"ops":[{"insert":"OPS"}]}' } });
+    assert.strictEqual(r2.article.blocks[0].text, 'OPS');
+    assert.strictEqual(r2.article.title, '未命名图文');
+    // type0 → HTML 兜底
+    const r3 = parseArticle({ ok: true, data: { id: 7, title: 'H', type: 0, content: '<p>HTML正文</p>' } });
+    assert.strictEqual(r3.article.blocks[0].text, 'HTML正文');
+    // 正文全空 → summary 兜底
+    const r4 = parseArticle({ ok: true, data: { id: 8, title: 's', summary: '摘要文本' } });
+    assert.strictEqual(r4.ok, true);
+    assert.strictEqual(r4.article.blocks[0].text, '摘要文本');
+    // 无 id → parse 失败；无正文且无 summary → parse 失败
+    assert.strictEqual(parseArticle({ ok: true, data: { title: 'x', content: '<p>y</p>' } }).ok, false);
+    assert.strictEqual(parseArticle({ ok: true, data: { id: 9, title: 'x' } }).ok, false);
+    // transport 失败透传 stage
+    const bad = parseArticle({ ok: false, stage: 'transport', message: 'net' });
+    assert.strictEqual(bad.ok, false);
+    assert.strictEqual(bad.stage, 'transport');
+    assert.strictEqual(parseArticle(null).ok, false);
+  });
+  test('article: fetchArticle 走 WBI 签名（id= + wts= + w_rid=）+ 参数防御', async () => {
+    let seenPath = '';
+    let seenQuery = '';
+    const fakeClient = {
+      getHeaders: () => ({ 'User-Agent': 'UA', Referer: 'R' }),
+      request: (path, query) => {
+        seenPath = path;
+        seenQuery = String(query);
+        return Promise.resolve({ ok: true, data: { id: 3, title: 'T', content: '<p>c</p>' } });
+      }
+    };
+    const r = await fetchArticle(fakeClient, 'a'.repeat(32), 3);
+    assert.strictEqual(r.ok, true, r.message);
+    assert.strictEqual(seenPath, '/x/article/view');
+    assert.ok(seenQuery.indexOf('id=3') >= 0, seenQuery);
+    assert.ok(seenQuery.indexOf('wts=') > 0, seenQuery);
+    assert.ok(seenQuery.indexOf('w_rid=') > 0, seenQuery);
+    assert.strictEqual(r.article.aid, 3);
+    // 参数防御：id 非法 / WBI 密钥非法 都不发请求
+    assert.strictEqual((await fetchArticle(fakeClient, 'a'.repeat(32), 0)).stage, 'param');
+    assert.strictEqual((await fetchArticle(fakeClient, 'a'.repeat(32), 'x')).stage, 'param');
+    assert.strictEqual((await fetchArticle(fakeClient, 'bad', 3)).stage, 'wbi');
+  });
   // （live_playinfo.json fixture 保留作技术留档：直播已从 UI 移除，720p 软解不实时）
 
   // ---------------- reply 评论（读/写） ----------------
@@ -881,6 +1177,36 @@ async function main() {
     assert.strictEqual(ok.likes, 3);
     assert.strictEqual(parseReplies({ ok: false, stage: 'transport', message: 'x' }).ok, false);
     assert.strictEqual(parseReplies(null).ok, false);
+  });
+  test('reply: replyType 契约（1=视频 12=专栏；17 旧值回落 12）', () => {
+    assert.strictEqual(replyType(1), 1);
+    assert.strictEqual(replyType(12), 12);
+    assert.strictEqual(replyType(17), 12); // 17 为旧文档值（实测 -404）→ 收敛到 12
+    assert.strictEqual(replyType(undefined), 1);
+    assert.strictEqual(replyType(0), 1);
+    assert.strictEqual(replyType('12'), 1); // 非数字一律按视频回落
+  });
+  test('reply: fetchReplies 把 type 透传到请求（专栏 12 / 缺省视频 1）', async () => {
+    let seenUrl = '';
+    const c = createClient({
+      get: async (u) => {
+        seenUrl = u;
+        return { statusCode: 200, body: JSON.stringify(fixture('reply.json')) };
+      }
+    });
+    const r = await fetchReplies(c, 123, 1, 12);
+    assert.strictEqual(r.ok, true, r.message);
+    assert.ok(seenUrl.indexOf('type=12') > 0, seenUrl);
+    assert.ok(seenUrl.indexOf('oid=123') > 0, seenUrl);
+    let seen2 = '';
+    const c2 = createClient({
+      get: async (u) => {
+        seen2 = u;
+        return { statusCode: 200, body: JSON.stringify(fixture('reply.json')) };
+      }
+    });
+    await fetchReplies(c2, 1, 1);
+    assert.ok(seen2.indexOf('type=1') > 0, seen2);
   });
   test('reply: addReply 参数防御 + 成功/失败链（csrf/form/postForm 注入）', async () => {
     const c = createClient({ post: async () => ({ statusCode: 200, body: '{"code":0,"data":{"rpid":555}}' }) });
