@@ -1229,7 +1229,11 @@ static void *video_thread(void *arg) {
             /* v2.2.5 首帧卡死保护（通用：起播与重启都适用）：spawn 后 15s 仍无首帧 = 链路劣化导致
              * ffmpeg 探流饿死（涓流不触发 rw_timeout）→ 判失败走失败路径重试（≤5 次），否则画面
              * 会永久冻结/永远停在"缓冲中"（真机实测过 66s+ 不恢复）。 */
-            if (s->frames == 0 && (now_seconds() - s->video_spawn_at) * 1000.0 > (double)AV_FIRST_FRAME_MAX_MS) {
+            /* 直播（duration_ms<=0）首帧上限放宽到 60s：外网打洞端口 TCP connect 实测要 5s+，
+             * 加上 HLS 探流 + 分片下载，15s 首帧上限必然超时 → 误触发断流重启 → -ss seek
+             * 历史位置 → HLS 直播窗口早无此分片 → 卡死循环。VOD 保持 15s。 */
+            long ffmax = (s->duration_ms <= 0) ? 60000 : AV_FIRST_FRAME_MAX_MS;
+            if (s->frames == 0 && (now_seconds() - s->video_spawn_at) * 1000.0 > (double)ffmax) {
                 s->resync_timeout = 1;
                 failed = 1;
                 break;
@@ -1399,7 +1403,7 @@ static void *video_thread(void *arg) {
     if (s->stop_flag) return NULL;
 
     if (failed && (s->ever_played || s->resync_timeout) && s->video_retries < 5 &&
-        s->audio_input[0] && s->audio_enabled && s->audio_alive &&
+        s->audio_input[0] && s->audio_enabled && s->audio_alive && s->duration_ms > 0 &&
         !(s->duration_ms > 0 && s->position_ms + 2000 >= s->start_ms + s->duration_ms)) {
         /* 视频流中途断流（CDN 断开/rw_timeout/进程被杀）≠ 播放结束（v1.9.3，修
          * "画面显示已播完但声音还在播"）。旧逻辑把任何视频进程退出都判 ENDED。

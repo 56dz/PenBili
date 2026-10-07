@@ -360,7 +360,7 @@ import {
   TV_POLL_URL,
   tvForm
 } from '../../services/bili/qrlogin.js';
-import { httpGet, cancelNativePosts } from '../../services/net.js';
+import { httpGet, httpGetTextNative, cancelNativePosts } from '../../services/net.js';
 import { fetchReplies, addReply, fetchSubReplies } from '../../services/bili/reply.js';
 import { encodeQr, rowRuns } from '../../services/bili/qrcode.js';
 import { saveSession } from '../../services/storage.js';
@@ -998,7 +998,11 @@ export default {
         this.liveTestText = withUi ? '未填写地址' : this.liveTestText;
         return { ok: false, message: '未配置服务器地址' };
       }
-      const r = await ensureLiveAddr((u, o) => httpGet(u, o), this.live, {});
+      // 外网入口 penbili.560726.best 是 CF 301 → penbili.560726.xyz:<动态端口>；
+      // jsapi.http 不跟随 301（/health 只拿到 301 的 HTML → 解析降级回入口域名 → 播放时
+      // ffmpeg 跟 301 又丢 query → 400）。必须走 native libcurl（CURLOPT_FOLLOWLOCATION=1）
+      // 才能拿到终点 host 回写 resolvedAddr。
+      const r = await ensureLiveAddr((u, o) => httpGetTextNative(u, o), this.live, {});
       if (!r.ok) {
         this.liveActiveAddr = '';
         this.liveNote = '地址不可用：' + (r.message || '解析失败');
@@ -1006,7 +1010,10 @@ export default {
         return r;
       }
       this.liveActiveAddr = r.addr;
-      if (r.changed) {
+      // 只在「解析出真实终点」时回写缓存；degraded（解析失败、用入口域名兜底）不回写——
+      // 否则会把入口域名（如 penbili.560726.best）当成有效缓存，下次探缓存"命中"入口域名，
+      // 播放时 ffmpeg 跟 301 又丢 query → 400（2026-10-07 外网真机踩到）。
+      if (r.changed && !r.degraded) {
         // 解析结果变了（外网端口重新打洞）→ 回写缓存
         this.live = normalizeLive(
           Object.assign({}, this.live, { resolvedAddr: r.addr, resolvedAt: Date.now() })

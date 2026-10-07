@@ -14,8 +14,11 @@
 import { httpGet, tryParseJson } from './net.js';
 import { normalizeLiveAddr, logWarn } from './storage.js';
 
-export const PROBE_MS = 2000;   // 缓存地址存活探测超时（用户指定 2s）
-export const RESOLVE_MS = 5000; // 入口地址解析超时
+// 超时说明：外网打洞端口（penbili.560726.xyz:<动态>）从外地网络的 TCP connect 实测要
+// 5s+（本地/内网 <0.1s），用户最初设的 2s 探测在内网成立、外网必然超时 → 会永久降级回入口域名。
+// 故缓存探测 8s、入口解析 15s，既覆盖慢连接，又不至于在端口真的失效时干等太久。
+export const PROBE_MS = 8000;   // 缓存地址存活探测超时
+export const RESOLVE_MS = 15000; // 入口地址解析超时
 export const HEALTH_PATH = '/health';
 
 export function buildHealthUrl(addr) {
