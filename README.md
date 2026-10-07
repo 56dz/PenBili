@@ -56,7 +56,54 @@
 
 设备画像、诊断日志、运行截图及本地环境信息不随此版本分发。更换设备或固件时应重新验证屏幕几何与解码能力。
 
-**直播需要一台转码服务器**（本仓库 `server/live_proxy.py`，v5 / HLS）：在笔端「我的 → 直播设置」填写其地址；未填写时点播直播会提示「未填写转码服务器地址，无法播放」。
+## 转码服务器（直播服务端）
+
+直播必须有一台**自建转码服务器**：词典笔既解不动 720p、也播不了 https 源，所以由服务端拉流转码后回传。
+服务端源码与完整文档在 **[`server/`](server/)**（`live_proxy.py` 单文件 + systemd 单元 + 依赖说明，
+发布包 `PenBili-server.zip` 与客户端 AMR 一同附在 Release 页）。
+
+### 服务端如何使用
+
+```bash
+# 1) 依赖：Python 3.7+（纯标准库，无需 pip install）+ 系统 ffmpeg（带 libx264）
+sudo apt install ffmpeg
+
+# 2) 启动（默认端口 2050）
+python3 server/live_proxy.py --port 2050
+# 常驻运行：把 server/penbili-live.service 放进 /etc/systemd/system/ 后
+#   sudo systemctl enable --now penbili-live
+
+# 3) 验证
+curl -s http://127.0.0.1:2050/health          # → {"ok":true,"version":"5.1",...}
+curl -si 'http://127.0.0.1:2050/live?room=<房间号>' | grep -i location   # 302 → m3u8 地址
+```
+
+笔端侧：「我的 → **直播设置**」填 `http://<服务器IP>:2050`（**只认 http**），点**测连**确认连通；
+未填写时点直播会提示「未填写转码服务器地址，无法播放」。人在外面时需自建一条 http 隧道——
+Cloudflare 这类强制 https 的 CDN 会 301 并**丢掉 query**，笔端吃不了。
+
+**接口**：`GET /health`（探测/负载/重定向解析）、`GET /live?room=&ck=&res=&bv=&trans=&buf=&seg=` →
+302 到 `/hls/<sid>/index.m3u8`、`GET /hls/<sid>/…`（播放列表与分片）。
+常用参数：`ck` 笔端 cookie（解锁 720p 源并隔离多用户）、`res` 输出高度（默认 254）、
+`bv` 码率（默认 700k）、`trans=0` 直通不转码、`buf` 服务端分片窗口（默认 6s，**只影响抗抖动余量、不影响起播**）。
+并发默认 6 路、空闲 25s 回收会话、同参数重入复用会话（重连秒开）。
+
+### 服务端实现思路
+
+- **为什么用 HLS 而不是长连接**：早期版本推一条 chunked FLV，两端强耦合（服务端要蓄水/剥头，
+  笔端要墙钟节流/丢音频）。v5 改为「1 秒分片 + 滑动窗口」的 HLS 后，**笔端用 ffmpeg 自带的
+  hls demuxer 当普通点播地址播**，点播代码零改动，断线重连也只是重读列表，天然容忍重启。
+- **会话模型**：`sid = sha1(room|ck|res|bv|trans|seg)[:12]` → 同参数复用同一会话（秒开）；
+  按 cookie 哈希隔离多用户、同 cookie 换房间旧会话让位；janitor 每 5s 回收 25s 无请求的会话；
+  ffmpeg 因源站断流/直链过期退出时自动重取新线路重开。
+- **转码参数全是真机结论**：`probesize` 必须 256KB（否则 1/3 概率探不到音频 → 整段无声）；
+  视频码率用 `-maxrate`+`-bufsize` VBV 锁上限（只给 `-b:v` 会超发 2 倍）；
+  音频**绝不加裸 `-maxrate`**（无 `-bufsize` 时 ffmpeg 静默丢整条音轨）；`preset veryfast` 非
+  `ultrafast`（防马赛克）；GOP=30 与 1s 分片对齐，每片恰好 1 个关键帧。
+- **输出高度默认 254**：笔端视频视口就是 452×254，**输出==视口时 sws_scale 走恒等快路径被跳过**，
+  真机吞吐 480p 只有 0.83x（必卡）、360p 1.03x（零余量）、**452×254 有 2.3~2.8x**。
+- **安全**：cookie 只保留可打印 ASCII、分片名白名单防路径穿越、上游只放行 B 站 CDN 域名防 SSRF；
+  服务端本身**无鉴权，请勿把端口直接暴露公网**，部署在内网或加密隧道后。
 
 ## 性能诊断记录
 

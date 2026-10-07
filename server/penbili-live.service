@@ -1,0 +1,33 @@
+# PenBili 转码服务器 systemd 单元（示例）
+#
+# 安装：
+#   1. 把本文件放到 /etc/systemd/system/penbili-live.service
+#   2. 按需修改下面的 User / WorkingDirectory / ExecStart 路径
+#   3. systemctl daemon-reload && systemctl enable --now penbili-live
+#   4. 查看状态与日志：
+#        systemctl status penbili-live
+#        journalctl -u penbili-live -f
+#
+# 说明：服务端日志同时写到 <服务端目录>/server.log（代码内 stderr 输出），
+#       走 systemd 时用 journalctl 看即可。
+
+[Unit]
+Description=PenBili live transcode server (HLS, v5)
+Documentation=https://github.com/56dz/PenBili
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 建议用普通用户运行；确有需要再改 root
+User=penbili
+Group=penbili
+WorkingDirectory=/opt/penbili/server
+ExecStart=/usr/bin/python3 /opt/penbili/server/live_proxy.py --host 0.0.0.0 --port 2050
+Restart=on-failure
+RestartSec=3
+# 并发会话上限可用命令行覆盖：--max-sessions 8
+# 会话分片缓存在 WorkingDirectory/hls_cache 下，重启后由 janitor 自动清理残留
+
+[Install]
+WantedBy=multi-user.target

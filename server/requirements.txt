@@ -1,0 +1,12 @@
+# PenBili 转码服务器依赖
+#
+# 本服务端 **只用 Python 标准库**（http.server / urllib / threading / subprocess），
+# 无需 pip install 任何第三方包。
+#
+# 真正的外部依赖只有系统级的 ffmpeg：
+#   Debian/Ubuntu : sudo apt install ffmpeg
+#   CentOS/RHEL   : sudo yum install ffmpeg   （或 RPM Fusion 源）
+#   macOS         : brew install ffmpeg
+# 要求 ffmpeg 编译带 libx264（发行版默认都带）。
+#
+# Python 版本：3.7+（用到 f-string 之外的语法很少；在 3.6/3.8/3.10 上均验证可跑）。
