@@ -28,7 +28,8 @@
         <div class="ctrl ctrl-main" @click="onTogglePlay">
           <text class="ctrl-text">{{ btnText }}</text>
         </div>
-        <div class="ctrl-row">
+        <!-- 直播不支持定位（时长未知、HLS 只有滑动窗口）→ 隐藏 ±20s -->
+        <div v-if="!play.session.live" class="ctrl-row">
           <div class="ctrl ctrl-half" @click="onSeek(-seekStepSec)">
             <text class="ctrl-text">{{ '-' + seekStepSec + 's' }}</text>
           </div>
@@ -102,6 +103,14 @@
               <text class="vmeta">{{ it.up }}{{ it.view ? ' · 阅读 ' + formatCount(it.view) : '' }}{{ it.reply ? ' · 评论 ' + it.reply : '' }}</text>
             </div>
           </div>
+          <!-- 直播：点击开播（经「我的 → 直播设置」里的转码服务器；未填地址 → 播放页提示） -->
+          <div v-else-if="it.kind === 'live'" :key="it.key" class="vrow" @click="onPlayItem(it)">
+            <image class="thumb" :src="it.cover" :width="112" :height="63"></image>
+            <div class="vinfo">
+              <text class="vtitle">{{ it.title }}</text>
+              <text class="vmeta">{{ it.up }}{{ it.online ? ' · 人气 ' + formatCount(it.online) : '' }}{{ it.cate ? ' · ' + it.cate : '' }}</text>
+            </div>
+          </div>
           </template>
           <!-- 与推荐/热门同款（刷新 | 加载更多）双按钮 -->
         <div v-if="searchItems.length" class="more-row">
@@ -113,7 +122,7 @@
           </div>
         </div>
         <div v-if="!searchItems.length && !loading" class="empty">
-          <text class="empty-text">{{ placeholderText || statusText || '输入关键词开始搜索' }}</text>
+          <text class="empty-text">{{ statusText || '输入关键词开始搜索' }}</text>
         </div>
       </scroller>
 
@@ -154,9 +163,33 @@
         <div v-if="!history.length" class="mine-row">
           <text class="mine-label">还没有播放记录</text>
         </div>
+        <div class="mine-secrow">
+          <text class="mine-sec">直播设置（转码服务器）</text>
+        </div>
+        <div class="mine-row" @click="onLiveAddrEdit">
+          <text class="mine-label">服务器地址</text>
+          <text class="mine-value">{{ live.addr || '未填写 · 点此输入' }}</text>
+        </div>
+        <div class="mine-row" @click="onLiveBufferCycle">
+          <text class="mine-label">起播缓冲</text>
+          <text class="mine-value">{{ live.bufMs }} ms</text>
+        </div>
+        <div class="mine-row" @click="onLiveQualityCycle">
+          <text class="mine-label">画质与转码</text>
+          <text class="mine-value">{{ live.res }}p · {{ live.bv }} · {{ live.trans ? '转码' : '直通' }}</text>
+        </div>
+        <div class="mine-row" @click="onLiveProbe">
+          <text class="mine-label">测连服务器</text>
+          <text class="mine-value">{{ liveTestText || '点此测试' }}</text>
+        </div>
+        <div class="mine-row" @click="onLiveCacheClear">
+          <text class="mine-label">解析缓存</text>
+          <text class="mine-value">{{ live.resolvedAddr || '空' }}</text>
+        </div>
+        <text v-if="liveNote" class="mine-notice">{{ liveNote }}</text>
         <div class="mine-row">
           <text class="mine-label">PenBili</text>
-          <text class="mine-value">v2.8.0 · {{ profile ? '已登录' : '匿名' }}</text>
+          <text class="mine-value">v2.9.0 · {{ profile ? '已登录' : '匿名' }}</text>
         </div>
       </scroller>
 
@@ -240,12 +273,14 @@
       <text class="info-up">{{ infoUp }}</text>
       <!-- 右栏按钮：评论区入口（容器 flex 居中，数字变长也不偏）。弹幕功能已于 v2.7.0 移除
            （drawtext×4 逐帧渲染占解码预算 ~20%，弱稿件软解跌破实时 → 卡顿，用户决策移除） -->
-      <div class="info-ctrl" @click="openComments">
+      <div v-if="!play.session.live" class="info-ctrl" @click="openComments">
         <text class="info-ctrl-text">评论区{{ replyCount ? ' · ' + replyCount : '' }}</text>
       </div>
+      <!-- 直播：无评论区（reply 无 oid）→ 显示播放态，不提供入口 -->
+      <text v-else class="info-live-tag">{{ play.state === 'playing' ? '直播中' : stateLabel }}</text>
       <div class="info-spacer"></div>
       <text class="info-state">{{ play.note }}</text>
-      <text class="info-hint">左侧：暂停/开始 · ±{{ seekStepSec }}s</text>
+      <text class="info-hint">{{ play.session.live ? '直播不支持定位/回看' : '左侧：暂停/开始 · ±' + seekStepSec + 's' }}</text>
     </div>
 
     <!-- 图文详情：中列正文滚动 + 右列信息（评论面板打开时两列收起；评论区与视频同族，专栏实测 type=12） -->
@@ -310,7 +345,8 @@ import {
 } from '../../services/feed.js';
 import { fetchArticle } from '../../services/bili/article.js';
 import { createClient, cookieFromSession, DEFAULT_UA, REFERER } from '../../services/bili/client.js';
-import { KEYS, getJson, setJson, loadSession, logWarn } from '../../services/storage.js';
+import { KEYS, getJson, setJson, loadSession, logWarn, loadLive, saveLive, normalizeLive, normalizeLiveAddr, LIVE_LIMITS } from '../../services/storage.js';
+import { ensureLiveAddr, probeAddr } from '../../services/live.js';
 import { loadHistory, saveHistory, pushHistory, formatHistoryTime } from '../../services/history.js';
 import {
   parseGenerate,
@@ -324,7 +360,7 @@ import {
   TV_POLL_URL,
   tvForm
 } from '../../services/bili/qrlogin.js';
-import { cancelNativePosts } from '../../services/net.js';
+import { httpGet, cancelNativePosts } from '../../services/net.js';
 import { fetchReplies, addReply, fetchSubReplies } from '../../services/bili/reply.js';
 import { encodeQr, rowRuns } from '../../services/bili/qrcode.js';
 import { saveSession } from '../../services/storage.js';
@@ -349,16 +385,13 @@ const TABS = [
 ];
 
 // 搜索三分栏（与 feed.js searchBili 的 search_type 对应）：
-//   video/article = 本版可用；live = 入口占位，只渲染按钮与空态提示，不发检索请求。
-//   下一版本接入直播时：删掉 PLACEHOLDER_TYPES.live 一项，即可复用 feed.js 的 search_type=live。
+//   video/article/live 三栏本版全部可用。live 走服务端转码（HLS 分片回传，见 server/live_proxy.py v5），
+//   地址取「我的 → 直播设置」；未填地址时点播会提示"未填写转码服务器地址，无法播放"。
 const SEARCH_TYPES_UI = [
   { id: 'video', label: '视频' },
   { id: 'article', label: '图文' },
   { id: 'live', label: '直播' }
 ];
-
-// 占位入口（未接入实现的类型）：切换时不发请求，结果区显示提示文案
-const PLACEHOLDER_TYPES = { live: '直播功能开发中，敬请期待' };
 
 // 二维码内容 = TV 变体 url（cookie 在 poll 响应 body 的 cookie_info；取证注释见 qrlogin.js）
 const QR_CELL = 4;
@@ -445,6 +478,11 @@ export default {
       buvidShort: '',
       seekStepSec: SEEK_STEP_MS / 1000,
       play: idlePlay(),
+      // 直播设置（转码服务器地址 / 起播缓冲 / 画质）+ 重定向解析缓存（服务端外网端口会变）
+      live: normalizeLive(null),
+      liveActiveAddr: '', // 本次会话实际使用的服务器地址（缓存探测或重解析的结果）
+      liveNote: '',       // 直播设置区状态说明
+      liveTestText: '',   // 测连结果
       // 登录 / 扫码
       mineView: 'info',
       profile: null,
@@ -470,10 +508,6 @@ export default {
     // 搜索活跃类型的条目视图（三分栏：视频/图文/直播各自缓存，切换零请求）
     searchItems() {
       return this.searchResults[this.searchType] || [];
-    },
-    // 占位类型（直播）的空态文案；已接入类型为空串
-    placeholderText() {
-      return PLACEHOLDER_TYPES[this.searchType] || '';
     },
     // 评论面板返回按钮文案（跟随所在模式）
     commentsBackLabel() {
@@ -564,7 +598,17 @@ export default {
         mediaReferer: REFERER,
         nowSec: () => Math.floor(Date.now() / 1000),
         log: logWarn,
-        cancelled: () => this.gen !== myGen
+        cancelled: () => this.gen !== myGen,
+        // 直播配置：地址优先用"本次会话已解析出来的"，其次缓存，最后入口地址。
+        // ck = 笔端登录 cookie（服务端用它拉 720p 源，并按 cookie 隔离多用户会话）。
+        live: {
+          addr: this.liveActiveAddr || this.live.resolvedAddr || this.live.addr,
+          bufMs: this.live.bufMs,
+          res: this.live.res,
+          bv: this.live.bv,
+          trans: this.live.trans,
+          ck: cookieFromSession(this.session)
+        }
       };
     },
     vmeta(it) {
@@ -586,6 +630,7 @@ export default {
     async loadLocal() {
       const h = await loadHistory();
       this.history = h.items;
+      this.live = await loadLive();
       const sess = await loadSession();
       this.session = sess;
       if (sess.buvid3) {
@@ -607,13 +652,24 @@ export default {
           }
         })();
       }
+      // 直播服务器地址：启动时**后台**探测缓存的解析结果（2s 内无响应 → 重新解析并回写缓存）。
+      // 不阻塞首屏；结果只影响直播播放，失败不打扰用户（进「我的」手动测连即可）。
+      if (this.live.addr || this.live.resolvedAddr) {
+        this.checkLiveAddr(false).catch(() => {});
+      }
       const at = await getJson(KEYS.autotest, null);
       if (at && (at === true || at.enabled === true)) {
         const soakSec = at && typeof at === 'object' ? Number(at.soak) || 0 : 0;
         // soakBv：把 soak 固定到指定稿件（跨轮可复现同一稿件 → 才能做换网/换版本的 A/B 对比）
         const soakBv = at && typeof at === 'object' && /^BV[0-9A-Za-z]{10}$/.test(at.soakBv || '') ? at.soakBv : '';
-        logWarn('[bili] autotest seeded → run' + (soakSec > 0 ? ' soak=' + soakSec + 's' : '') + (soakBv ? ' bv=' + soakBv : ''));
-        this.runAutotest(soakSec, soakBv); // 自检内部自带首屏加载（避免与这里并发双 load 竞态）
+        // liveOnly：只跑直播专项（跳过视频全流程），用于直播链路真机验证
+        const liveOnly = at && typeof at === 'object' && at.liveOnly === true;
+        const liveRoom = at && typeof at === 'object' ? Math.floor(Number(at.liveRoom) || 0) : 0;
+        logWarn('[bili] autotest seeded → ' + (liveOnly
+          ? 'liveOnly room=' + (liveRoom || '-')
+          : 'run' + (soakSec > 0 ? ' soak=' + soakSec + 's' : '') + (soakBv ? ' bv=' + soakBv : '')));
+        if (liveOnly) this.runLiveAutotest(liveRoom);
+        else this.runAutotest(soakSec, soakBv); // 自检内部自带首屏加载（避免与这里并发双 load 竞态）
       } else {
         await this.selectTab('rcmd'); // 首屏加载：此刻登录 Cookie 已就位 → 个性化推荐
       }
@@ -627,7 +683,7 @@ export default {
       this.tab = id;
       this.statusText = '';
       if (id === 'mine') return;
-      if (id === 'search' && (!this.keyword || PLACEHOLDER_TYPES[this.searchType])) return; // 空态/占位类型：不发请求
+      if (id === 'search' && !this.keyword) return; // 空态显示"输入关键词"，不发请求
       const list =
         id === 'rcmd' ? this.rcmdItems : id === 'hot' ? this.hotItems : id === 'search' ? this.searchItems : [];
       if (!list.length) await this.loadTab(id, myGen);
@@ -644,10 +700,6 @@ export default {
       try {
         if (id === 'search') {
           if (!this.keyword) return { ok: false, stage: 'param', message: '未输入关键词' };
-          // 占位类型（直播）不发检索请求（下一版本接入）
-          if (PLACEHOLDER_TYPES[this.searchType]) {
-            return { ok: false, stage: 'param', message: PLACEHOLDER_TYPES[this.searchType] };
-          }
           const mixin = await ensureMixin(this.makeCtx(this.gen));
           if (!mixin) return { ok: false, stage: 'wbi', message: 'WBI 密钥获取失败' };
           const r = await searchBili(this.client, mixin, this.keyword, 1, this.searchType);
@@ -804,7 +856,6 @@ export default {
     async loadMoreSearch() {
       const st = this.searchType;
       if (this.searchNoMoreMap[st] || !this.keyword) return;
-      if (PLACEHOLDER_TYPES[st]) return; // 占位类型（直播）：无翻页
       const myGen = ++this.gen;
       this.loading = true;
       this.statusText = '加载更多…';
@@ -844,8 +895,6 @@ export default {
       this.searchType = id;
       this.statusText = '';
       if (this.tab !== 'search') return;
-      // 占位类型（直播）：只切换视图，不发检索请求（下一版本接入转码播放链路）
-      if (PLACEHOLDER_TYPES[id]) return;
       if (this.keyword && !this.searchResults[id].length && !this.loading) {
         const myGen = ++this.gen;
         this.loadTab('search', myGen);
@@ -924,6 +973,109 @@ export default {
       this.tab = 'search';
     },
 
+    /* ---------- 直播设置 + 重定向解析缓存 ---------- */
+    // 解析/校验服务器地址：ensureLiveAddr 先探缓存地址（2s），失效则重走入口地址解析并回写缓存。
+    // withUi=true 时把结果写进「测连」文案（用户手动触发）；启动时传 false（后台静默）。
+    async checkLiveAddr(withUi) {
+      if (!this.live.addr && !this.live.resolvedAddr) {
+        this.liveNote = '未填写服务器地址 → 直播无法播放';
+        this.liveTestText = withUi ? '未填写地址' : this.liveTestText;
+        return { ok: false, message: '未配置服务器地址' };
+      }
+      const r = await ensureLiveAddr((u, o) => httpGet(u, o), this.live, {});
+      if (!r.ok) {
+        this.liveActiveAddr = '';
+        this.liveNote = '地址不可用：' + (r.message || '解析失败');
+        if (withUi) this.liveTestText = '连接失败';
+        return r;
+      }
+      this.liveActiveAddr = r.addr;
+      if (r.changed) {
+        // 解析结果变了（外网端口重新打洞）→ 回写缓存
+        this.live = normalizeLive(
+          Object.assign({}, this.live, { resolvedAddr: r.addr, resolvedAt: Date.now() })
+        );
+        saveLive(this.live);
+      }
+      const h = r.health || {};
+      const load = h.load || {};
+      const srcText = r.source === 'cache' ? '缓存命中' : r.source === 'resolved' ? '重新解析' : '入口兜底';
+      this.liveNote =
+        r.addr + '（' + srcText + '）' +
+        (h.version ? ' · 服务端 v' + h.version : '') +
+        (load.sessions != null ? ' · 会话 ' + load.sessions : '') +
+        (load.high ? ' · 负载高' : '');
+      if (withUi) this.liveTestText = r.degraded ? '可用（兜底）' : '连接正常';
+      logWarn('[live] addr=' + r.addr + ' source=' + r.source + ' changed=' + r.changed);
+      return r;
+    },
+    // 服务器地址（系统输入法输入；改地址即作废旧解析缓存）
+    async onLiveAddrEdit() {
+      const myGen = this.gen;
+      this.imBusy = true;
+      try {
+        const r = await input.open({ value: this.live.addr, placeholder: '如 http://192.168.5.224:2050', maxlength: 80 });
+        if (this.gen !== myGen) return;
+        if (r && r.error) {
+          this.liveTestText = '输入法不可用';
+          return;
+        }
+        if (!(r && r.confirmed)) return;
+        const addr = normalizeLiveAddr((r.text || '').trim());
+        this.live = normalizeLive(
+          Object.assign({}, this.live, { addr: addr, resolvedAddr: '', resolvedAt: 0 })
+        );
+        saveLive(this.live);
+        this.liveActiveAddr = '';
+        this.liveTestText = '';
+        this.liveNote = addr ? '已保存：' + addr : '已清空服务器地址';
+        logWarn('[live] addr saved len=' + addr.length);
+        if (addr) this.checkLiveAddr(true).catch(() => {});
+      } finally {
+        this.imBusy = false;
+      }
+    },
+    onLiveBufferCycle() {
+      const list = [2000, 3000, 4000, 6000, 8000, 12000];
+      const i = list.indexOf(this.live.bufMs);
+      const next = list[(i + 1) % list.length];
+      this.live = normalizeLive(Object.assign({}, this.live, { bufMs: next }));
+      saveLive(this.live);
+      this.liveNote = '起播缓冲 ' + next + ' ms —— 服务端 HLS 窗口随之变长：抗抖动更好、延迟略增';
+    },
+    // 画质档 × 转码开关循环：360p转码 → 480p转码 → 540p转码 → 480p直通 → 循环
+    onLiveQualityCycle() {
+      const seq = [
+        { res: 360, trans: 1 },
+        { res: 480, trans: 1 },
+        { res: 540, trans: 1 },
+        { res: 480, trans: 0 }
+      ];
+      let i = 0;
+      for (let k = 0; k < seq.length; k++) {
+        if (seq[k].res === this.live.res && seq[k].trans === this.live.trans) {
+          i = k;
+          break;
+        }
+      }
+      const n = seq[(i + 1) % seq.length];
+      this.live = normalizeLive(Object.assign({}, this.live, n));
+      saveLive(this.live);
+      this.liveNote = n.trans
+        ? '服务器转码 ' + n.res + 'p（笔端解码压力小，推荐）'
+        : '直通：服务端零转码（源超过笔端解码预算时会卡）';
+    },
+    async onLiveProbe() {
+      this.liveTestText = '测试中…';
+      await this.checkLiveAddr(true);
+    },
+    onLiveCacheClear() {
+      this.live = normalizeLive(Object.assign({}, this.live, { resolvedAddr: '', resolvedAt: 0 }));
+      saveLive(this.live);
+      this.liveActiveAddr = '';
+      this.liveNote = '已清空解析缓存；下次播放或测连会重新解析';
+    },
+
     /* ---------- 播放 ---------- */
     async onPlayItem(item) {
       if (!item) return;
@@ -943,7 +1095,10 @@ export default {
       this.play = {
         state: 'loading',
         session: {
-          bvid: item.bvid,
+          kind: item.kind === 'live' ? 'live' : 'video',
+          live: item.kind === 'live',
+          roomid: item.roomid || 0,
+          bvid: item.kind === 'live' ? 'live:' + (item.roomid || 0) : item.bvid,
           cid: item.cid || 0,
           title: item.title,
           up: item.up || '',
@@ -1586,6 +1741,39 @@ export default {
 
     /* ---------- 真机自检（storage 预置 bili_autotest 触发；
          全部复用按钮同一代码路径 —— 设备无触摸注入的替代取证） ---------- */
+    // 直播专项自检（种子 bili_autotest = {enabled:true, liveOnly:true, liveRoom:<id 可选>}）：
+    // 只跑直播链路 —— 解析服务器地址 → 直播栏搜索 → 播放 → 首帧断言 → 返回。
+    // 真机证据链：服务端 server.log 会出现 /live 请求与分片拉取（证明笔端 ffmpeg 在消费 HLS）。
+    async runLiveAutotest(room) {
+      const ensure = (cond, msg) => {
+        if (!cond) throw new Error(msg);
+      };
+      try {
+        logWarn('[bili] LIVE AUTOTEST start' + (room ? ' room=' + room : ' (搜首个直播间)'));
+        await this.checkLiveAddr(true);
+        const addr = this.liveActiveAddr || this.live.resolvedAddr || this.live.addr;
+        ensure(!!addr, '直播服务器地址未配置');
+        logWarn('[bili] LIVE addr=' + addr);
+        this.keyword = '游戏';
+        this.searchType = 'live';
+        await this.selectTab('search');
+        ensure(this.searchItems.length > 0, '直播搜索结果为空: ' + this.statusText);
+        const item = room ? { kind: 'live', roomid: room, title: 'LIVE ' + room } : this.searchItems[0];
+        logWarn('[bili] LIVE open room=' + item.roomid + ' title=' + (item.title || ''));
+        await this.onPlayItem(item);
+        ensure(this.play.state === 'playing', '直播起播失败: ' + this.play.note);
+        ensure(this.play.session.live === true, '会话未标记为 live');
+        const w = await this.waitForFrames(45000);
+        ensure(w.st.ok && w.st.frames > 0, '45s 内无帧: ' + (w.st && (w.st.message || w.st.state)));
+        logWarn('[bili] LIVE AUTOTEST PASS first frame ' + w.ms + 'ms frames=' + w.st.frames + ' pos=' + w.st.positionMs);
+        // 取证窗口：停在播放态 15s，便于外部 adb dump /dev/fb0 抓画面（自检本身不改画面）
+        await this.sleep(15000);
+        logWarn('[bili] LIVE AUTOTEST end, back to list');
+        await this.onBack();
+      } catch (e) {
+        logWarn('[bili] LIVE AUTOTEST FAIL: ' + ((e && e.message) || e));
+      }
+    },
     async runAutotest(soakSec, soakBv) {
       const ensure = (cond, msg) => {
         if (!cond) throw new Error(msg);

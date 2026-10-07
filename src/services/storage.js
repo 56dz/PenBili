@@ -13,11 +13,14 @@ export const KEYS = {
   // 播放历史（给「我的」页；schema 见 history.js）
   history: 'bili_history',
   // 自检开关（tools/seed_settings.js 预置，真机自动化用）
-  autotest: 'bili_autotest'
+  autotest: 'bili_autotest',
+  // 直播设置 + 重定向解析缓存（schema 见下）
+  live: 'bvp_live'
 };
 
 export const SESSION_SCHEMA_VERSION = 2;
 export const SETTINGS_SCHEMA_VERSION = 1;
+export const LIVE_SCHEMA_VERSION = 1;
 
 function getSetPair(key) {
   const f = typeof $falcon !== 'undefined' ? $falcon : null;
@@ -206,4 +209,61 @@ export function normalizeSettings(raw) {
 
 export async function loadSettings() {
   return normalizeSettings(await getJson(KEYS.settings, null));
+}
+
+// ---- 直播设置 + 重定向解析缓存（LIVE_SCHEMA_VERSION 见文件头）----
+//   addr         用户填的「入口地址」（可以是固定域名，如 http://penbili.560726.best）
+//   resolvedAddr 重定向解析结果（如 http://penbili.560726.xyz:1728）。外网端口每次打洞都会变，
+//                所以只把它当缓存：app 启动时探测它，2s 无响应即重新走入口地址解析（见 services/live.js）
+//   bufMs        笔端想握的缓冲时长（服务端据此定 HLS 播放列表窗口长度）
+//   res/bv/trans 画质高度 / 视频码率 / 是否转码
+export const LIVE_LIMITS = {
+  bufMinMs: 2000,
+  bufMaxMs: 20000,
+  bufDefaultMs: 6000,
+  RES: [360, 480, 540]
+};
+
+// 地址归一：补 scheme、去尾斜杠（用户常直接填 "192.168.5.224:2050"）
+export function normalizeLiveAddr(v) {
+  let s = typeof v === 'string' ? v.trim() : '';
+  if (!s) return '';
+  if (!/^https?:\/\//i.test(s)) s = 'http://' + s;
+  return s.replace(/\/+$/, '');
+}
+
+export function normalizeLive(raw) {
+  const empty = {
+    version: LIVE_SCHEMA_VERSION,
+    addr: '',
+    bufMs: LIVE_LIMITS.bufDefaultMs,
+    res: 480,
+    bv: '700k',
+    trans: 1,
+    resolvedAddr: '',
+    resolvedAt: 0
+  };
+  if (!raw || typeof raw !== 'object') return empty;
+  if (raw.version !== LIVE_SCHEMA_VERSION) return empty;
+  const buf = Math.floor(Number(raw.bufMs) || LIVE_LIMITS.bufDefaultMs);
+  const res = Number(raw.res);
+  const bvRaw = typeof raw.bv === 'string' ? raw.bv.trim().toLowerCase() : '';
+  return {
+    version: LIVE_SCHEMA_VERSION,
+    addr: normalizeLiveAddr(raw.addr),
+    bufMs: Math.max(LIVE_LIMITS.bufMinMs, Math.min(LIVE_LIMITS.bufMaxMs, buf)),
+    res: LIVE_LIMITS.RES.indexOf(res) >= 0 ? res : 480,
+    bv: /^\d+[km]?$/.test(bvRaw) ? bvRaw : '700k',
+    trans: raw.trans === 0 ? 0 : 1,
+    resolvedAddr: normalizeLiveAddr(raw.resolvedAddr),
+    resolvedAt: Number(raw.resolvedAt) || 0
+  };
+}
+
+export async function loadLive() {
+  return normalizeLive(await getJson(KEYS.live, null));
+}
+
+export function saveLive(live) {
+  return setJson(KEYS.live, normalizeLive(live));
 }

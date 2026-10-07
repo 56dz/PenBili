@@ -93,6 +93,10 @@ async function main() {
   const { normalizeStoredValue, normalizeSession, normalizeSettings, DEFAULT_TARGET } = await import(
     '../src/services/storage.js'
   );
+  const { normalizeLive, normalizeLiveAddr, LIVE_LIMITS } = await import('../src/services/storage.js');
+  const { ensureLiveAddr, probeAddr, parseHealth, buildHealthUrl, PROBE_MS } = await import(
+    '../src/services/live.js'
+  );
   const feedMod = await import('../src/services/feed.js');
   const {
     normalizeVideo,
@@ -119,6 +123,9 @@ async function main() {
   const {
     openVideo,
     resolveVideoUrl,
+    resolveLiveUrl,
+    buildLiveUrl,
+    LIVE_FPS,
     togglePlay,
     seekBy,
     readStatus,
@@ -1141,6 +1148,119 @@ async function main() {
     assert.strictEqual((await fetchArticle(fakeClient, 'bad', 3)).stage, 'wbi');
   });
   // （live_playinfo.json fixture 保留作技术留档：直播已从 UI 移除，720p 软解不实时）
+
+  /* ---------------- 直播：服务器地址 / 重定向缓存 / HLS 播放地址 ---------------- */
+  // 服务端 v5 以 HLS 分片回传（见 server/live_proxy.py）；客户端只把 /live?... 当点播地址。
+  test('live: normalizeLiveAddr 补 scheme、去尾斜杠、空值', () => {
+    assert.strictEqual(normalizeLiveAddr('192.168.5.224:2050'), 'http://192.168.5.224:2050');
+    assert.strictEqual(normalizeLiveAddr('http://penbili.560726.best/'), 'http://penbili.560726.best');
+    assert.strictEqual(normalizeLiveAddr('  https://a.b:1//  '), 'https://a.b:1');
+    assert.strictEqual(normalizeLiveAddr(''), '');
+    assert.strictEqual(normalizeLiveAddr(null), '');
+  });
+  test('live: normalizeLive schema（缺省 / 越界钳制 / 版本不符丢弃）', () => {
+    const d = normalizeLive(null);
+    assert.strictEqual(d.addr, '');
+    assert.strictEqual(d.bufMs, LIVE_LIMITS.bufDefaultMs);
+    assert.strictEqual(d.res, 480);
+    assert.strictEqual(d.trans, 1);
+    assert.strictEqual(d.resolvedAddr, '');
+    const c = normalizeLive({ version: 1, addr: '1.2.3.4:5', bufMs: 99999, res: 999, bv: '2M', trans: 0, resolvedAddr: 'x.y:9' });
+    assert.strictEqual(c.addr, 'http://1.2.3.4:5');
+    assert.strictEqual(c.bufMs, LIVE_LIMITS.bufMaxMs);
+    assert.strictEqual(c.res, 480);
+    assert.strictEqual(c.bv, '2m');
+    assert.strictEqual(c.trans, 0);
+    assert.strictEqual(c.resolvedAddr, 'http://x.y:9');
+    assert.strictEqual(normalizeLive({ version: 1, bufMs: 10 }).bufMs, LIVE_LIMITS.bufMinMs);
+    assert.strictEqual(normalizeLive({ version: 99, addr: 'z' }).addr, '');
+  });
+  test('live: buildLiveUrl 参数构造与钳制（cookie 必须 URL 编码）', () => {
+    assert.strictEqual(buildLiveUrl('', 1, {}), '');
+    assert.strictEqual(buildLiveUrl('http://a:1', 0, {}), '');
+    const u = buildLiveUrl('http://a:1/', 88, { bufMs: 4000, res: 540, bv: '900k', trans: 1, ck: 'SESSDATA=x%2Cy; bili_jct=z' });
+    assert.strictEqual(u.indexOf('http://a:1/live?'), 0, u);
+    assert.ok(u.indexOf('room=88') > 0, u);
+    assert.ok(u.indexOf('buf=4000') > 0, u);
+    assert.ok(u.indexOf('res=540') > 0, u);
+    assert.ok(u.indexOf('bv=900k') > 0, u);
+    assert.ok(u.indexOf('trans=1') > 0, u);
+    assert.ok(u.indexOf('ck=SESSDATA%3Dx%252Cy%3B%20bili_jct%3Dz') > 0, u);
+    const u2 = buildLiveUrl('http://a:1', 5, { bufMs: 999999, res: 111, bv: 'zzz', trans: 0 });
+    assert.ok(u2.indexOf('buf=20000') > 0, u2);
+    assert.ok(u2.indexOf('res=480') > 0, u2);
+    assert.ok(u2.indexOf('bv=700k') > 0, u2);
+    assert.ok(u2.indexOf('trans=0') > 0, u2);
+  });
+  test('live: resolveLiveUrl —— 未配地址→liveaddr；正常→单输入+durationMs=0', () => {
+    const bad = resolveLiveUrl({ live: {} }, { kind: 'live', roomid: 9 });
+    assert.strictEqual(bad.ok, false);
+    assert.strictEqual(bad.stage, 'liveaddr');
+    assert.ok(describePlayError(bad).indexOf('无法播放') > 0, describePlayError(bad));
+    const r = resolveLiveUrl(
+      { live: { addr: 'http://s:2050', bufMs: 3000, res: 480, bv: '700k', trans: 1 } },
+      { kind: 'live', roomid: 9, title: 'T' }
+    );
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.live, true);
+    assert.strictEqual(r.audioUrl, '');
+    assert.strictEqual(r.durationMs, 0);
+    assert.strictEqual(r.aid, 0);
+    assert.strictEqual(r.fps, LIVE_FPS);
+    assert.strictEqual(r.roomid, 9);
+    assert.ok(r.url.indexOf('room=9') > 0, r.url);
+    // kind=live 会绕过 bvid 校验（直播本来就没有 bvid）
+    assert.strictEqual(resolveLiveUrl({ live: { addr: 'http://s' } }, { kind: 'live', roomid: 0 }).stage, 'param');
+  });
+  test('live: parseHealth 解析 host（=301 链终点的权威来源）', () => {
+    const h = parseHealth('{"ok":true,"version":"5.0","host":"penbili.560726.xyz:1728","lan":["http://192.168.5.224:2050"],"load":{"sessions":2,"load1":0.6,"high":false}}');
+    assert.strictEqual(h.ok, true);
+    assert.strictEqual(h.host, 'penbili.560726.xyz:1728');
+    assert.strictEqual(h.addr, 'http://penbili.560726.xyz:1728');
+    assert.strictEqual(h.version, '5.0');
+    assert.strictEqual(h.load.sessions, 2);
+    assert.strictEqual(h.lan.length, 1);
+    assert.strictEqual(parseHealth('not json'), null);
+    assert.strictEqual(parseHealth('{"ok":false}'), null);
+    assert.strictEqual(parseHealth(''), null);
+    assert.strictEqual(buildHealthUrl('http://a:1/'), 'http://a:1/health');
+    assert.strictEqual(buildHealthUrl(''), '');
+  });
+  test('live: ensureLiveAddr —— 缓存命中 / 失效重解析 / 全失败兜底 / 未配置', async () => {
+    const mk = (map) => async (url) => {
+      if (!map[url]) throw new Error('NET_FAIL ' + url);
+      return { statusCode: 200, body: JSON.stringify(map[url]) };
+    };
+    assert.strictEqual((await ensureLiveAddr(mk({}), normalizeLive(null))).ok, false);
+    // ① 缓存活着 → 直接用缓存（不再碰入口）
+    const r1 = await ensureLiveAddr(mk({ 'http://real:7/health': { ok: true, host: 'real:7' } }),
+      { addr: 'http://entry', resolvedAddr: 'http://real:7' });
+    assert.strictEqual(r1.ok, true);
+    assert.strictEqual(r1.source, 'cache');
+    assert.strictEqual(r1.addr, 'http://real:7');
+    assert.strictEqual(r1.changed, false);
+    // ② 缓存死了 + 入口可解析 → 重解析（changed=true，调用方回写缓存）
+    const r2 = await ensureLiveAddr(mk({ 'http://entry/health': { ok: true, host: 'real:8' } }),
+      { addr: 'http://entry', resolvedAddr: 'http://real:7' });
+    assert.strictEqual(r2.source, 'resolved');
+    assert.strictEqual(r2.addr, 'http://real:8');
+    assert.strictEqual(r2.changed, true);
+    assert.strictEqual(r2.stale, true);
+    // ③ 全失败 → 兜底用入口地址（播放时再暴露错误）
+    const r3 = await ensureLiveAddr(mk({}), { addr: 'http://entry', resolvedAddr: 'http://real:7' });
+    assert.strictEqual(r3.ok, true);
+    assert.strictEqual(r3.source, 'entry');
+    assert.strictEqual(r3.addr, 'http://entry');
+    assert.strictEqual(r3.degraded, true);
+    // ④ 只有入口（无缓存）→ 解析一次；缓存为空 → changed=true（表示"应回写缓存"）
+    const r4 = await ensureLiveAddr(mk({ 'http://entry/health': { ok: true, host: 'entry' } }),
+      { addr: 'http://entry', resolvedAddr: '' });
+    assert.strictEqual(r4.source, 'resolved');
+    assert.strictEqual(r4.addr, 'http://entry');
+    assert.strictEqual(r4.changed, true);
+    // 探测失败不抛（返回 null）
+    assert.strictEqual(await probeAddr(async () => { throw new Error('x'); }, 'http://x', PROBE_MS), null);
+  });
 
   // ---------------- reply 评论（读/写） ----------------
   test('reply: fixture 全链读取（解析/分页/请求形态）', async () => {
