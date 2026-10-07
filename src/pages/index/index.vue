@@ -346,7 +346,7 @@ import {
 import { fetchArticle } from '../../services/bili/article.js';
 import { createClient, cookieFromSession, DEFAULT_UA, REFERER } from '../../services/bili/client.js';
 import { KEYS, getJson, setJson, loadSession, logWarn, loadLive, saveLive, normalizeLive, normalizeLiveAddr, LIVE_LIMITS } from '../../services/storage.js';
-import { ensureLiveAddr, probeAddr } from '../../services/live.js';
+import { ensureLiveAddr } from '../../services/live.js';
 import { loadHistory, saveHistory, pushHistory, formatHistoryTime } from '../../services/history.js';
 import {
   parseGenerate,
@@ -998,7 +998,7 @@ export default {
         this.liveTestText = withUi ? '未填写地址' : this.liveTestText;
         return { ok: false, message: '未配置服务器地址' };
       }
-      // 外网入口 penbili.560726.best 是 CF 301 → penbili.560726.xyz:<动态端口>；
+      // 外网入口 live.example.com 是 CF 301 → tunnel.example.net:<动态端口>；
       // jsapi.http 不跟随 301（/health 只拿到 301 的 HTML → 解析降级回入口域名 → 播放时
       // ffmpeg 跟 301 又丢 query → 400）。必须走 native libcurl（CURLOPT_FOLLOWLOCATION=1）
       // 才能拿到终点 host 回写 resolvedAddr。
@@ -1011,7 +1011,7 @@ export default {
       }
       this.liveActiveAddr = r.addr;
       // 只在「解析出真实终点」时回写缓存；degraded（解析失败、用入口域名兜底）不回写——
-      // 否则会把入口域名（如 penbili.560726.best）当成有效缓存，下次探缓存"命中"入口域名，
+      // 否则会把入口域名（如 live.example.com）当成有效缓存，下次探缓存"命中"入口域名，
       // 播放时 ffmpeg 跟 301 又丢 query → 400（2026-10-07 外网真机踩到）。
       if (r.changed && !r.degraded) {
         // 解析结果变了（外网端口重新打洞）→ 回写缓存
@@ -1037,7 +1037,7 @@ export default {
       const myGen = this.gen;
       this.imBusy = true;
       try {
-        const r = await input.open({ value: this.live.addr, placeholder: '如 http://192.168.5.224:2050', maxlength: 80 });
+        const r = await input.open({ value: this.live.addr, placeholder: '如 http://192.168.1.100:2050', maxlength: 80 });
         if (this.gen !== myGen) return;
         if (r && r.error) {
           this.liveTestText = '输入法不可用';

@@ -1,7 +1,7 @@
 // 直播服务器地址解析 + 重定向缓存
 //
-// 背景：外网入口是固定域名（如 http://penbili.560726.best），但它 302 到
-// penbili.560726.xyz:<动态端口>——**端口每次打洞都会变**；而笔端播放地址必须能直连
+// 背景：外网入口是固定域名（如 http://live.example.com），但它 302 到
+// tunnel.example.net:<动态端口>——**端口每次打洞都会变**；而笔端播放地址必须能直连
 // （且只能是 http://，笔端 TLS 栈不可用）。
 // 策略（用户指定）：把「解析结果」缓存进 storage（live.resolvedAddr）；
 //   app 启动时探测这个缓存地址，**2s 内无响应就重新走入口地址解析并更新缓存**。
@@ -14,7 +14,7 @@
 import { httpGet, tryParseJson } from './net.js';
 import { normalizeLiveAddr, logWarn } from './storage.js';
 
-// 超时说明：外网打洞端口（penbili.560726.xyz:<动态>）从外地网络的 TCP connect 实测要
+// 超时说明：外网打洞端口（tunnel.example.net:<动态>）从外地网络的 TCP connect 实测要
 // 5s+（本地/内网 <0.1s），用户最初设的 2s 探测在内网成立、外网必然超时 → 会永久降级回入口域名。
 // 故缓存探测 8s、入口解析 15s，既覆盖慢连接，又不至于在端口真的失效时干等太久。
 export const PROBE_MS = 8000;   // 缓存地址存活探测超时
@@ -34,7 +34,7 @@ export function parseHealth(text) {
   return {
     ok: true,
     host: host,
-    // host 形如 "penbili.560726.xyz:1728"（无 scheme）→ 统一补 http://
+    // host 形如 "tunnel.example.net:8080"（无 scheme）→ 统一补 http://
     addr: host ? normalizeLiveAddr(host) : '',
     lan: Array.isArray(j.lan) ? j.lan.filter((x) => typeof x === 'string') : [],
     version: typeof j.version === 'string' ? j.version : '',

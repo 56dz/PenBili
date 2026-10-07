@@ -212,8 +212,8 @@ export async function loadSettings() {
 }
 
 // ---- 直播设置 + 重定向解析缓存（LIVE_SCHEMA_VERSION 见文件头）----
-//   addr         用户填的「入口地址」（可以是固定域名，如 http://penbili.560726.best）
-//   resolvedAddr 重定向解析结果（如 http://penbili.560726.xyz:1728）。外网端口每次打洞都会变，
+//   addr         用户填的「入口地址」（可以是固定域名，如 http://live.example.com）
+//   resolvedAddr 重定向解析结果（如 http://tunnel.example.net:8080）。外网端口每次打洞都会变，
 //                所以只把它当缓存：app 启动时探测它，2s 无响应即重新走入口地址解析（见 services/live.js）
 //   bufMs        笔端想握的缓冲时长（服务端据此定 HLS 播放列表窗口长度）
 //   res/bv/trans 画质高度 / 视频码率 / 是否转码
@@ -230,7 +230,7 @@ export const LIVE_LIMITS = {
   resDefault: 254
 };
 
-// 地址归一：补 scheme、去尾斜杠（用户常直接填 "192.168.5.224:2050"）
+// 地址归一：补 scheme、去尾斜杠（用户常直接填 "192.168.1.100:2050"）
 export function normalizeLiveAddr(v) {
   let s = typeof v === 'string' ? v.trim() : '';
   if (!s) return '';

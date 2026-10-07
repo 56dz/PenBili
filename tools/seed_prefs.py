@@ -6,8 +6,8 @@
 
 用法：
   python tools/seed_prefs.py --show
-  python tools/seed_prefs.py --set 'bili_autotest={"enabled":true,"liveOnly":true,"liveRoom":32245703}'
-  python tools/seed_prefs.py --set 'bvp_live={"version":1,"addr":"http://192.168.5.224:2050"}'
+  python tools/seed_prefs.py --set 'bili_autotest={"enabled":true,"liveOnly":true,"liveRoom":<房间号>}'
+  python tools/seed_prefs.py --set 'bvp_live={"version":1,"addr":"http://192.168.1.100:2050"}'
   python tools/seed_prefs.py --delete bili_autotest
   # 改完必须杀掉小程序再启动（存活实例不会重挂载）：
   #   adb shell "kill -9 $(pidof miniapp)" ; adb shell miniapp_cli install /tmp/x.amr ; adb shell miniapp_cli start <appid> --index

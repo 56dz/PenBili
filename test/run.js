@@ -1223,8 +1223,8 @@ async function main() {
   /* ---------------- 直播：服务器地址 / 重定向缓存 / HLS 播放地址 ---------------- */
   // 服务端 v5 以 HLS 分片回传（见 server/live_proxy.py）；客户端只把 /live?... 当点播地址。
   test('live: normalizeLiveAddr 补 scheme、去尾斜杠、空值', () => {
-    assert.strictEqual(normalizeLiveAddr('192.168.5.224:2050'), 'http://192.168.5.224:2050');
-    assert.strictEqual(normalizeLiveAddr('http://penbili.560726.best/'), 'http://penbili.560726.best');
+    assert.strictEqual(normalizeLiveAddr('192.168.1.100:2050'), 'http://192.168.1.100:2050');
+    assert.strictEqual(normalizeLiveAddr('http://live.example.com/'), 'http://live.example.com');
     assert.strictEqual(normalizeLiveAddr('  https://a.b:1//  '), 'https://a.b:1');
     assert.strictEqual(normalizeLiveAddr(''), '');
     assert.strictEqual(normalizeLiveAddr(null), '');
@@ -1290,10 +1290,10 @@ async function main() {
     assert.strictEqual(resolveLiveUrl({ live: { addr: 'http://s' } }, { kind: 'live', roomid: 0 }).stage, 'param');
   });
   test('live: parseHealth 解析 host（=301 链终点的权威来源）', () => {
-    const h = parseHealth('{"ok":true,"version":"5.0","host":"penbili.560726.xyz:1728","lan":["http://192.168.5.224:2050"],"load":{"sessions":2,"load1":0.6,"high":false}}');
+    const h = parseHealth('{"ok":true,"version":"5.0","host":"tunnel.example.net:8080","lan":["http://192.168.1.100:2050"],"load":{"sessions":2,"load1":0.6,"high":false}}');
     assert.strictEqual(h.ok, true);
-    assert.strictEqual(h.host, 'penbili.560726.xyz:1728');
-    assert.strictEqual(h.addr, 'http://penbili.560726.xyz:1728');
+    assert.strictEqual(h.host, 'tunnel.example.net:8080');
+    assert.strictEqual(h.addr, 'http://tunnel.example.net:8080');
     assert.strictEqual(h.version, '5.0');
     assert.strictEqual(h.load.sessions, 2);
     assert.strictEqual(h.lan.length, 1);
