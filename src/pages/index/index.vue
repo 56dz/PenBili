@@ -171,8 +171,8 @@
           <text class="mine-value">{{ live.addr || '未填写 · 点此输入' }}</text>
         </div>
         <div class="mine-row" @click="onLiveBufferCycle">
-          <text class="mine-label">起播缓冲</text>
-          <text class="mine-value">{{ live.bufMs }} ms</text>
+          <text class="mine-label">服务端分片窗口</text>
+          <text class="mine-value">{{ (live.bufMs / 1000).toFixed(0) }} s</text>
         </div>
         <div class="mine-row" @click="onLiveQualityCycle">
           <text class="mine-label">直播画质</text>
@@ -189,7 +189,7 @@
         <text v-if="liveNote" class="mine-notice">{{ liveNote }}</text>
         <div class="mine-row">
           <text class="mine-label">PenBili</text>
-          <text class="mine-value">v2.9.2 · {{ profile ? '已登录' : '匿名' }}</text>
+          <text class="mine-value">v2.9.3 · {{ profile ? '已登录' : '匿名' }}</text>
         </div>
       </scroller>
 
@@ -672,6 +672,8 @@ export default {
         const wbiStress = at && typeof at === 'object' ? Math.floor(Number(at.wbiStress) || 0) : 0;
         // liveHold：直播自检的取证窗口（ms，默认 15000）——诊断时拉长便于外部干预
         const liveHold = at && typeof at === 'object' ? Math.floor(Number(at.liveHold) || 0) : 0;
+        // pollEvery：巡检打点间隔秒数（默认 5）——诊断时设 1 便于看时序
+        this._pollEvery = at && typeof at === 'object' ? Math.max(1, Math.floor(Number(at.pollEvery) || 5)) : 5;
         logWarn('[bili] autotest seeded → ' + (liveOnly
           ? 'liveOnly room=' + (liveRoom || '-')
           : wbiStress > 0 ? 'wbiStress n=' + wbiStress
@@ -1055,7 +1057,10 @@ export default {
       const next = list[(i + 1) % list.length];
       this.live = normalizeLive(Object.assign({}, this.live, { bufMs: next }));
       saveLive(this.live);
-      this.liveNote = '起播缓冲 ' + next + ' ms —— 服务端 HLS 窗口随之变长：抗抖动更好、延迟略增';
+      this.liveNote =
+        '服务端保留 ' + Math.round(next / 1000) + 's 分片：只影响笔端落后时还能取到多旧的分片（抗抖动余量）；' +
+        '不影响起播时间（起播只由「服务端出首个分片 + 笔端探流」决定）。';
+      logWarn('[bili] live window -> ' + next + 'ms');
     },
     // 画质档循环：匹配屏幕(254) → 标清(360) → 高清(480) → 循环
     // 顺序即推荐度：254 是唯一"清晰 + 流畅"档（服务端输出 == 视口 452x254，笔端缩放被跳过）；
@@ -1204,7 +1209,7 @@ export default {
         // v2.1.0 追加 rs(强制重同步次数)/RESYNC(正在强制重同步)
         // 巡检仍每秒执行；常规详细状态每 5 秒输出一次，异常事件（resync/audioDead/gate）即时单独打点。
         this._pollN = (this._pollN || 0) + 1;
-        if (this._pollN % 5 === 0) {
+        if (this._pollN % (this._pollEvery || 5) === 0) {
           logWarn(
             '[bili] poll tick frames=' + st.frames + ' pos=' + st.positionMs +
             ' ab=' + st.audioBytes + ' ad=' + st.audioDropped +
@@ -1212,6 +1217,7 @@ export default {
             ' stall=' + (st.videoStallMs || 0) + (st.gateActive ? 'G' : '') +
             ' skip=' + (st.videoSkips || 0) + ' drift=' + (st.resyncing ? '?' : (st.avDriftMs || 0)) + 'ms' +
             ' buf=' + (st.audioBufMs || 0) + 'ms' +
+            ' vpk=' + (st.videoPipeKb || 0) + ' pal=' + (st.paceAlignMs || 0) +
             ' rst=' + (st.videoRestarts || 0) + ' rs=' + (st.resyncCount || 0) +
             ' lead=' + (st.resyncLeadMs || 0) +
             (st.resyncing ? ' RESYNC(' + (st.resyncingMs || 0) + 'ms)' : '') +

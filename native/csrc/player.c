@@ -386,6 +386,8 @@ struct session {
     int stall_resyncs;          /* v2.1.0 连续"空转期重同步"次数（读到帧即清零；≥3 放弃让 JS 巡检接管） */
     struct timespec paused_at;  /* v1.8.0 暂停起点（resume 时补偿墙钟基准，防 paced 快进闪跳） */
     long pipe_cap_bytes;        /* v1.9.0 aplay 管道容量（F_GETPIPE_SZ 实测，缺省按 64KB） */
+    long video_pipe_bytes;      /* v2.9.3 视频 pipe 实际容量（诊断） */
+    long pace_align_ms;         /* v2.9.3 直播墙钟节拍：画面目标的固定后移量（自适应对齐 A/V） */
     long alsa_buf_bytes;        /* v1.9.0 ALSA 缓冲字节（aplay -v setup 解析；0=未解析到不修正） */
     long audio_base_ms;         /* v1.9.3 音频时钟基准（writer_bytes==0 时的内容位置，= 起播 start_ms） */
     long video_base_ms;         /* v1.9.3 视频时钟基准（断流恢复后独立重置，通常=audio_base） */
@@ -489,6 +491,30 @@ static void close_fd(int *fd) {
 
 /* ---------------- 子进程 ---------------- */
 
+/* 提升 /proc/sys/fs/pipe-max-size（best-effort，进程内只做一次）。
+ * 笔端默认 1MB，而视频 pipe 想扩到 8MB（≈17 帧 ≈0.57s 蓄水）—— 2026-10-07 真机查明：
+ * 8MB 申请一直被 sysctl 上限顶回去（F_SETPIPE_SZ 超过 pipe-max-size 需要 CAP_SYS_RESOURCE，
+ * 本 app 虽有 root 却拿不到），结果视频 pipe 只有 1MB（≈2 帧），**几乎没有抗抖动余量**。
+ * 直接把 sysctl 放宽最省事（app 以 root 跑，实测可写）。失败无害：仍是 1MB 兜底。 */
+/* v2.9.3 诊断：视频 pipe 扩容结果（跨会话保留，便于排查 F_SETPIPE_SZ 是否真的生效） */
+static long g_vpipe_bytes = -1;
+static int g_vpipe_errno = 0;
+
+static void ensure_pipe_max_raised(void) {
+    static int done = 0;
+    int fd;
+    if (done) return;
+    done = 1;
+    fd = open("/proc/sys/fs/pipe-max-size", O_WRONLY);
+    if (fd >= 0) {
+        const char *v = "67108864"; /* 64MB */
+        if (write(fd, v, strlen(v)) < 0) {
+            /* 只读挂载 / 无权限：忽略 */
+        }
+        close(fd);
+    }
+}
+
 static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
     int vpipe[2] = { -1, -1 };
     int apipe[2] = { -1, -1 };
@@ -510,14 +536,41 @@ static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
     /* 视频 pipe 扩容（v1.9.2：8MB）/ 音频 256KB：
      * 1MB≈2.2 帧 → ffmpeg 无蓄水空间，弱网突发停顿直接击穿实时（2026-10-01 soak 实测：
      * drift 3s 内 +700~1000ms 的下载停顿波形，解码吞吐本身在 fps24 下够用）。
-     * 8MB≈17 帧≈0.7s 解码前置存量，停顿期由存量顶上（与音频侧管道+环形预蓄同思想）。
-     * 超过 pipe-max-size 需要 CAP_SYS_RESOURCE（app 以 root 跑，具备）；失败逐级回退，
-     * 全失败保持 64KB 默认（无害）。 */
+     * 8MB≈17 帧≈0.57s 解码前置存量，停顿期由存量顶上（与音频侧管道+环形预蓄同思想）。
+     * v2.9.3：先 ensure_pipe_max_raised() 把 sysctl 放宽，否则这一扩容**一直没生效**（实测仍 1MB）。
+     * 8MB 这个值不是随手取的：它≈音频侧固有延迟（aplay 管道 64KB + ALSA ≈0.56s），
+     * 两边同量级 → 画面与可闻声天然对齐（见 video_thread 的 align 补偿）。 */
+    ensure_pipe_max_raised();
     {
-        int cap = 8 * 1024 * 1024;
+        /* v2.9.3：8MB → 20MB。8MB≈0.57s 太浅（真机"卡一下→突然快放"的循环里停顿常 >0.5s）。
+         * 20MB≈45 帧≈**1.5s** 解码前置存量：停顿由存量顶上、画面不冻 → 不需要追赶 →
+         * 从根上消掉"卡-追"循环。深度**须略小于**音频侧延迟（直播 aplay 管道 256KB + ALSA
+         * ≈1.68s），差额交给 video_thread 的自适应 align 补平。 */
+        int cap = 20 * 1024 * 1024;
+        int got = -1;
         while (cap >= 1048576) {
-            if (fcntl(vpipe[1], F_SETPIPE_SZ, cap) != -1) break;
+            got = fcntl(vpipe[1], F_SETPIPE_SZ, cap);
+            if (got != -1) break;
             cap /= 2;
+        }
+        if (got <= 0) {
+            g_vpipe_errno = errno;                            /* 失败原因（EPERM/EINVAL/...） */
+            got = fcntl(vpipe[1], F_GETPIPE_SZ);              /* 退回实测值（默认 64KB） */
+        }
+        g_vpipe_bytes = got > 0 ? got : 0;
+        s->video_pipe_bytes = g_vpipe_bytes;
+        /* v2.9.3 诊断落盘（/tmp/vp_pipe.log）：F_SETPIPE_SZ 是否真的把视频 pipe 扩容成功。 */
+        {
+            int dfd = open("/tmp/vp_pipe.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (dfd >= 0) {
+                char lb[160];
+                int n = snprintf(lb, sizeof(lb), "video pipe want=20971520 got=%d bytes=%ld errno=%d\n",
+                                 got, g_vpipe_bytes, g_vpipe_errno);
+                if (n > 0) {
+                    if (write(dfd, lb, (size_t)n) < 0) { /* ignore */ }
+                }
+                close(dfd);
+            }
         }
     }
     if (with_audio) fcntl(apipe[1], F_SETPIPE_SZ, 262144);
@@ -946,6 +999,14 @@ static int spawn_aplay(struct session *s, const char *device) {
     close(ppipe[0]);
     s->aplay_pid = pid;
     s->aplay_fd = ppipe[1];
+    /* v2.9.3：直播把 writer→aplay 管道加深到 256KB（≈1.45s）。
+     * 笔端的"缓冲深度"由视频/音频两条管道共同决定（容量 = 流水线延迟）——
+     * 视频侧 24MB≈2.3s、音频侧 256KB+ALSA≈1.64s，同量级才能"既加缓冲又保持音画同步"
+     * （video_thread 的 align 用实测 pipe_cap_bytes 自动把画面目标后移同量，见那里）。
+     * 只对直播加：VOD 走音频锚，加深只平白增加起播/定位延迟。 */
+    if (s->duration_ms <= 0) {
+        fcntl(ppipe[1], F_SETPIPE_SZ, 262144);
+    }
     /* v1.9.0：实测管道容量（未设 F_SETPIPE_SZ 通常是 64KB）——音频锚要扣的"未发声存量"之一 */
     {
         int cap = fcntl(ppipe[1], F_GETPIPE_SZ);
@@ -963,6 +1024,8 @@ static int spawn_aplay(struct session *s, const char *device) {
 
 /* ---- v1.8.0 音画对齐参数 ---- */
 #define AV_SKIP_MS 100     /* 帧落后音频钟超过此值 → 平滑快进（≈3-4 帧 @24fps；漂移有界的关键） */
+/* v2.9.3：墙钟节拍下落后时的**最大追赶倍率**（1.25 = 略快一点追上，不出现"突然快放"） */
+#define PACE_CATCHUP_MAX 1.25
 #define AV_WAIT_CAP_MS 200 /* durl 单进程模式每帧等待上限（video pipe 满互锁死锁的解扣） */
 /* v2.1.0 音画同步分层：轻微滞后平滑快进追上；过大滞后强制重同步（跳到同步画面） */
 #define AV_RESYNC_MS 1000          /* 帧落后音频钟超过此值 → 强制重同步（"过大"的定义 = 音频最多
@@ -1158,10 +1221,30 @@ static void *video_thread(void *arg) {
              * 直播走墙钟节拍（见 session_start），画面按产出即贴 → 天然领先**可闻**声音约
              * (pipe_cap+alsa)/rate ≈ 0.56s（真机实测 avDrift ≈ -0.7s，与该项吻合）。
              * 补偿后画面与可闻声音对齐（残差 ≈ feeder 管道存量，~0.1s）。VOD 不加（走音频锚）。 */
-            long long align = 0;
+            long long align = s->pace_align_ms;
+            /* 自适应音画对齐（v2.9.3）：直播走墙钟，画面与**可闻**声的固有差 = 各段管道深度之和，
+             * 随设备/缓冲配置变化，靠静态公式推不准（真机实测反复对不上）。
+             * 这里用慢速伺服：拿实测 avDrift = 可闻音频位置 − 已读帧内容位置，
+             * 反向微调"画面目标的固定后移量"把它压到 0（画面超前就再多后移，落后就少后移）。
+             * 每 ~1s 动一次、单次 ≤100ms、夹在 [0, 3000]，避免与追赶逻辑互相打架。 */
             if (s->duration_ms <= 0 && s->audio_enabled && s->audio_alive) {
-                double rb = (double)(s->audio_rate > 0 ? s->audio_rate : 44100) * 4.0 / 1000.0;
-                if (rb > 0) align = (long long)(((double)s->pipe_cap_bytes + (double)s->alsa_buf_bytes) / rb);
+                if (s->frames > 0 && (s->frames % (long)s->fps) == 0) {
+                    long long content = s->video_base_ms + (long long)((double)s->frames * 1000.0 / (double)s->fps);
+                    long long apos = s->audio_base_ms + audio_anchor_ms(s);
+                    long long d = apos - content;      /* 负 = 画面超前（可闻声在后） */
+                    /* 符号：align 越大 → 画面越晚贴 → content 越小 → d = apos-content 越大。
+                     * 故要把 d 推向 0：d<0（画面超前）要**增大** align；d>0 要减小。
+                     * （v2.9.3 首版写反了 → 一路撞 0 地板，偏移失控到 -5.2s。） */
+                    if (d > 80 || d < -80) {
+                        long long step = -d / 3;
+                        if (step > 100) step = 100;
+                        if (step < -100) step = -100;
+                        s->pace_align_ms += step;
+                        if (s->pace_align_ms < 0) s->pace_align_ms = 0;
+                        if (s->pace_align_ms > 4000) s->pace_align_ms = 4000;
+                    }
+                    align = s->pace_align_ms;
+                }
             }
             long long target = align + (long long)((double)(s->frames + 1) * 1000.0 / (double)s->fps);
             long long elapsed = ms_since(&s->started_at);
@@ -1171,9 +1254,17 @@ static void *video_thread(void *arg) {
             }
             if (s->stop_flag) break;
             if (elapsed >= target + AV_SKIP_MS) {
-                /* 墙钟模式同样平滑快进（v2.1.0：每帧都贴，不再 0.6s 节流——音频死亡/无音轨
-                 * 时按解码产速追赶墙钟，观感顺滑且永不黑屏） */
+                /* 有界追赶（v2.9.3）：落后时不无限快进，最多 PACE_CATCHUP_MAX 倍速。
+                 * 用户反馈：卡一下之后"整个画面突然加快"，很难看。原本落后就逐帧即时贴屏
+                 * = 以解码产速快放（可达 2~3 倍）→ 观感是"瞬移式快进"。
+                 * 这里给每帧加一个最小间隔（一帧时间 / 倍率），把追赶限在 1.25 倍速：
+                 * 观感是"略快一点点追上"，且仍能最终追平墙钟（延迟不永久累积）。 */
+                double min_gap = 1000.0 / ((double)s->fps * PACE_CATCHUP_MAX);
+                double since = (now_seconds() - s->last_blit_at) * 1000.0;
                 s->video_skips++;
+                if (since < min_gap) {
+                    usleep((useconds_t)((min_gap - since) * 1000.0));
+                }
                 do_blit = 1;
             }
         } else if (s->audio_enabled) {
@@ -1542,6 +1633,8 @@ static void session_reset(struct session *s) {
     s->ring_drops = 0;
     s->video_skips = 0;
     s->pipe_cap_bytes = 65536; /* F_GETPIPE_SZ 实测前按内核默认 */
+    s->video_pipe_bytes = 0;
+    s->pace_align_ms = 0;
     s->alsa_buf_bytes = 0;
     s->audio_base_ms = 0; /* v1.9.3 时钟基准（session_start 里对齐 start_ms） */
     s->video_base_ms = 0;
@@ -1593,6 +1686,8 @@ static int session_start(struct session *s, long start_ms, int with_audio, const
     s->ring_drops = 0;
     s->video_skips = 0;
     s->pipe_cap_bytes = 65536; /* F_GETPIPE_SZ 实测前按内核默认 */
+    s->video_pipe_bytes = 0;
+    s->pace_align_ms = 0;
     s->alsa_buf_bytes = 0;
     s->audio_base_ms = start_ms; /* v1.9.3 时钟基准：writer_bytes==0 ⇔ 内容位置 start_ms */
     s->video_base_ms = start_ms;
@@ -1987,6 +2082,9 @@ static JSValue js_status(JSContext *ctx, JSValueConst this_val, int argc, JSValu
         long long apos = s->audio_base_ms + audio_anchor_ms(s);
         mk_int(ctx, "avDriftMs", (long)(apos - content), res);
         mk_int(ctx, "audioBufMs", (long)(((double)(s->pipe_cap_bytes + s->alsa_buf_bytes)) / bytes_per_ms), res);
+        mk_int(ctx, "videoPipeKb", (long)(g_vpipe_bytes / 1024), res); /* v2.9.3 诊断：视频 pipe 实际 KB */
+        mk_int(ctx, "videoPipeErr", (long)g_vpipe_errno, res);      /* v2.9.3 诊断：扩容失败 errno */
+        mk_int(ctx, "paceAlignMs", s->pace_align_ms, res);            /* v2.9.3 诊断：自适应对齐量 */
     } else {
         mk_int(ctx, "avDriftMs", 0, res);
         mk_int(ctx, "audioBufMs", 0, res);
