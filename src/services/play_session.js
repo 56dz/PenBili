@@ -25,7 +25,13 @@ export const MAX_DECODE_PIXELS = 310000;
 //   地址取自「我的 → 直播设置」；未填时这里直接给出可读错误，页面据此提示。
 //   （真机实证：笔端 ffmpeg 4.4 支持 hls demuxer + hls/http 协议；480p30 实时解码 ~1.2x 余量）
 export const LIVE_FPS = 30; /* 服务端 HLS 输出固定 30fps（-vf fps=30 与 -g 30 对齐分片） */
-export const LIVE_VIDEO_RECT = { width: 640, height: 360 }; /* 服务端 scale=-2:480 的 16:9 输出 */
+/* 服务端默认输出尺寸（16:9 源的 -2:254 → 452x254），**正好等于视口视频列**：
+ * 2026-10-07 真机实测——只有输出尺寸 == 显示尺寸时 player.c 的 scale 才走恒等快路径
+ * （854x480→0.83x 卡 / 640x360→1.03x 紧 / 452x254→2.3~2.8x 流畅）。改这里要同步改服务端 TRANS_H。 */
+export const LIVE_VIDEO_RECT = { width: 452, height: 254 };
+/* 画质档：输出**高度**；254=匹配屏幕（默认），360/480 仅调试（真机必卡，见 storage.LIVE_LIMITS） */
+export const LIVE_RES_ALLOWED = [254, 360, 480];
+export const LIVE_RES_DEFAULT = 254;
 
 // 纯函数（可测）：服务端 /live 地址。addr 为空 / room 非法 → ''
 export function buildLiveUrl(addr, roomid, opts) {
@@ -34,7 +40,7 @@ export function buildLiveUrl(addr, roomid, opts) {
   if (!a || !(room > 0)) return '';
   const o = opts || {};
   const buf = Math.max(2000, Math.min(20000, Math.floor(Number(o.bufMs) || 6000)));
-  const res = [360, 480, 540].indexOf(Number(o.res)) >= 0 ? Number(o.res) : 480;
+  const res = LIVE_RES_ALLOWED.indexOf(Number(o.res)) >= 0 ? Number(o.res) : LIVE_RES_DEFAULT;
   const bv = /^\d+[km]?$/i.test(String(o.bv || '')) ? String(o.bv).toLowerCase() : '700k';
   const q = ['room=' + room, 'buf=' + buf, 'res=' + res, 'bv=' + bv, 'trans=' + (o.trans === 0 ? 0 : 1)];
   if (o.ck) q.push('ck=' + encodeURIComponent(String(o.ck)));

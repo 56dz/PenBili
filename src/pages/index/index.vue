@@ -175,8 +175,8 @@
           <text class="mine-value">{{ live.bufMs }} ms</text>
         </div>
         <div class="mine-row" @click="onLiveQualityCycle">
-          <text class="mine-label">画质与转码</text>
-          <text class="mine-value">{{ live.res }}p · {{ live.bv }} · {{ live.trans ? '转码' : '直通' }}</text>
+          <text class="mine-label">直播画质</text>
+          <text class="mine-value">{{ live.res === 254 ? '匹配屏幕' : live.res + 'p' }} · {{ live.bv }}{{ live.trans ? '' : ' · 直通' }}</text>
         </div>
         <div class="mine-row" @click="onLiveProbe">
           <text class="mine-label">测连服务器</text>
@@ -189,7 +189,7 @@
         <text v-if="liveNote" class="mine-notice">{{ liveNote }}</text>
         <div class="mine-row">
           <text class="mine-label">PenBili</text>
-          <text class="mine-value">v2.9.0 · {{ profile ? '已登录' : '匿名' }}</text>
+          <text class="mine-value">v2.9.2 · {{ profile ? '已登录' : '匿名' }}</text>
         </div>
       </scroller>
 
@@ -631,6 +631,9 @@ export default {
       const h = await loadHistory();
       this.history = h.items;
       this.live = await loadLive();
+      // 回写一次：normalizeLive 可能做了 schema 迁移（如 v1→v2 把画质 480/360 纠正为匹配屏幕的 254），
+      // 落盘后存储即与内存一致，避免"设置里显示旧值"的错觉。
+      saveLive(this.live);
       const sess = await loadSession();
       this.session = sess;
       if (sess.buvid3) {
@@ -667,11 +670,13 @@ export default {
         const liveRoom = at && typeof at === 'object' ? Math.floor(Number(at.liveRoom) || 0) : 0;
         // wbiStress：连打 N 次 nav 取 WBI 密钥，统计失败率与走的传输（诊断 nav 间歇失败用）
         const wbiStress = at && typeof at === 'object' ? Math.floor(Number(at.wbiStress) || 0) : 0;
+        // liveHold：直播自检的取证窗口（ms，默认 15000）——诊断时拉长便于外部干预
+        const liveHold = at && typeof at === 'object' ? Math.floor(Number(at.liveHold) || 0) : 0;
         logWarn('[bili] autotest seeded → ' + (liveOnly
           ? 'liveOnly room=' + (liveRoom || '-')
           : wbiStress > 0 ? 'wbiStress n=' + wbiStress
           : 'run' + (soakSec > 0 ? ' soak=' + soakSec + 's' : '') + (soakBv ? ' bv=' + soakBv : '')));
-        if (liveOnly) this.runLiveAutotest(liveRoom);
+        if (liveOnly) this.runLiveAutotest(liveRoom, liveHold);
         else if (wbiStress > 0) this.runWbiStress(wbiStress);
         else this.runAutotest(soakSec, soakBv); // 自检内部自带首屏加载（避免与这里并发双 load 竞态）
       } else {
@@ -1052,13 +1057,14 @@ export default {
       saveLive(this.live);
       this.liveNote = '起播缓冲 ' + next + ' ms —— 服务端 HLS 窗口随之变长：抗抖动更好、延迟略增';
     },
-    // 画质档 × 转码开关循环：360p转码 → 480p转码 → 540p转码 → 480p直通 → 循环
+    // 画质档循环：匹配屏幕(254) → 标清(360) → 高清(480) → 循环
+    // 顺序即推荐度：254 是唯一"清晰 + 流畅"档（服务端输出 == 视口 452x254，笔端缩放被跳过）；
+    // 360/480 输出会被笔端再缩回 452x254，白烧 CPU，真机实测 1.03x / 0.83x → 必卡，仅留调试。
     onLiveQualityCycle() {
       const seq = [
+        { res: 254, trans: 1 },
         { res: 360, trans: 1 },
-        { res: 480, trans: 1 },
-        { res: 540, trans: 1 },
-        { res: 480, trans: 0 }
+        { res: 480, trans: 1 }
       ];
       let i = 0;
       for (let k = 0; k < seq.length; k++) {
@@ -1070,9 +1076,10 @@ export default {
       const n = seq[(i + 1) % seq.length];
       this.live = normalizeLive(Object.assign({}, this.live, n));
       saveLive(this.live);
-      this.liveNote = n.trans
-        ? '服务器转码 ' + n.res + 'p（笔端解码压力小，推荐）'
-        : '直通：服务端零转码（源超过笔端解码预算时会卡）';
+      this.liveNote =
+        n.res === 254
+          ? '匹配屏幕 452×254：服务端输出尺寸 == 视口，笔端零缩放 → 清晰且流畅（推荐）'
+          : n.res + 'p：会被笔端缩回 452×254，白烧解码预算（实测 360→1.03x / 480→0.83x，会卡）';
     },
     async onLiveProbe() {
       this.liveTestText = '测试中…';
@@ -1781,7 +1788,7 @@ export default {
     // 直播专项自检（种子 bili_autotest = {enabled:true, liveOnly:true, liveRoom:<id 可选>}）：
     // 只跑直播链路 —— 解析服务器地址 → 直播栏搜索 → 播放 → 首帧断言 → 返回。
     // 真机证据链：服务端 server.log 会出现 /live 请求与分片拉取（证明笔端 ffmpeg 在消费 HLS）。
-    async runLiveAutotest(room) {
+    async runLiveAutotest(room, holdMs) {
       const ensure = (cond, msg) => {
         if (!cond) throw new Error(msg);
       };
@@ -1804,7 +1811,7 @@ export default {
         ensure(w.st.ok && w.st.frames > 0, '45s 内无帧: ' + (w.st && (w.st.message || w.st.state)));
         logWarn('[bili] LIVE AUTOTEST PASS first frame ' + w.ms + 'ms frames=' + w.st.frames + ' pos=' + w.st.positionMs);
         // 取证窗口：停在播放态 15s，便于外部 adb dump /dev/fb0 抓画面（自检本身不改画面）
-        await this.sleep(15000);
+        await this.sleep(holdMs > 0 ? holdMs : 15000);
         logWarn('[bili] LIVE AUTOTEST end, back to list');
         await this.onBack();
       } catch (e) {

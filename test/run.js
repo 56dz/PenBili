@@ -1229,39 +1229,45 @@ async function main() {
     assert.strictEqual(normalizeLiveAddr(''), '');
     assert.strictEqual(normalizeLiveAddr(null), '');
   });
-  test('live: normalizeLive schema（缺省 / 越界钳制 / 版本不符丢弃）', () => {
+  test('live: normalizeLive schema（缺省 / 越界钳制 / 版本迁移 / 未知版本丢弃）', () => {
     const d = normalizeLive(null);
     assert.strictEqual(d.addr, '');
     assert.strictEqual(d.bufMs, LIVE_LIMITS.bufDefaultMs);
-    assert.strictEqual(d.res, 480);
+    assert.strictEqual(d.res, 254); // 默认 = 匹配屏幕（452x254；480 真机只有 0.83x 必卡）
     assert.strictEqual(d.trans, 1);
     assert.strictEqual(d.resolvedAddr, '');
-    const c = normalizeLive({ version: 1, addr: '1.2.3.4:5', bufMs: 99999, res: 999, bv: '2M', trans: 0, resolvedAddr: 'x.y:9' });
+    // v1 → v2 迁移：保留地址/缓冲/码率，**只把画质纠正到 254**
+    const c = normalizeLive({ version: 1, addr: '1.2.3.4:5', bufMs: 99999, res: 480, bv: '2M', trans: 0, resolvedAddr: 'x.y:9' });
     assert.strictEqual(c.addr, 'http://1.2.3.4:5');
     assert.strictEqual(c.bufMs, LIVE_LIMITS.bufMaxMs);
-    assert.strictEqual(c.res, 480);
+    assert.strictEqual(c.res, 254);
+    assert.strictEqual(c.version, 2);
     assert.strictEqual(c.bv, '2m');
     assert.strictEqual(c.trans, 0);
     assert.strictEqual(c.resolvedAddr, 'http://x.y:9');
+    // v2 起尊重用户选择（254/360/480 合法；540 已废弃 → 回落 254）
+    assert.strictEqual(normalizeLive({ version: 2, addr: 'a:1', res: 360 }).res, 360);
+    assert.strictEqual(normalizeLive({ version: 2, addr: 'a:1', res: 540 }).res, 254);
     assert.strictEqual(normalizeLive({ version: 1, bufMs: 10 }).bufMs, LIVE_LIMITS.bufMinMs);
     assert.strictEqual(normalizeLive({ version: 99, addr: 'z' }).addr, '');
   });
   test('live: buildLiveUrl 参数构造与钳制（cookie 必须 URL 编码）', () => {
     assert.strictEqual(buildLiveUrl('', 1, {}), '');
     assert.strictEqual(buildLiveUrl('http://a:1', 0, {}), '');
-    const u = buildLiveUrl('http://a:1/', 88, { bufMs: 4000, res: 540, bv: '900k', trans: 1, ck: 'SESSDATA=x%2Cy; bili_jct=z' });
+    const u = buildLiveUrl('http://a:1/', 88, { bufMs: 4000, res: 360, bv: '900k', trans: 1, ck: 'SESSDATA=x%2Cy; bili_jct=z' });
     assert.strictEqual(u.indexOf('http://a:1/live?'), 0, u);
     assert.ok(u.indexOf('room=88') > 0, u);
     assert.ok(u.indexOf('buf=4000') > 0, u);
-    assert.ok(u.indexOf('res=540') > 0, u);
+    assert.ok(u.indexOf('res=360') > 0, u);
     assert.ok(u.indexOf('bv=900k') > 0, u);
     assert.ok(u.indexOf('trans=1') > 0, u);
     assert.ok(u.indexOf('ck=SESSDATA%3Dx%252Cy%3B%20bili_jct%3Dz') > 0, u);
     const u2 = buildLiveUrl('http://a:1', 5, { bufMs: 999999, res: 111, bv: 'zzz', trans: 0 });
     assert.ok(u2.indexOf('buf=20000') > 0, u2);
-    assert.ok(u2.indexOf('res=480') > 0, u2);
+    assert.ok(u2.indexOf('res=254') > 0, u2); // 非法 res（含废弃的 540）→ 默认 254
     assert.ok(u2.indexOf('bv=700k') > 0, u2);
     assert.ok(u2.indexOf('trans=0') > 0, u2);
+    assert.ok(buildLiveUrl('http://a:1', 5, { res: 540 }).indexOf('res=254') > 0, '540 已废弃');
   });
   test('live: resolveLiveUrl —— 未配地址→liveaddr；正常→单输入+durationMs=0', () => {
     const bad = resolveLiveUrl({ live: {} }, { kind: 'live', roomid: 9 });

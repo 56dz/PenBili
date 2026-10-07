@@ -20,7 +20,7 @@ export const KEYS = {
 
 export const SESSION_SCHEMA_VERSION = 2;
 export const SETTINGS_SCHEMA_VERSION = 1;
-export const LIVE_SCHEMA_VERSION = 1;
+export const LIVE_SCHEMA_VERSION = 2;
 
 function getSetPair(key) {
   const f = typeof $falcon !== 'undefined' ? $falcon : null;
@@ -217,11 +217,17 @@ export async function loadSettings() {
 //                所以只把它当缓存：app 启动时探测它，2s 无响应即重新走入口地址解析（见 services/live.js）
 //   bufMs        笔端想握的缓冲时长（服务端据此定 HLS 播放列表窗口长度）
 //   res/bv/trans 画质高度 / 视频码率 / 是否转码
+//     res **是输出高度**，默认 254 = 笔端视口视频列高度（16:9 源 → 452x254，与屏 1:1）。
+//     2026-10-07 真机实测（同码率 700k，笔端 ffmpeg 走 player.c 同款 scale+transpose+rgb32 链）：
+//       854x480(480) → 0.83x 跌破实时（画面卡、帧率只有 ~4fps）；640x360(360) → 1.03x 零余量；
+//       452x254(254) → 2.3~2.8x。输出尺寸 == 视口尺寸时缩放走恒等快路径被跳过，
+//       是唯一"既清晰（1:1 无重采样）又流畅"的档。360/480 仅留作调试。
 export const LIVE_LIMITS = {
   bufMinMs: 2000,
   bufMaxMs: 20000,
   bufDefaultMs: 6000,
-  RES: [360, 480, 540]
+  RES: [254, 360, 480],
+  resDefault: 254
 };
 
 // 地址归一：补 scheme、去尾斜杠（用户常直接填 "192.168.5.224:2050"）
@@ -237,22 +243,25 @@ export function normalizeLive(raw) {
     version: LIVE_SCHEMA_VERSION,
     addr: '',
     bufMs: LIVE_LIMITS.bufDefaultMs,
-    res: 480,
+    res: LIVE_LIMITS.resDefault,
     bv: '700k',
     trans: 1,
     resolvedAddr: '',
     resolvedAt: 0
   };
   if (!raw || typeof raw !== 'object') return empty;
-  if (raw.version !== LIVE_SCHEMA_VERSION) return empty;
+  const ver = Number(raw.version) || 0;
+  // v1→v2 迁移：默认画质 480 → 254（匹配屏幕）。**保留地址/缓冲等用户设置**，
+  // 只把画质纠正到流畅档——480 在笔上是 0.83x，必然卡顿。
+  if (ver !== 1 && ver !== LIVE_SCHEMA_VERSION) return empty;
   const buf = Math.floor(Number(raw.bufMs) || LIVE_LIMITS.bufDefaultMs);
-  const res = Number(raw.res);
+  const res = ver < 2 ? LIVE_LIMITS.resDefault : Number(raw.res);
   const bvRaw = typeof raw.bv === 'string' ? raw.bv.trim().toLowerCase() : '';
   return {
     version: LIVE_SCHEMA_VERSION,
     addr: normalizeLiveAddr(raw.addr),
     bufMs: Math.max(LIVE_LIMITS.bufMinMs, Math.min(LIVE_LIMITS.bufMaxMs, buf)),
-    res: LIVE_LIMITS.RES.indexOf(res) >= 0 ? res : 480,
+    res: LIVE_LIMITS.RES.indexOf(res) >= 0 ? res : LIVE_LIMITS.resDefault,
     bv: /^\d+[km]?$/.test(bvRaw) ? bvRaw : '700k',
     trans: raw.trans === 0 ? 0 : 1,
     resolvedAddr: normalizeLiveAddr(raw.resolvedAddr),

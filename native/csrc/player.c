@@ -1150,7 +1150,20 @@ static void *video_thread(void *arg) {
          * 音频进程 rw_timeout=15s 必然 EOF/出错 → audio_alive=0 才转墙钟；旧的 8s 转墙钟
          * 会在恢复后留下"视频超前音频"的整段错位，且等待期间的超前漂移永远无法回吸。 */
         if (s->paced) {
-            long long target = (long long)((double)(s->frames + 1) * 1000.0 / (double)s->fps);
+            /* 墙钟基线对齐到**首帧落屏**时刻（v2.9.3）：spawn→首帧有 1~3s（探流+HLS 起播），
+             * 若计入 elapsed，视频会为"追平墙钟"把 HLS 起始缓冲（~3s）快进放掉（起播瞬间快放）。
+             * 直播（duration_ms<=0）走这条墙钟路径，故必须对齐。 */
+            if (s->frames == 0) clock_gettime(CLOCK_MONOTONIC, &s->started_at);
+            /* 直播有音轨：把墙钟目标后移"音频管道固有延迟"（aplay stdin 管道 + ALSA 缓冲换算成 ms）。
+             * 直播走墙钟节拍（见 session_start），画面按产出即贴 → 天然领先**可闻**声音约
+             * (pipe_cap+alsa)/rate ≈ 0.56s（真机实测 avDrift ≈ -0.7s，与该项吻合）。
+             * 补偿后画面与可闻声音对齐（残差 ≈ feeder 管道存量，~0.1s）。VOD 不加（走音频锚）。 */
+            long long align = 0;
+            if (s->duration_ms <= 0 && s->audio_enabled && s->audio_alive) {
+                double rb = (double)(s->audio_rate > 0 ? s->audio_rate : 44100) * 4.0 / 1000.0;
+                if (rb > 0) align = (long long)(((double)s->pipe_cap_bytes + (double)s->alsa_buf_bytes) / rb);
+            }
+            long long target = align + (long long)((double)(s->frames + 1) * 1000.0 / (double)s->fps);
             long long elapsed = ms_since(&s->started_at);
             while (!s->stop_flag && elapsed < target) {
                 usleep(5000);
@@ -1408,7 +1421,10 @@ static void *audio_writer_thread(void *arg) {
     unsigned char buf[8192];
     raise_audio_thread_prio();
     size_t rate_bytes = (size_t)(s->audio_rate > 0 ? s->audio_rate : 44100) * 4; /* B/s @2ch16b */
-    size_t low_level = rate_bytes * RING_LOW_MS / 1000;
+    /* 直播（duration_ms<=0）：**关闭水位滞回** —— hold 会把可闻位置冻结在环里（2s 量级），
+     * 与墙钟视频错位；关掉后 writer 一有数据就消费，可闻滞后收敛到 aplay 管道 + ALSA（~0.56s）。
+     * （2026-10-07：直播改墙钟节拍后必须同步打开此项，否则音画差 ~2s。）VOD 不变。 */
+    size_t low_level = (s->duration_ms > 0) ? rate_bytes * RING_LOW_MS / 1000 : 0;
     size_t high_level = rate_bytes * RING_HIGH_MS / 1000;
     if (high_level > sizeof(s->ring) - 32768) high_level = sizeof(s->ring) - 32768; /* 留 feeder 空间 */
     if (low_level >= high_level) low_level = high_level / 2;
@@ -1559,7 +1575,19 @@ static int session_start(struct session *s, long start_ms, int with_audio, const
     s->error[0] = '\0';
     s->audio_enabled = with_audio;
     s->retried_no_audio = 0;
-    s->paced = with_audio ? 0 : 1;
+    /* 直播（duration_ms<=0）且单进程（无独立音频输入）→ **必须墙钟节拍**，不能用音频锚。
+     * 根因（2026-10-07 真机定位，帧率恒 4.2fps ≈ 1/236ms 且直播无声）：
+     *   · 视频 pipe 上限只有 1MB（/proc/sys/fs/pipe-max-size=1048576，笔端无 CAP_SYS_RESOURCE）
+     *     → 8MB 申请失败、逐级回退到 1MB（≈2 帧）；
+     *   · 音频 writer 要等环形缓冲蓄满 800ms（RING_START_MS）才开写；
+     *   · ffmpeg 是**同一进程**产出视频(fd3)+音频(fd4) → 视频 pipe 一满，它连音频也不产了。
+     *   于是形成互锁：视频 writer 按音频锚等待（writer_bytes 恒 0 → 锚恒 0 → 每帧撞满
+     *   AV_WAIT_CAP_MS=200ms）→ 视频 pipe 满 → ffmpeg 停摆 → 环永远蓄不满 → writer 永不开写
+     *   → 锚永远 0。实测 drift 恰好 = -frames×33ms（证明 apos 恒 0）。
+     * 直播源本身就是实时的 → 用墙钟（= 媒体时间）。配合 writer 侧**直播关闭水位滞回**
+     * （见 audio_writer_thread），可闻音频滞后 ≈ aplay 管道 + ALSA 缓冲（~0.56s），与视频侧
+     * 存量同量级 → 音画偏移可控且不漂移。VOD（duration_ms>0）行为完全不变。 */
+    s->paced = (with_audio && s->duration_ms > 0) ? 0 : 1;
     s->underruns = 0;
     s->wr_errors = 0;
     s->ring_drops = 0;

@@ -15,13 +15,13 @@ v5 改成 **HLS**：服务端把直播转码成 m3u8 + 定长分片（默认 1s/
         host = 请求 Host 头。笔端把它缓存为"重定向解析结果"（跳过 301 跳跃）；
         app 启动时后台探测该缓存地址，2s 无响应即重走入口域名重新解析。
 
-  GET /live?room=<id>[&ck=<cookie>][&res=360|480|540][&bv=<码率>][&trans=0|1]
+  GET /live?room=<id>[&ck=<cookie>][&res=254|360|480][&bv=<码率>][&trans=0|1]
               [&buf=<ms>][&seg=ts|fmp4]
       → 302 Location: http://<Host>/hls/<sid>/index.m3u8
         （ffmpeg 默认跟随 302；终点以 .m3u8 结尾 → hls demuxer 必定识别）
       room  必填，B 站直播间号
       ck    笔端 B 站 cookie（服务端用它拉 720p 源，并按 cookie 哈希隔离用户）
-      res   转码输出高度（默认 480）
+      res   转码输出**高度**（默认 254=匹配笔端屏幕，见下）
       bv    视频码率（默认 700k，钳 300k~2500k）
       trans 1=转码（默认）0=直通（-c copy，服务端零编码开销，分片时长随源关键帧）
       buf   笔端想握的缓冲时长（ms，默认 6000）→ 决定服务端播放列表窗口长度
@@ -59,7 +59,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "5.0"
+VERSION = "5.1"
 UA = "Mozilla/5.0 (Windows NT 10.0; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 FFMPEG = shutil.which("ffmpeg") or "ffmpeg"
 
@@ -75,7 +75,17 @@ TRANS_BV = "700k"          # 默认视频码率
 TRANS_BV_MIN_K = 300
 TRANS_BV_MAX_K = 2500
 TRANS_AUDIO = "96k"
-TRANS_H = 480              # 默认输出高度（360/480/540）
+# 默认输出高度 = **254**，即视口视频列的高度（逻辑/物理都是 254，1:1 无缩放）。
+# 为什么是这个怪数字（2026-10-07 真机实测，别改回 480）：
+#   笔端 player.c 的 vf 是 `scale=<out_h>:<out_w>,transpose=2,format=rgb32`，本机软解+缩放+转置+rgb32
+#   实测吞吐（5s 真实直播分片，同码率 700k，笔端 ffmpeg）：
+#     854x480 → 0.83x（跌破实时，播放永远追不上 → 画面卡、帧率只有 ~4fps）
+#     640x360 → 1.03x（零余量）
+#     452x254 → 2.3~2.8x（充足）  ← 输出尺寸 == 视口尺寸时 sws_scale 走恒等快路径被跳过
+#   而笔的视口就是 452x254（800x254 逻辑屏扣掉两侧 174 栏），再高的分辨率只是被缩回去，纯浪费 CPU。
+#   故：服务端按 -2:254 输出（16:9 源 → 正好 452x254），画质无损、余量 3 倍。
+TRANS_H = 254              # 默认输出高度（254=匹配屏幕；360/480 仅调试用，真机会卡）
+TRANS_H_ALLOWED = (254, 360, 480)
 FPS = 30                   # 输出帧率（B 站直播源多为 30fps，逐帧对应避免抖动）
 SEG_S = 1                  # 分片时长（秒）；与 -g FPS 对齐 → 每片恰好 1 个关键帧
 WINDOW_DEFAULT_MS = 6000   # 默认窗口（ms）
@@ -528,7 +538,7 @@ class Handler(BaseHTTPRequestHandler):
             res = int((qs.get("res") or [str(TRANS_H)])[0])
         except (TypeError, ValueError):
             res = TRANS_H
-        if res not in (360, 480, 540):
+        if res not in TRANS_H_ALLOWED:
             res = TRANS_H
         try:
             window_ms = int((qs.get("buf") or [str(WINDOW_DEFAULT_MS)])[0])
