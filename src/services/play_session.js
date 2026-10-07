@@ -60,7 +60,12 @@ export function resolveLiveUrl(ctx, item) {
     ok: true,
     live: true,
     url: url,
-    audioUrl: '',
+    /* v2.9.4：直播也走「音视频分离双进程」—— 音频进程独立拉**同一条** URL。
+     * 动机（真机 30 分钟长跑定位）：单进程 ffmpeg 串行写两个输出，视频 pipe（32MB 缓冲）
+     * 被填满时 ffmpeg 整体阻塞 → 音频同停 → 环/管道被抽干 → ALSA underrun（实测 8 次、
+     * 最长 2.36s）→ **音频内容永久落后**（累计 3.17s），而画面按墙钟照走。
+     * 拆成两个独立进程后，视频背压不再牵连音频产出。 */
+    audioUrl: url,
     qn: 0,
     cid: roomid,
     roomid: roomid,

@@ -1269,7 +1269,7 @@ async function main() {
     assert.ok(u2.indexOf('trans=0') > 0, u2);
     assert.ok(buildLiveUrl('http://a:1', 5, { res: 540 }).indexOf('res=254') > 0, '540 已废弃');
   });
-  test('live: resolveLiveUrl —— 未配地址→liveaddr；正常→单输入+durationMs=0', () => {
+  test('live: resolveLiveUrl —— 未配地址→liveaddr；正常→双进程(音频同源)+durationMs=0', () => {
     const bad = resolveLiveUrl({ live: {} }, { kind: 'live', roomid: 9 });
     assert.strictEqual(bad.ok, false);
     assert.strictEqual(bad.stage, 'liveaddr');
@@ -1280,7 +1280,7 @@ async function main() {
     );
     assert.strictEqual(r.ok, true);
     assert.strictEqual(r.live, true);
-    assert.strictEqual(r.audioUrl, '');
+    assert.strictEqual(r.audioUrl, r.url); // v2.9.4：直播走音视频分离双进程，音频进程拉同一条 URL
     assert.strictEqual(r.durationMs, 0);
     assert.strictEqual(r.aid, 0);
     assert.strictEqual(r.fps, LIVE_FPS);

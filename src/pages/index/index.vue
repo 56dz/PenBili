@@ -189,7 +189,7 @@
         <text v-if="liveNote" class="mine-notice">{{ liveNote }}</text>
         <div class="mine-row">
           <text class="mine-label">PenBili</text>
-          <text class="mine-value">v2.9.3 · {{ profile ? '已登录' : '匿名' }}</text>
+          <text class="mine-value">v2.9.4 · {{ profile ? '已登录' : '匿名' }}</text>
         </div>
       </scroller>
 

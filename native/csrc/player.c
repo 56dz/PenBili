@@ -96,6 +96,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>   /* FIONREAD：读 aplay 管道实际占用量（v2.9.4 音频锚精确化） */
 #include <sys/mman.h>
 #include <sys/resource.h> /* setpriority：aplay 提优先级 */
 #include <sys/stat.h>
@@ -151,6 +152,7 @@ static void raise_audio_thread_prio(void); /* 定义在 RING 水位区（feeder 
 #define APLAY_PATH "/usr/bin/aplay"
 #define BT_LIST_CMD "/usr/bin/bluealsa-aplay -L 2>/dev/null"
 #define APLAY_LOG_PATH "/tmp/vp_aplay.log"
+#define TREND_LOG_PATH "/tmp/vp_trend.log" /* v2.9.4 直播长跑趋势落盘（约 1 行/秒；不依赖 JS/屏幕状态） */
 
 #define ST_IDLE 0
 #define ST_PLAYING 1
@@ -559,6 +561,8 @@ static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
         }
         g_vpipe_bytes = got > 0 ? got : 0;
         s->video_pipe_bytes = g_vpipe_bytes;
+        /* v2.9.4：趋势文件随会话起始清空（避免多次会话累积） */
+        truncate(TREND_LOG_PATH, 0);
         /* v2.9.3 诊断落盘（/tmp/vp_pipe.log）：F_SETPIPE_SZ 是否真的把视频 pipe 扩容成功。 */
         {
             int dfd = open("/tmp/vp_pipe.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
@@ -663,7 +667,7 @@ static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
             argv[i++] = ss;
             argv[i++] = "-i";
             argv[i++] = s->input;
-            if (s->audio_input[0]) {
+            if (with_audio && s->audio_input[0]) {
                 /* DASH 第二输入：音频轨独立下载（实测 ~66kbps，带宽富余 10 倍 → 声音供给恒稳）。
                  * -ss/UA/headers 逐输入配齐：seek 同起点、CDN 反爬同凭据。 */
                 argv[i++] = "-probesize";
@@ -702,6 +706,10 @@ static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
             argv[i++] = "-f";
             argv[i++] = "rawvideo";
             argv[i++] = "pipe:3";
+            /* v2.9.4：音频输出必须受 with_audio 门控 —— 拆分模式（DASH / 直播双进程）下
+             * 视频进程只出视频；旧代码无条件加音频输出，会去写**未被 dup2 的 fd4**
+             * （with_audio=0 时不创建音频 pipe）→ ffmpeg 立即失败。 */
+            if (with_audio) {
             argv[i++] = "-map";
             argv[i++] = s->audio_input[0] ? "1:a:0?" : "0:a:0?";
             /* async 已移除（第五档回滚）：aresample=async 是变速重采样，会拉伸/压缩音频
@@ -714,6 +722,7 @@ static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
             argv[i++] = "-f";
             argv[i++] = "s16le";
             argv[i++] = "pipe:4";
+            } /* end if (with_audio) */
             argv[i] = NULL;
             /* 视频 ffmpeg 提优先级（v1.9.4，nice -5 与音频解码同档）：软解+滤镜链吞吐
              * 贴实时线时，JS/UI 的周期性突发会瞬时挤占解码线程 → 掉帧积压。音画连续
@@ -1053,11 +1062,54 @@ static int spawn_aplay(struct session *s, const char *device) {
  * 两个用量在稳态下与启动阈值无关（填满即恒定）；供给停滞时真实存量下降、
  * 本估算偏高 → 画面滞后 ≤ 一个缓冲容量，恢复供给后经丢帧追赶自动回正。
  * 返回相对 start_ms 的毫秒（W 从会话起计）。 */
+/* aplay 管道中"已写入但尚未被 aplay 读走"的字节数（FIONREAD 实测）。
+ * v2.9.4：取代"管道容量"作为扣除量 —— 旧公式假设管道**总是满的**，一旦未满就会
+ * **高估**可闻位置（认为声音比实际更靠前）→ 伺服把画面往前提 → 撞 align 0 地板后
+ * 再也无法补偿累积滞后（真机现象：连续播 30 分钟后音频落后画面 ~1.5s）。
+ * 内核 4.19 的 pipe_ioctl(FIONREAD) 不检查读写端，写端调用同样返回管道占用；失败回退容量。 */
+static long pipe_pending_bytes(const struct session *s) {
+    int n = -1;
+    if (s->aplay_fd >= 0 && ioctl(s->aplay_fd, FIONREAD, &n) == 0 && n >= 0) {
+        return (long)n;
+    }
+    return (long)s->pipe_cap_bytes; /* 回退：沿用旧的"按容量假设" */
+}
+
 static long long audio_anchor_ms(const struct session *s) {
     double bytes_per_ms = ((double)(s->audio_rate > 0 ? s->audio_rate : 44100)) * 4.0 / 1000.0;
-    long long audible = (long long)s->writer_bytes - s->pipe_cap_bytes - s->alsa_buf_bytes;
+    long long audible = (long long)s->writer_bytes - (long long)pipe_pending_bytes(s) - s->alsa_buf_bytes;
     if (audible < 0) audible = 0;
     return (long long)((double)audible / bytes_per_ms);
+}
+
+/* v2.9.4 直播长跑趋势落盘：约 1 行/秒（调用点在 video_thread 墙钟分支的每秒边界）。
+ * 动机：笔息屏后 JS 层被系统挂起（console.warn 停写），长时间（30min+）音画漂移取证
+ * 只能由 native 自己完成。字段与 JS 侧 poll tick 对齐，外加 pipe（FIONREAD 实测占用）。 */
+static void dump_trend(const struct session *s) {
+    char lb[440];
+    long in_pipe = pipe_pending_bytes(s);
+    double bpm = ((double)(s->audio_rate > 0 ? s->audio_rate : 44100)) * 4.0 / 1000.0;
+    long long aud, apos, content;
+    int n;
+    if (bpm <= 0) return;
+    aud = (long long)s->writer_bytes - (long long)in_pipe - s->alsa_buf_bytes;
+    if (aud < 0) aud = 0;
+    apos = (long long)((double)aud / bpm);
+    content = s->video_base_ms + (long long)((double)s->frames * 1000.0 / (double)s->fps);
+    n = snprintf(lb, sizeof(lb),
+                 "t=%lld f=%ld pos=%lld ab=%ld wb=%ld rlen=%ld pipe=%ld cap=%ld alsa=%ld "
+                 "apos=%lld d=%lld pal=%ld sk=%ld u=%ld rd=%ld rst=%d\n",
+                 ms_since(&s->started_at), s->frames, content, s->audio_bytes, s->writer_bytes,
+                 (long)s->rlen, in_pipe, s->pipe_cap_bytes, s->alsa_buf_bytes,
+                 apos, apos - content, s->pace_align_ms, s->video_skips,
+                 s->underruns, s->ring_drops, s->video_retries);
+    if (n > 0) {
+        int fd = open(TREND_LOG_PATH, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (fd >= 0) {
+            if (write(fd, lb, (size_t)n) < 0) { /* ignore */ }
+            close(fd);
+        }
+    }
 }
 
 /* 解析 aplay -v 的 setup dump（APLAY_LOG_PATH）取 ALSA 实际 buffer_size（帧）。
@@ -1245,6 +1297,11 @@ static void *video_thread(void *arg) {
                     }
                     align = s->pace_align_ms;
                 }
+            }
+            /* v2.9.4：直播每秒落盘一条趋势（息屏后 JS 停写，长跑取证靠这里） */
+            if (s->duration_ms <= 0 && s->frames > 0 && s->fps > 0 &&
+                (s->frames % (long)s->fps) == 0) {
+                dump_trend(s);
             }
             long long target = align + (long long)((double)(s->frames + 1) * 1000.0 / (double)s->fps);
             long long elapsed = ms_since(&s->started_at);
