@@ -100,12 +100,6 @@ adb shell miniapp_cli start 8002026091900004 index   # 页面名**不带** `--`�
 
 本地部署、自检与截图采集：`npm run deploy`（依赖 ADB 可访问设备）。
 
-## 隐私与仓库内容
-
-- `profiles/` 下的设备资料、真机日志和截图为本地文件，不应提交。
-- 登录与搜索样例使用脱敏或占位数据；不要提交账号 Cookie、二维码登录数据、设备序列号、MAC 地址、内网地址或签名播放 URL。
-- `.gitignore` 已排除 `profiles/`、部署状态及构建中间文件。
-
 ## 致谢
 
 - [SocialSisterYi/bilibili-API-collect](https://github.com/SocialSisterYi/bilibili-API-collect)：B 站接口文档。
