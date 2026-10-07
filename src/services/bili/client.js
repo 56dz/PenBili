@@ -7,13 +7,16 @@
 //   3. 风控码翻译成人话
 // transport 可注入（get），单测不碰网络。
 
-import { httpGet, httpPostForm, httpGetBinary, tryParseJson } from '../net.js';
+import { httpGet, httpPostForm, httpGetBinary, httpGetTextNative, tryParseJson } from '../net.js';
 
 export const BILI_API = 'https://api.bilibili.com';
 export const DEFAULT_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 export const REFERER = 'https://www.bilibili.com/';
 export const DEFAULT_TIMEOUT = 15000;
+// nav 取 WBI 密钥的单独超时：响应约 1KB、正常 ~110ms；笔端 DNS 偶发 6s 超时
+// → 单趟给 7s（够宽松），配合短退避重试，避免一次抽风就判死。
+export const WBI_NAV_TIMEOUT = 7000;
 
 export function apiHeaders(cookie) {
   const h = {
@@ -105,6 +108,7 @@ export function createClient(opts) {
   const o = opts || {};
   const get = o.get || ((url, o2) => httpGet(url, o2));
   const post = o.post || ((url, body, o2) => httpPostForm(url, body, o2));
+  const getTextNative = o.getTextNative || httpGetTextNative;
   const now = o.now || (() => Date.now());
   const timeout = o.timeout || DEFAULT_TIMEOUT;
   let headers = o.headers || apiHeaders('');
@@ -173,10 +177,20 @@ export function createClient(opts) {
     headers = apiHeaders(cookie || '');
   }
 
-  // nav：匿名返回 code=-101，但 data.wbi_img 照常携带 —— 用它取 WBI 密钥
-  async function fetchWbiKeys() {
-    const r = await request('/x/web-interface/nav', null, { acceptCodes: [-101] });
-    if (!r.ok) return r;
+  // nav 的浏览器化请求头（在客户端现有头基础上补齐指纹字段；native 栈需要）
+  function navHeaders(base) {
+    const h = {};
+    const src = base || {};
+    for (const k of Object.keys(src)) h[k] = src[k];
+    h['Accept-Language'] = 'zh-CN,zh;q=0.9';
+    h.Origin = 'https://www.bilibili.com';
+    h['Sec-Fetch-Dest'] = 'empty';
+    h['Sec-Fetch-Mode'] = 'cors';
+    h['Sec-Fetch-Site'] = 'same-site';
+    return h;
+  }
+
+  function parseWbi(r, via) {
     const wi = r.data && r.data.wbi_img;
     if (!wi || !wi.img_url || !wi.sub_url) {
       return fail('api', { code: r.code, message: 'nav 缺少 wbi_img 字段' });
@@ -186,7 +200,49 @@ export function createClient(opts) {
     if (!/^[0-9a-f]{32}$/.test(imgKey) || !/^[0-9a-f]{32}$/.test(subKey)) {
       return fail('api', { code: r.code, message: 'wbi_img 不是 32 位 hex' });
     }
-    return { ok: true, code: r.code, imgKey: imgKey, subKey: subKey, ms: r.ms };
+    return { ok: true, code: r.code, imgKey: imgKey, subKey: subKey, ms: r.ms, via: via || 'jsapi' };
+  }
+
+  // nav：匿名返回 code=-101，但 data.wbi_img 照常携带 —— 用它取 WBI 密钥。
+  //
+  // 为什么要多趟 + 双栈（2026-10-07 真机根因）：
+  //   笔端 `YHttpManager` 会偶发 **DNS 解析超时**（`Resolving timed out after 6000 milliseconds`，
+  //   连有道家自己的域名一起偶发）→ 表现为 `load search 首次失败(wbi)`（历史日志反复出现）。
+  //   这是链路层的瞬态抽风，**不是** nav 接口本身的问题（压测 40/40 走 jsapi 全成功）。
+  //   故：短退避重试 3 趟（jsapi → native → jsapi），外加 native libcurl 栈兜底
+  //   （jsapi.http 对指纹敏感接口另有 -352 风险，见 2026-10-04 article/view 实证）。
+  //   失败时返回信息量最大的 stage（api/http > parse > transport），供 UI 显示真实原因。
+  const WBI_RANK = { api: 0, http: 1, parse: 2, transport: 3 };
+  const WBI_ATTEMPTS = [
+    { via: 'jsapi', wait: 0 },
+    { via: 'native', wait: 500 },
+    { via: 'jsapi', wait: 1200 }
+  ];
+
+  function navRequest(via, timeout) {
+    const ro = { acceptCodes: [-101], timeout: timeout };
+    if (via === 'native') {
+      ro.get = function (url, o) {
+        return getTextNative(url, { headers: navHeaders(o && o.headers), timeout: o && o.timeout });
+      };
+    }
+    return request('/x/web-interface/nav', null, ro);
+  }
+
+  async function fetchWbiKeys() {
+    let best = null;
+    for (let i = 0; i < WBI_ATTEMPTS.length; i++) {
+      const a = WBI_ATTEMPTS[i];
+      if (a.wait > 0) await new Promise((r) => setTimeout(r, a.wait));
+      const r = await navRequest(a.via, WBI_NAV_TIMEOUT);
+      if (r.ok) return parseWbi(r, a.via);
+      if (!best || (WBI_RANK[r.stage] != null ? WBI_RANK[r.stage] : 9) < (WBI_RANK[best.stage] != null ? WBI_RANK[best.stage] : 9)) {
+        best = r;
+      }
+      // api/http = 服务端已明确应答（签名/权限/HTTP 状态），换栈重试无意义 → 提前收敛
+      if (r.stage === 'api' || r.stage === 'http') break;
+    }
+    return best;
   }
 
   // 匿名触点：x/frontend/finger/spi → data.b_3 / b_4（放进 Cookie buvid3/buvid4）

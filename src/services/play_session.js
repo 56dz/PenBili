@@ -68,18 +68,38 @@ export function resolveLiveUrl(ctx, item) {
   };
 }
 
-// WBI 密钥会话级缓存（约每日轮换，单次 app 会话内复用安全）
-export async function ensureMixin(ctx) {
-  if (ctx.mixinMemo && ctx.mixinMemo.key) return ctx.mixinMemo.key;
+// WBI 密钥会话级缓存（约每日轮换，单次 app 会话内复用安全）。
+// → {ok:true, key} | {ok:false, stage, code, message}
+//   失败时**必须带出 stage/code/message**：nav 在笔上是间歇性失败（真机日志
+//   `load search 首次失败(wbi)` 反复出现），只回 null 会让 UI 只能显示 code=?，无法诊断。
+export async function ensureMixinResult(ctx) {
+  if (ctx.mixinMemo && ctx.mixinMemo.key) return { ok: true, key: ctx.mixinMemo.key };
   const r = await ctx.client.fetchWbiKeys();
-  if (!r.ok) return null;
+  if (!r.ok) {
+    return {
+      ok: false,
+      stage: r.stage || 'wbi',
+      code: r.code,
+      message: r.message || 'WBI 密钥获取失败',
+      // nav 内部已多趟退避重试（见 client.fetchWbiKeys）→ 页面层不必再整体重跑一遍
+      wbiRetried: true
+    };
+  }
   const key = deriveMixinKey(r.imgKey, r.subKey);
-  if (!/^[0-9a-f]{32}$/.test(key)) return null;
+  if (!/^[0-9a-f]{32}$/.test(key)) {
+    return { ok: false, stage: 'wbi', message: 'mixin_key 派生失败' };
+  }
   if (ctx.mixinMemo) {
     ctx.mixinMemo.key = key;
     ctx.mixinMemo.at = Date.now();
   }
-  return key;
+  return { ok: true, key: key };
+}
+
+// 兼容入口：只要 key（无 key 即 null）。需要错误细节的调用方用 ensureMixinResult。
+export async function ensureMixin(ctx) {
+  const r = await ensureMixinResult(ctx);
+  return r.ok ? r.key : null;
 }
 
 function cancelled(ctx) {

@@ -372,7 +372,7 @@ import {
   readStatus,
   closeSession,
   describePlayError,
-  ensureMixin,
+  ensureMixinResult,
   SEEK_STEP_MS
 } from '../../services/play_session.js';
 import * as player from '../../services/player.js';
@@ -665,10 +665,14 @@ export default {
         // liveOnly：只跑直播专项（跳过视频全流程），用于直播链路真机验证
         const liveOnly = at && typeof at === 'object' && at.liveOnly === true;
         const liveRoom = at && typeof at === 'object' ? Math.floor(Number(at.liveRoom) || 0) : 0;
+        // wbiStress：连打 N 次 nav 取 WBI 密钥，统计失败率与走的传输（诊断 nav 间歇失败用）
+        const wbiStress = at && typeof at === 'object' ? Math.floor(Number(at.wbiStress) || 0) : 0;
         logWarn('[bili] autotest seeded → ' + (liveOnly
           ? 'liveOnly room=' + (liveRoom || '-')
+          : wbiStress > 0 ? 'wbiStress n=' + wbiStress
           : 'run' + (soakSec > 0 ? ' soak=' + soakSec + 's' : '') + (soakBv ? ' bv=' + soakBv : '')));
         if (liveOnly) this.runLiveAutotest(liveRoom);
+        else if (wbiStress > 0) this.runWbiStress(wbiStress);
         else this.runAutotest(soakSec, soakBv); // 自检内部自带首屏加载（避免与这里并发双 load 竞态）
       } else {
         await this.selectTab('rcmd'); // 首屏加载：此刻登录 Cookie 已就位 → 个性化推荐
@@ -700,9 +704,12 @@ export default {
       try {
         if (id === 'search') {
           if (!this.keyword) return { ok: false, stage: 'param', message: '未输入关键词' };
-          const mixin = await ensureMixin(this.makeCtx(this.gen));
-          if (!mixin) return { ok: false, stage: 'wbi', message: 'WBI 密钥获取失败' };
-          const r = await searchBili(this.client, mixin, this.keyword, 1, this.searchType);
+          const mx = await ensureMixinResult(this.makeCtx(this.gen));
+          if (!mx.ok) {
+            logWarn('[bili] wbi fail stage=' + mx.stage + ' code=' + (mx.code != null ? mx.code : '-') + ' ' + mx.message);
+            return { ok: false, stage: mx.stage, code: mx.code, message: mx.message, wbiRetried: mx.wbiRetried };
+          }
+          const r = await searchBili(this.client, mx.key, this.keyword, 1, this.searchType);
           if (r.ok) {
             this.searchPages[this.searchType] = 1;
             this.searchNoMoreMap[this.searchType] = r.noMore;
@@ -730,7 +737,8 @@ export default {
       if (this.gen === myGen) this.statusText = '加载中…';
       let r = await this.loadTabOnce(id);
       // 网络/解析类失败自动重试一次（真机实测直播接口偶发返回非 JSON）
-      if (r && r.ok === false && this.gen === myGen && r.stage !== 'param') {
+      // wbiRetried：nav 取密钥失败时 client 内部已完成多趟退避重试 → 这里不再整体重跑
+      if (r && r.ok === false && this.gen === myGen && r.stage !== 'param' && !r.wbiRetried) {
         logWarn('[bili] load ' + id + ' 首次失败(' + r.stage + ')，1s 后重试: ' + r.message);
         await this.sleep(1000);
         if (this.gen !== myGen) {
@@ -859,17 +867,17 @@ export default {
       const myGen = ++this.gen;
       this.loading = true;
       this.statusText = '加载更多…';
-      const mixin = await ensureMixin(this.makeCtx(this.gen));
+      const mx = await ensureMixinResult(this.makeCtx(this.gen));
       if (this.gen !== myGen) {
         this.loading = false;
         return;
       }
-      if (!mixin) {
+      if (!mx.ok) {
         this.loading = false;
-        this.statusText = 'WBI 密钥失败';
+        this.statusText = describeListError({ ok: false, stage: mx.stage, code: mx.code, message: mx.message });
         return;
       }
-      const r = await searchBili(this.client, mixin, this.keyword, this.searchPages[st] + 1, st);
+      const r = await searchBili(this.client, mx.key, this.keyword, this.searchPages[st] + 1, st);
       if (this.gen !== myGen) {
         this.loading = false;
         return;
@@ -924,13 +932,14 @@ export default {
       this.commentsOpen = false;
       this.replyCtx = { oid: it.id, type: 12 };
       // article/view 有限流/风控（-509/-352 实测）→ 退避重试两次（1.5s / 6s，同 loadTab 策略的加强版）
-      const mixin = await ensureMixin(this.makeCtx(myGen));
+      const mx = await ensureMixinResult(this.makeCtx(myGen));
       if (this.gen !== myGen) return;
-      if (!mixin) {
+      if (!mx.ok) {
         this.article.state = 'error';
-        this.article.note = 'WBI 密钥失败';
+        this.article.note = (mx.message || 'WBI 密钥失败') + (mx.code != null ? '（code ' + mx.code + '）' : '');
         return;
       }
+      const mixin = mx.key;
       const backoffs = [0, 1500, 6000];
       let r = { ok: false, stage: 'init' };
       for (let i = 0; i < backoffs.length; i++) {
@@ -1741,6 +1750,34 @@ export default {
 
     /* ---------- 真机自检（storage 预置 bili_autotest 触发；
          全部复用按钮同一代码路径 —— 设备无触摸注入的替代取证） ---------- */
+    // WBI 压测（诊断；种子 bili_autotest = {enabled:true, wbiStress:<N>}）：
+    // 连打 N 次 nav 取密钥，统计失败率与成功时走的传输（jsapi / native）。
+    async runWbiStress(n) {
+      let okJsapi = 0;
+      let okNative = 0;
+      let bad = 0;
+      try {
+        for (let i = 0; i < n; i++) {
+          const r = await this.client.fetchWbiKeys();
+          if (r.ok) {
+            if (r.via === 'native') okNative++;
+            else okJsapi++;
+          } else {
+            bad++;
+          }
+          logWarn(
+            '[bili] WBI stress #' + (i + 1) + '/' + n + ' ok=' + r.ok +
+              ' via=' + (r.via || '-') + ' stage=' + (r.stage || '-') +
+              ' code=' + (r.code != null ? r.code : '-') + ' ms=' + (r.ms != null ? r.ms : '-') +
+              (r.ok ? '' : ' msg=' + (r.message || ''))
+          );
+          await this.sleep(300);
+        }
+      } catch (e) {
+        logWarn('[bili] WBI stress 异常: ' + ((e && e.message) || e));
+      }
+      logWarn('[bili] WBI stress done n=' + n + ' jsapi=' + okJsapi + ' native=' + okNative + ' fail=' + bad);
+    },
     // 直播专项自检（种子 bili_autotest = {enabled:true, liveOnly:true, liveRoom:<id 可选>}）：
     // 只跑直播链路 —— 解析服务器地址 → 直播栏搜索 → 播放 → 首帧断言 → 返回。
     // 真机证据链：服务端 server.log 会出现 /live 请求与分片拉取（证明笔端 ffmpeg 在消费 HLS）。

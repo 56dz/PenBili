@@ -132,6 +132,7 @@ async function main() {
     closeSession,
     describePlayError,
     ensureMixin,
+    ensureMixinResult,
     SEEK_STEP_MS
   } = await import('../src/services/play_session.js');
   const { fetchReplies, addReply, parseReplies, normalizeReply, replyType } = await import('../src/services/bili/reply.js');
@@ -248,6 +249,72 @@ async function main() {
     assert.strictEqual(r.imgKey, '74e6d6d06a3a1f1e7a7a66b7de92c16f');
     assert.strictEqual(r.subKey, '56a5b7c8e9fa0b1c2d3e4f5a6b7c8d9e');
   });
+  test('client: nav 双栈兜底 —— jsapi.http 失败时 native libcurl 接管', async () => {
+    const wbiBody = JSON.stringify({
+      code: -101,
+      data: {
+        wbi_img: {
+          img_url: 'https://i0.hdslb.com/bfs/wbi/' + 'a'.repeat(32) + '.png',
+          sub_url: 'https://i0.hdslb.com/bfs/wbi/' + 'b'.repeat(32) + '.png'
+        }
+      }
+    });
+    let nativeCalls = 0;
+    let nativeHeaders = null;
+    const c = createClient({
+      get: async () => ({ statusCode: 200, body: '<html>risk</html>' }), // jsapi 栈：非 JSON
+      getTextNative: async (url, o) => {
+        nativeCalls++;
+        nativeHeaders = o.headers;
+        return { statusCode: 200, body: wbiBody, errorMessage: '' };
+      }
+    });
+    const r = await c.fetchWbiKeys();
+    assert.strictEqual(nativeCalls, 1);
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.imgKey, 'a'.repeat(32));
+    assert.strictEqual(nativeHeaders.Origin, 'https://www.bilibili.com'); // native 栈带浏览器头
+  });
+  test('client: nav 双栈皆败 → 保留信息量大的错误（stage=api 优先）', async () => {
+    const c = createClient({
+      get: async () => ({ statusCode: 200, body: JSON.stringify({ code: -352, message: 'risk' }) }),
+      getTextNative: async () => {
+        throw new Error('NET_NATIVE_MISSING: 缺少 libjsapi_httpjson.so');
+      }
+    });
+    const r = await c.fetchWbiKeys();
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.stage, 'api'); // 不用 transport 覆盖
+    assert.strictEqual(r.code, -352);
+  });
+  test('client: nav 瞬态抽风短退避重试（transport 失败后第 3 趟成功）', async () => {
+    const wbiBody = JSON.stringify({
+      code: -101,
+      data: {
+        wbi_img: {
+          img_url: 'https://i0.hdslb.com/bfs/wbi/' + 'c'.repeat(32) + '.png',
+          sub_url: 'https://i0.hdslb.com/bfs/wbi/' + 'd'.repeat(32) + '.png'
+        }
+      }
+    });
+    let n = 0;
+    const c = createClient({
+      // 第 1 趟 jsapi 模拟 DNS 解析超时（真机 YHttpManager 实测该故障）
+      get: async () => {
+        n++;
+        if (n === 1) throw new Error('Resolving timed out after 6000 milliseconds');
+        return { statusCode: 200, body: wbiBody };
+      },
+      getTextNative: async () => {
+        throw new Error('also down');
+      }
+    });
+    const r = await c.fetchWbiKeys();
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.via, 'jsapi');
+    assert.strictEqual(r.imgKey, 'c'.repeat(32));
+    assert.strictEqual(n, 2); // 第 3 趟（jsapi）才成功
+  });
   test('client: -352 → stage=api + 风控文案 + v_voucher 标记', async () => {
     const c = createClient({ get: okGet({ code: -352, message: 'risk', data: { v_voucher: 'v1' } }) });
     const r = await c.fetchView('BV1ZCeb6NEyM');
@@ -278,8 +345,7 @@ async function main() {
     assert.strictEqual(r.stage, 'transport');
     assert.ok(r.message.indexOf('NET_TIMEOUT') >= 0);
   });
-  test('client: 请求头必含 UA+Referer，Cookie 可回填', async () => {
-    let seen = null;
+  test('client: 请求头必含 UA+Referer，Cookie 可回填', async () => {    let seen = null;
     const c = createClient({
       get: async (url, o) => {
         seen = o.headers;
@@ -849,6 +915,11 @@ async function main() {
     assert.strictEqual(describeListError({ ok: false, stage: 'transport', message: 'NET_TIMEOUT: x' }).indexOf('网络失败'), 0);
     assert.ok(describeListError({ ok: false, stage: 'api', code: -352, message: '风控' }).indexOf('-352') >= 0);
     assert.strictEqual(describeListError({ ok: true }), '');
+  });
+  test('feed: describeListError wbi 段可读（不再是 code=?）', () => {
+    const s = describeListError({ ok: false, stage: 'wbi', message: 'nav 缺少 wbi_img 字段' });
+    assert.strictEqual(s.indexOf('签名密钥获取失败'), 0);
+    assert.ok(s.indexOf('nav 缺少 wbi_img 字段') >= 0);
   });
   test('feed: appendDeduped 去重 + 封顶', () => {
     const a = [{ bvid: 'BV1ZCeb6NEyM' }, { bvid: 'BVaaaaaaaaaa' }];
@@ -1621,6 +1692,20 @@ async function main() {
     assert.ok(/^[0-9a-f]{32}$/.test(a));
     assert.strictEqual(a, b);
     assert.strictEqual(n, 1);
+  });
+  test('play_session: ensureMixinResult 透传失败细节（stage/code/message）', async () => {
+    const w = fakePlayDeps();
+    w.client.fetchWbiKeys = async () => ({
+      ok: false,
+      stage: 'api',
+      code: -352,
+      message: '风控(-352)：签名/UA 被识别异常'
+    });
+    const r = await ensureMixinResult(w);
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.stage, 'api');
+    assert.strictEqual(r.code, -352);
+    assert.ok(r.message.indexOf('-352') >= 0);
   });
 
   // ---------------- 播放几何（174+452+174=800）----------------

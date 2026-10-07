@@ -289,6 +289,7 @@ export function describeListError(res) {
   if (stage === 'transport') return '网络失败：' + (res.message || '');
   if (stage === 'http') return 'HTTP ' + (res.status || '') + '：' + (res.message || '');
   if (stage === 'parse') return res.message || '数据解析失败';
+  if (stage === 'wbi') return '签名密钥获取失败：' + (res.message || '请稍后重试');
   return 'B站 code=' + (res.code != null ? res.code : '?') + '：' + (res.message || '接口错误');
 }
 
