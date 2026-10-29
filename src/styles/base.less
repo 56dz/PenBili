@@ -512,10 +512,19 @@
 /* ---------- 播放：中列（视频区 + 进度条）---------- */
 /* 用户要求 m06919-4：增大左图标栏与视频区的间距 → margin-left 16，视频区 448→432。
    总宽 64 + 16 + 432 + 448 = 960。 */
+/* 图标栏与视频区之间的 16px 间距占位块（m06919-4）。
+ * 必须不透明：播放态根容器是透明的，此处若空着会透出 fb 残留像素。 */
+.ibar-gap {
+  width: 16px;
+  height: 266px;
+  background-color: @background-color;
+}
+
+/* 64(图标栏) + 16(间距占位) + 432(视频) + 448(右栏) = 960；
+ * 间距已由 .ibar-gap 占位，这里不再用 margin-left。 */
 .stage {
   width: 432px;
   height: 266px;
-  margin-left: 16px;
   flex-direction: column;
 }
 
