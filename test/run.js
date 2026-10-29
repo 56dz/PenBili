@@ -1246,6 +1246,10 @@ async function main() {
     assert.ok(q.indexOf('format=0,1,2') > 0, q);
     assert.ok(q.indexOf('codec=0,1') > 0, q);
     assert.ok(q.indexOf('ptype=8') > 0, q);
+    // 必须请求最低画质 qn=150（480p）：已登录时 qn=10000 会给 1080p60 原画，
+    // 而 mppvideodec rotation 让 1080p60 解码慢 2.89x → 真机「一秒一卡」
+    assert.ok(q.indexOf('qn=150') > 0, q);
+    assert.ok(q.indexOf('qn=10000') < 0, q);
     // 小数房间号取整
     assert.ok(buildPlayInfoQuery(88.9).indexOf('room_id=88') === 0);
   });

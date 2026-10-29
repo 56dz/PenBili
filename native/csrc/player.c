@@ -369,10 +369,11 @@ struct render_info {
     int rx, ry;   /* 已建链的物理矩形 */
     int fps;      /* 保留（诊断用；v3.0.0 起不再进 caps） */
     int transpose;/* 1=顺时针 90° / 2=逆时针 90°（ffmpeg 语义）→ 映射到 mppvideodec rotation */
+    int dump_fd;  /* 诊断用：PENBILI_DUMP_FIFO 落盘 fd，-1 = 未启用 */
     char path[64];
 };
 
-static struct render_info g_rd = { 0, 0, -1, 0, 0, 0, 0, 0, 30, 1, "" };
+static struct render_info g_rd = { 0, 0, -1, 0, 0, 0, 0, 0, 30, 1, -1, "" };
 
 /* 非阻塞轮询打开 FIFO 写端：gst 起不来时不要永久阻塞视频线程。
  * v3.0.0：打开后**保留 O_NONBLOCK** —— 压缩包转发是长写（一路写到播完），必须能在
@@ -444,6 +445,19 @@ static void render_reap_orphans(void) {
 }
 
 static void render_stop(void) {
+    /* 取证：谁在关 FIFO。关闭写端会让 gst 读到 EOF 并**正常退出（exit=0）**，
+     * 单看 /tmp/vp_gst_exit.log 的 exit=0 无法区分「gst 自己崩」与「我们关的」。
+     * 这条日志配合 gst_exit 的时间戳即可定位（t 为 uptime 秒）。 */
+    if (g_rd.started || g_rd.fifo_fd >= 0) {
+        int dfd = open("/tmp/vp_gst_exit.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (dfd >= 0) {
+            char sl[128];
+            int sl_n = snprintf(sl, sizeof(sl), "t=%.1f STOP pid=%ld fd=%d w=%d h=%d rx=%d ry=%d\n",
+                    now_seconds(), (long)g_rd.gst_pid, g_rd.fifo_fd, g_rd.w, g_rd.h, g_rd.rx, g_rd.ry);
+            if (sl_n > 0) (void)!write(dfd, sl, (size_t)sl_n);
+            close(dfd);
+        }
+    }
     if (g_rd.fifo_fd >= 0) {
         close(g_rd.fifo_fd);
         g_rd.fifo_fd = -1;
@@ -509,20 +523,24 @@ static int fifo_write_all(int fd, const unsigned char *buf, size_t n, const vola
  *     videoconvert 即可（免重编排查用）。
  * rotation 映射：s->transpose 是 ffmpeg 语义（1=顺时针 90°，2=逆时针 90°，3=180°），
  *   mppvideodec rotation 是**顺时针角度**（0/90/180/270）。
- *   2026-10-29 真机复验修正：早前用彩条源抓到 transpose=2 ≡ rotation=270 就定了，
- *   但那个结论只在"把平面 PNG 抽出来单独转正后比对"的语境里成立，**没算面板自身的
- *   竖屏朝向**。用户戴机实测（v3.0.0 首版 rotation=270）画面**上下倒置**——上下颠倒
- *   恰好是 180° 之差，故 270 → 90。
- *     transpose=1（顺时针 90°）≡ rotation=270
- *     transpose=2（逆时针 90°）≡ rotation=90
- *   JS 侧（play_session.js / probe.js）恒传 transpose=2 → rotation=90。
+ *
+ * 【2026-10-30 决定性复验，结论：transpose=2 → rotation=270】
+ *   方法：把真实直播录制流 /tmp/dump.h264 分别以 rotation=90 和 270 上屏，
+ *   用 kmssrc 抓平面 PNG，再按用户视角（面板图顺时针转 90°）比对画面里的文字方向。
+ *   实测 rotation=90 的画面**整体上下颠倒**（"WORLDS 26" 和选手脸都是倒的），
+ *   rotation=270 完全正常。此前 v3.0.0→v3.0.1 把 270 改成 90 是**改错了**：
+ *   那次是靠"把平面 PNG 单独转正后比对"推断的，转正方向本身就搞反了，
+ *   于是把正确值改成了错误值，用户戴机后一直反馈"倒置"。
+ *     transpose=1（顺时针 90°）≡ rotation=90
+ *     transpose=2（逆时针 90°）≡ rotation=270
+ *   JS 侧（play_session.js / probe.js）恒传 transpose=2 → rotation=270。
  *   注意（v3.0.1）：本函数只读 g_rd.transpose，而 g_rd.transpose 曾经**从未被赋值**
- *   （只有 s->transpose 被写），导致长期恒为 270、映射表改动毫无效果。
- *   现在 open() 里两处同步赋值，真机 ps 应看到 rotation=90。 */
+ *   （只有 s->transpose 被写），导致映射表改动毫无效果 —— 那一处修复是对的，
+ *   现在 open() 里两处同步赋值，真机 ps 应看到 rotation=270。 */
 static int rotation_for_transpose(int t) {
-    if (t == 2) return 90;
+    if (t == 1) return 90;
     if (t == 3) return 180;
-    return 270;
+    return 270; /* t == 2（JS 恒传） */
 }
 
 static int render_start(int x, int y, int w, int h) {
@@ -564,13 +582,28 @@ static int render_start(int x, int y, int w, int h) {
     if (pid == 0) {
         int logfd;
         setsid();
-        logfd = open(GST_LOG_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        /* O_APPEND 而非 O_TRUNC：重建链（EPIPE 后重试 / seek / 断流重启）时不能把
+         * 上一代 gst 的死因清掉——真机排查「视频显示链断开」时日志恒为 0 字节，
+         * 正是因为第二次 render_start 把第一次的错误信息截断了。 */
+        logfd = open(GST_LOG_PATH, O_WRONLY | O_CREAT | O_APPEND, 0644);
         if (logfd >= 0) {
             dup2(logfd, 2);
+            /* v3.0.1 取证：librga 的 "rga_api version ..." 走 **stdout** 而非 stderr，
+             * 只重定向 fd 2 时日志里看不到它，容易误判"gst 根本没跑起来"。 */
+            dup2(logfd, 1);
             close(logfd);
         }
+        /* 排查开关：PENBILI_GST_DEBUG=<GST_DEBUG 值> 给子进程设 GST_DEBUG。
+         * 真机遇到「gst 自己 exit=0（EOS）而写端仍开着」时，靠它看清是哪一级报的 EOS。 */
+        {
+            const char *gdbg = getenv("PENBILI_GST_DEBUG");
+            setenv("GST_DEBUG", (gdbg && gdbg[0]) ? gdbg : "*:3", 1);
+            setenv("GST_DEBUG_NO_COLOR", "1", 1);
+        }
         argv[i++] = (char *)GST_LAUNCH_PATH;
-        argv[i++] = (char *)"-q";
+        /* PENBILI_GST_NOQ=1 → 去掉 -q，把 EOS/协商等全量消息打进日志（排查专用）。 */
+        /* 排查期：默认不加 -q（看到 EOS/协商消息）；设 PENBILI_GST_QUIET=1 恢复安静模式。 */
+        if (getenv("PENBILI_GST_QUIET")) argv[i++] = (char *)"-q";
         argv[i++] = (char *)"filesrc";
         argv[i++] = location;
         argv[i++] = blocksize;
@@ -591,14 +624,65 @@ static int render_start(int x, int y, int w, int h) {
         argv[i++] = (char *)"force-aspect-ratio=false";
         argv[i++] = rect;
         argv[i] = NULL;
+        {
+            /* 取证：子进程确实走到 execv（真机出现「gst exit=0 但日志 0 字节」时，
+             * 需要区分「exec 没跑」与「gst 跑了但一句话都没输出」）。 */
+            int mfd = open("/tmp/vp_gst_exit.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+            if (mfd >= 0) {
+                const char *m = "CHILD execv gst-launch\n";
+                (void)!write(mfd, m, strlen(m));
+                close(mfd);
+            }
+        }
         execv(GST_LAUNCH_PATH, argv);
+        {
+            int mfd = open("/tmp/vp_gst_exit.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+            if (mfd >= 0) {
+                const char *m = "CHILD execv FAILED\n";
+                (void)!write(mfd, m, strlen(m));
+                close(mfd);
+            }
+        }
         _exit(127);
     }
     g_rd.gst_pid = pid;
+    {
+        int dfd = open("/tmp/vp_gst_exit.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (dfd >= 0) {
+            char sl[128];
+            struct stat pst;
+            memset(&pst, 0, sizeof(pst));
+            (void)stat(g_rd.path, &pst);
+            int sl_n = snprintf(sl, sizeof(sl), "t=%.1f START pid=%ld ino=%llu rect=%d,%d,%d,%d rot=%d\n",
+                    now_seconds(), (long)pid, (unsigned long long)pst.st_ino, px, y, w, h, rot);
+            if (sl_n > 0) (void)!write(dfd, sl, (size_t)sl_n);
+            close(dfd);
+        }
+    }
     g_rd.fifo_fd = fifo_open_write(g_rd.path, 4000);
     if (g_rd.fifo_fd < 0) {
         render_stop();
         return -1;
+    }
+    /* v3.0.2：给 gst 一点时间真正进入 read 循环。
+     * 真机现象：fifo_open_write（O_NONBLOCK）在 gst 刚 open 完 FIFO 就立刻返回，
+     * 播放器随即一次性灌入首个 AU（~140KB）；而 gst 此时还在 filesrc 的
+     * "opening file / pad not activated yet" 阶段，实测随后就 exit=0（日志停在
+     * "Pipeline is PREROLLING"）。手动用 shell 阻塞式 open 喂同样的数据从不复现。
+     * 这里补 250ms 让 filesrc 的 start/激活完成，代价只有起播多 0.25s。 */
+    usleep(250000);
+    {
+        struct stat fst;
+        memset(&fst, 0, sizeof(fst));
+        (void)fstat(g_rd.fifo_fd, &fst);
+        int dfd = open("/tmp/vp_gst_exit.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (dfd >= 0) {
+            char sl[128];
+            int sl_n = snprintf(sl, sizeof(sl), "t=%.1f FIFO fd=%d ino=%llu\n",
+                    now_seconds(), g_rd.fifo_fd, (unsigned long long)fst.st_ino);
+            if (sl_n > 0) (void)!write(dfd, sl, (size_t)sl_n);
+            close(dfd);
+        }
     }
     g_rd.w = w;
     g_rd.h = h;
@@ -681,12 +765,59 @@ static int fb_write_stream(const unsigned char *data, size_t n, int x, int y, in
             if (render_start(x, y, w, h) != 0) return -1;
         }
         {
-            int r = fifo_write_all(g_rd.fifo_fd, data, n, stop);
+            int r;
+            /* 诊断（v3.0.2）：区分「gst 在我们写之前就死了」与「写完才死」。
+             * 真机现象是 gst 停在 "Pipeline is PREROLLING ..." 就 exit=0，
+             * 日志里看不到任何 EOS/协商错误 → 必须知道它死在写入前还是后。 */
+            if (g_rd.gst_pid > 0) {
+                int wst = 0;
+                pid_t wr = waitpid(g_rd.gst_pid, &wst, WNOHANG);
+                if (wr == g_rd.gst_pid) {
+                    int mfd = open("/tmp/vp_gst_exit.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+                    if (mfd >= 0) {
+                        char ml[128];
+                        int mn = snprintf(ml, sizeof(ml), "t=%.1f DEAD_BEFORE_WRITE status=0x%x exit=%d n=%zu\n",
+                                now_seconds(), wst, WIFEXITED(wst) ? WEXITSTATUS(wst) : -1, n);
+                        if (mn > 0) (void)!write(mfd, ml, (size_t)mn);
+                        close(mfd);
+                    }
+                    g_rd.gst_pid = 0;
+                }
+            }
+            /* 诊断：PENBILI_DUMP_FIFO=<path> 把真正写进 FIFO 的压缩字节原样落盘，
+             * 用于「播放器里 gst 秒退、手动喂同样 gst 却正常」时做字节级回放比对。 */
+            if (g_rd.dump_fd < 0) g_rd.dump_fd = open("/tmp/dump.h264", O_WRONLY | O_CREAT | O_APPEND, 0644);
+            if (g_rd.dump_fd >= 0 && n > 0) {
+                size_t dn = 0;
+                while (dn < n) {
+                    ssize_t dw = write(g_rd.dump_fd, data + dn, n - dn);
+                    if (dw <= 0) break;
+                    dn += (size_t)dw;
+                }
+            }
+            r = fifo_write_all(g_rd.fifo_fd, data, n, stop);
             if (r == 0) return 0;
             if (r == 1) return 1;
         }
-        /* gst 侧断了（EPIPE）：重建一次链再试。重建后 h264parse 需要 SPS/PPS —— 由调用方
-         * 在下一批数据的 AU 开头自带（Annex-B 流的 IDR 前必有 SPS/PPS，源流如此）。 */
+        /* gst 侧断了（EPIPE）：先把死因落到 /tmp/vp_gst_exit.log —— 真机排「视频显示链断开」
+         * 时，光看 /tmp/vp_gst.log 分不清是 gst 自己退出（解码/协商错误）还是写端时序问题。 */
+        if (g_rd.gst_pid > 0) {
+            int st = wait_child(g_rd.gst_pid, 300);
+            int dfd = open("/tmp/vp_gst_exit.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+            if (dfd >= 0) {
+                char el[128];
+                int el_n = snprintf(el, sizeof(el),
+                        "t=%.1f pid=%ld status=0x%x exit=%d sig=%d n=%zu\n",
+                        now_seconds(), (long)g_rd.gst_pid, st,
+                        WIFEXITED(st) ? WEXITSTATUS(st) : -1,
+                        WIFSIGNALED(st) ? WTERMSIG(st) : -1, n);
+                if (el_n > 0) (void)!write(dfd, el, (size_t)el_n);
+                close(dfd);
+            }
+            g_rd.gst_pid = 0;
+        }
+        /* 重建链再试。重建后 h264parse 需要 SPS/PPS —— 由调用方在下一批数据的 AU 开头
+         * 自带（Annex-B 流的 IDR 前必有 SPS/PPS，源流如此）。 */
         render_stop();
     }
     return -1;
@@ -2327,6 +2458,24 @@ static void *video_thread(void *arg) {
             s->last_drift_ms = (long)drift;
             if (s->frames > 0 && !s->audio_alive) {
                 s->paced = 1; /* 音频时钟死亡 → 墙钟接管 */
+            } else if (drift > AV_RESYNC_MS && s->frames > 0 && s->duration_ms <= 0 &&
+                       s->audio_input[0] && s->audio_alive) {
+                /* 直播（duration_ms<=0）不能走"重启到音频位置"这条路：respawn_video_at 会用
+                 * `-ss target` 重开 ffmpeg，而直播源没有内容时间轴，-ss 会跳到流的开头/直接
+                 * 拉不到数据。真机实测（2026-10-30）直播每遇网络停顿 drift 就 +3s 且永不回落
+                 * （累计到 14s），正是这里误用重同步造成的。
+                 * 直播的正确做法是**就地重锚**：把视频基线挪到"当前可闻音频位置 − 已出帧数对应
+                 * 的时长"，积压的那段画面直接丢弃（直播本来就是"看现在"，丢帧比追帧正确），
+                 * ffmpeg/gst 都不动。音画立刻重新对齐，且不会触发 gst 重建链。
+                 * 这里刻意**不经过 av_resync_gate**：重锚只是改一个整数，没有重启成本，
+                 * 不需要限流（限流是给"重启视频进程"那种昂贵操作准备的）。 */
+                if (s->fps > 0) {
+                    long long pos = (long long)((double)s->frames * 1000.0 / (double)s->fps);
+                    s->video_base_ms = apos - pos;
+                }
+                s->last_drift_ms = 0;
+                s->resync_count++;
+                continue; /* 下一帧按新基线计算 due */
             } else if (drift > AV_RESYNC_MS && s->frames > 0 && s->audio_input[0] && av_resync_gate(s)) {
                 /* ② 不同步过大 → 强制重同步（v2.1.0）：跳过积压内容，视频流重启到"当前可闻音频
                  * 位置 + 预估启动时延"，首帧落屏即同步（音频侧完全不动，声音不断）。重同步期间
@@ -2357,6 +2506,23 @@ static void *video_thread(void *arg) {
                         usleep((useconds_t)((min_gap - since) * 1000.0));
                     }
                 }
+            }
+        }
+        /* 直播首帧对齐（v3.0.2）：
+         * 直播（duration_ms<=0）没有内容时间轴，视频基线只能从 0 起算；而音频进程
+         * 一开始就出声，等 gst 建链 + PREROLL + 首帧解码完，音频锚往往已经跑了十几秒。
+         * 于是 due = 0 + frames/fps 永远落后 apos 一大截 → drift 恒为 ~6s，画面只能
+         * 以 PACE_CATCHUP_MAX 倍速一路狂追（真机 skip 每秒涨 30，观感是"一直快放"），
+         * 而且永远追不平（追赶同时音频还在前进）。
+         * 直播无法 seek 回音频位置，正确做法是**反过来把视频基线挪到当前音频位置**：
+         * 首帧到达时令 video_base_ms = 当前可闻音频位置，此后两者同起点、同速前进。
+         * 只在首帧做一次（frames==0），且仅限直播；VOD 的 video_base_ms 是真实内容
+         * 位置（-ss 落点），绝不能动。 */
+        if (s->frames == 0 && s->duration_ms <= 0 && s->audio_enabled && s->audio_alive) {
+            long long anchor0 = s->audio_base_ms + audio_anchor_ms(s);
+            if (anchor0 > 0) {
+                s->video_base_ms = anchor0;
+                s->last_drift_ms = 0;
             }
         }
         s->frames++;
