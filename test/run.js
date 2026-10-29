@@ -87,16 +87,25 @@ async function main() {
     logicalToPhysicalPoint,
     isRectInsidePanel,
     playVideoRects,
+    VIDEO_AREA,
+    PHYSICAL,
+    PANEL_X_OFFSET,
     BAR_WIDTH
   } = await import('../src/services/screen.js');
   const { runProbe, STEPS } = await import('../src/services/bili/probe.js');
   const { normalizeStoredValue, normalizeSession, normalizeSettings, DEFAULT_TARGET } = await import(
     '../src/services/storage.js'
   );
-  const { normalizeLive, normalizeLiveAddr, LIVE_LIMITS } = await import('../src/services/storage.js');
-  const { ensureLiveAddr, probeAddr, parseHealth, buildHealthUrl, PROBE_MS } = await import(
-    '../src/services/live.js'
-  );
+  const {
+    buildPlayInfoQuery,
+    unescapeExtra,
+    joinCodecUrl,
+    pickCodec,
+    parsePlayInfo,
+    fetchLivePlayUrl,
+    LIVE_FPS: LIVE_FPS_MOD,
+    LIVE_PLAYINFO_URL
+  } = await import('../src/services/bili/live.js');
   const feedMod = await import('../src/services/feed.js');
   const {
     normalizeVideo,
@@ -124,8 +133,6 @@ async function main() {
     openVideo,
     resolveVideoUrl,
     resolveLiveUrl,
-    buildLiveUrl,
-    LIVE_FPS,
     togglePlay,
     seekBy,
     readStatus,
@@ -590,26 +597,27 @@ async function main() {
   });
 
   // ---------------- screen ----------------
-  test('screen: 360p 左列矩形（与 profile 真机证据 y174/254x452 一致）', () => {
+  test('screen: 360p 视频区矩形（X6 Pro 逻辑 960x266 / 物理 266x960）', () => {
     const r = probeVideoRects(640, 360);
-    assert.deepStrictEqual(r.logical, { x: 0, y: 0, width: 452, height: 254 });
-    assert.deepStrictEqual(r.physical, { x: 0, y: 174, width: 254, height: 452 });
+    assert.deepStrictEqual(r.logical, { x: 83, y: 0, width: 427, height: 240 });
+    assert.deepStrictEqual(r.physical, { x: 0, y: 450, width: 240, height: 427 });
     assert.strictEqual(isRectInsidePanel(r.physical), true);
   });
   test('screen: fitLogicalRect 信箱适配', () => {
     const r = fitLogicalRect(1920, 1080);
-    assert.strictEqual(r.width, 452);
-    assert.strictEqual(r.height, 254);
+    assert.strictEqual(r.width, 473); // 960x266 box：16:9 按高适配 → 473x266
+    assert.strictEqual(r.height, 266);
     const v = fitLogicalRect(360, 640); // 竖屏稿件
     assert.ok(v.width < v.height);
   });
   test('screen: direction=270 四角与越界钳制', () => {
-    assert.deepStrictEqual(logicalToPhysicalPoint({ x: 0, y: 0 }, 270), { x: 253, y: 0 });
-    assert.deepStrictEqual(logicalToPhysicalPoint({ x: 799, y: 0 }, 270), { x: 253, y: 799 });
+    // X6 Pro 物理面板 266x960 ⇒ 270 转角：phys.x = 266-1-cy，phys.y = cx
+    assert.deepStrictEqual(logicalToPhysicalPoint({ x: 0, y: 0 }, 270), { x: 265, y: 0 });
+    assert.deepStrictEqual(logicalToPhysicalPoint({ x: 959, y: 0 }, 270), { x: 265, y: 959 });
     assert.deepStrictEqual(logicalToPhysicalPoint({ x: -5, y: 9999 }, 270), { x: 0, y: 0 });
   });
   test('screen: 越界/非法矩形被拒', () => {
-    assert.strictEqual(isRectInsidePanel({ x: 250, y: 0, width: 10, height: 10 }), false);
+    assert.strictEqual(isRectInsidePanel({ x: 260, y: 0, width: 10, height: 10 }), false); // 260+10 > 266
     assert.strictEqual(isRectInsidePanel({ x: -1, y: 0, width: 10, height: 10 }), false);
     assert.strictEqual(isRectInsidePanel({ x: 0, y: 0, width: 0, height: 10 }), false);
     assert.strictEqual(isRectInsidePanel(null), false);
@@ -705,8 +713,8 @@ async function main() {
     assert.strictEqual(w.calls.open, 1);
     assert.strictEqual(w.openedWith.userAgent, DEFAULT_UA);
     assert.strictEqual(w.openedWith.referer, REFERER);
-    assert.strictEqual(w.openedWith.rect.width, 254);
-    assert.strictEqual(w.openedWith.rect.height, 452);
+    assert.strictEqual(w.openedWith.rect.width, 240);
+    assert.strictEqual(w.openedWith.rect.height, 427);
     const fails = w.events.filter((e) => e.state === 'fail');
     assert.strictEqual(fails.length, 0, JSON.stringify(fails));
     const okIds = w.events.filter((e) => e.state === 'ok').map((e) => e.id);
@@ -789,11 +797,14 @@ async function main() {
   });
 
   // ---------------- feed（fixtures = 开发机真响应裁剪）----------------
-  test('feed: normalizeCover 协议归一（// 与 hdslb https → http）', () => {
-    assert.strictEqual(normalizeCover('//i0.hdslb.com/a.jpg'), 'http://i0.hdslb.com/a.jpg');
-    assert.strictEqual(normalizeCover('https://i1.hdslb.com/b.jpg'), 'http://i1.hdslb.com/b.jpg');
-    assert.strictEqual(normalizeCover('http://i1.hdslb.com/c.jpg'), 'http://i1.hdslb.com/c.jpg');
+  test('feed: normalizeCover 协议归一 + hdslb → archive.biliimg.com（X6 Pro 设备 DNS 实测）', () => {
+    // 设备上 i*.hdslb.com 无法解析，archive.biliimg.com 提供同 path 的图片
+    assert.strictEqual(normalizeCover('//i0.hdslb.com/a.jpg'), 'http://archive.biliimg.com/a.jpg');
+    assert.strictEqual(normalizeCover('https://i1.hdslb.com/b.jpg'), 'http://archive.biliimg.com/b.jpg');
+    assert.strictEqual(normalizeCover('http://i1.hdslb.com/c.jpg'), 'http://archive.biliimg.com/c.jpg');
+    assert.strictEqual(normalizeCover('//i2.hdslb.com:8080/d.jpg'), 'http://archive.biliimg.com/d.jpg');
     assert.strictEqual(normalizeCover('https://example.org/x.png'), 'https://example.org/x.png');
+    assert.strictEqual(normalizeCover('https://archive.biliimg.com/bfs/archive/y.jpg'), 'https://archive.biliimg.com/bfs/archive/y.jpg');
     assert.strictEqual(normalizeCover(''), '');
   });
   test('feed: formatDuration / formatCount', () => {
@@ -818,6 +829,7 @@ async function main() {
       assert.ok(/^BV[0-9A-Za-z]{10}$/.test(it.bvid));
       assert.ok(it.title.length > 0);
       assert.ok(!(it.cover.indexOf('https://') === 0 && it.cover.indexOf('hdslb') >= 0), 'hdslb 不应为 https: ' + it.cover);
+      assert.ok(it.cover.indexOf('hdslb.com') < 0, '设备上 hdslb 不可解析，必须换 CDN: ' + it.cover);
     });
   });
   test('feed: popular fixture + 非法条目丢弃', () => {
@@ -842,7 +854,7 @@ async function main() {
     assert.strictEqual(s.up, 'UP主');
     assert.strictEqual(s.durationSec, 3579);
     assert.strictEqual(s.view, 12345);
-    assert.strictEqual(s.cover, 'http://i1.hdslb.com/bfs/archive/x.jpg');
+    assert.strictEqual(s.cover, 'http://archive.biliimg.com/bfs/archive/x.jpg');
     assert.strictEqual(s.cid, 0, '搜索无 cid，靠播放链无条件 view 补齐');
     assert.strictEqual(s.source, 'search');
     // 直播卡（带 roomid）直接滤除
@@ -965,7 +977,7 @@ async function main() {
     assert.strictEqual(it.key, 'a:117278561535782');
     assert.strictEqual(it.id, 117278561535782);
     assert.strictEqual(it.title, '【测试】专栏标题');
-    assert.strictEqual(it.cover, 'http://i0.hdslb.com/bfs/article/cover.jpg');
+    assert.strictEqual(it.cover, 'http://archive.biliimg.com/bfs/article/cover.jpg');
     assert.strictEqual(it.up, '作者甲');
     assert.strictEqual(it.view, 4321);
     assert.strictEqual(it.reply, 12);
@@ -1096,8 +1108,8 @@ async function main() {
     assert.strictEqual(blocks[1].t, 'text');
     assert.strictEqual(blocks[1].text, '第二段');
     assert.strictEqual(blocks[2].t, 'img');
-    assert.strictEqual(blocks[2].src, 'https://i0.hdslb.com/a.jpg');
-    assert.strictEqual(blocks[2].dw, 436); // 正文列宽 ART_W
+    assert.strictEqual(blocks[2].src, 'http://archive.biliimg.com/a.jpg');
+    assert.strictEqual(blocks[2].dw, 880); // 正文列宽 ART_W
     assert.ok(blocks[2].dh > 0);
     assert.strictEqual(blocks[3].t, 'text');
     assert.strictEqual(blocks[3].text, '第三段');
@@ -1124,9 +1136,9 @@ async function main() {
     assert.strictEqual(b[0].t, 'text');
     assert.strictEqual(b[0].text, '标题正文');
     assert.strictEqual(b[1].t, 'img');
-    assert.strictEqual(b[1].src, 'https://i0.hdslb.com/p.jpg');
-    assert.strictEqual(b[1].dw, 436);
-    assert.strictEqual(b[1].dh, 218); // 436*400/800
+    assert.strictEqual(b[1].src, 'http://archive.biliimg.com/p.jpg');
+    assert.strictEqual(b[1].dw, 880);
+    assert.strictEqual(b[1].dh, 440); // 880*400/800
     assert.strictEqual(opusToBlocks(null).length, 0);
     assert.strictEqual(opusToBlocks({}).length, 0);
   });
@@ -1145,8 +1157,8 @@ async function main() {
     assert.strictEqual(b[0].t, 'text');
     assert.strictEqual(b[0].text, '第一段第二段');
     assert.strictEqual(b[1].t, 'img');
-    assert.strictEqual(b[1].src, 'https://i0.hdslb.com/n.png');
-    assert.strictEqual(b[1].dh, 436); // 1:1 → 436 宽对应高
+    assert.strictEqual(b[1].src, 'http://archive.biliimg.com/n.png');
+    assert.strictEqual(b[1].dh, 880); // 1:1 → 880 宽对应高
     assert.strictEqual(b[2].t, 'text');
     assert.strictEqual(b[2].text, '[视频卡片]');
     assert.strictEqual(opsToBlocks('{bad json').length, 0);
@@ -1220,124 +1232,189 @@ async function main() {
   });
   // （live_playinfo.json fixture 保留作技术留档：直播已从 UI 移除，720p 软解不实时）
 
-  /* ---------------- 直播：服务器地址 / 重定向缓存 / HLS 播放地址 ---------------- */
-  // 服务端 v5 以 HLS 分片回传（见 server/live_proxy.py）；客户端只把 /live?... 当点播地址。
-  test('live: normalizeLiveAddr 补 scheme、去尾斜杠、空值', () => {
-    assert.strictEqual(normalizeLiveAddr('192.168.1.100:2050'), 'http://192.168.1.100:2050');
-    assert.strictEqual(normalizeLiveAddr('http://live.example.com/'), 'http://live.example.com');
-    assert.strictEqual(normalizeLiveAddr('  https://a.b:1//  '), 'https://a.b:1');
-    assert.strictEqual(normalizeLiveAddr(''), '');
-    assert.strictEqual(normalizeLiveAddr(null), '');
+  /* ---------------- 直播：本地直连取流（不再经服务端转码） ---------------- */
+  // 取流走 services/bili/live.js：getRoomPlayInfo → 选 http_stream/flv/avc → 完整直链。
+  // 播放侧（resolveLiveUrl）只消费 parsePlayInfo 的产物，不关心 CDN 细节。
+  test('live: buildPlayInfoQuery —— 房间号校验与固定参数集', () => {
+    assert.strictEqual(buildPlayInfoQuery(0), '');
+    assert.strictEqual(buildPlayInfoQuery(-1), '');
+    assert.strictEqual(buildPlayInfoQuery('x'), '');
+    const q = buildPlayInfoQuery(22908869);
+    assert.ok(q.indexOf('room_id=22908869') === 0, q);
+    // protocol/format/codec 三组都要覆盖 flv+ts+fmp4 与 avc+hevc，否则拿不到完整候选
+    assert.ok(q.indexOf('protocol=0,1') > 0, q);
+    assert.ok(q.indexOf('format=0,1,2') > 0, q);
+    assert.ok(q.indexOf('codec=0,1') > 0, q);
+    assert.ok(q.indexOf('ptype=8') > 0, q);
+    // 小数房间号取整
+    assert.ok(buildPlayInfoQuery(88.9).indexOf('room_id=88') === 0);
   });
-  test('live: normalizeLive schema（缺省 / 越界钳制 / 版本迁移 / 未知版本丢弃）', () => {
-    const d = normalizeLive(null);
-    assert.strictEqual(d.addr, '');
-    assert.strictEqual(d.bufMs, LIVE_LIMITS.bufDefaultMs);
-    assert.strictEqual(d.res, 254); // 默认 = 匹配屏幕（452x254；480 真机只有 0.83x 必卡）
-    assert.strictEqual(d.trans, 1);
-    assert.strictEqual(d.resolvedAddr, '');
-    // v1 → v2 迁移：保留地址/缓冲/码率，**只把画质纠正到 254**
-    const c = normalizeLive({ version: 1, addr: '1.2.3.4:5', bufMs: 99999, res: 480, bv: '2M', trans: 0, resolvedAddr: 'x.y:9' });
-    assert.strictEqual(c.addr, 'http://1.2.3.4:5');
-    assert.strictEqual(c.bufMs, LIVE_LIMITS.bufMaxMs);
-    assert.strictEqual(c.res, 254);
-    assert.strictEqual(c.version, 2);
-    assert.strictEqual(c.bv, '2m');
-    assert.strictEqual(c.trans, 0);
-    assert.strictEqual(c.resolvedAddr, 'http://x.y:9');
-    // v2 起尊重用户选择（254/360/480 合法；540 已废弃 → 回落 254）
-    assert.strictEqual(normalizeLive({ version: 2, addr: 'a:1', res: 360 }).res, 360);
-    assert.strictEqual(normalizeLive({ version: 2, addr: 'a:1', res: 540 }).res, 254);
-    assert.strictEqual(normalizeLive({ version: 1, bufMs: 10 }).bufMs, LIVE_LIMITS.bufMinMs);
-    assert.strictEqual(normalizeLive({ version: 99, addr: 'z' }).addr, '');
+  test('live: unescapeExtra 反转 \\u0026（不反转则 CDN 403）', () => {
+    assert.strictEqual(unescapeExtra('a=1\\u0026b=2'), 'a=1&b=2');
+    assert.strictEqual(unescapeExtra('a=1\\u0026b=2\\u0026c=3'), 'a=1&b=2&c=3');
+    // 大小写变体与 &amp; 一并处理
+    assert.strictEqual(unescapeExtra('a=1\\U0026b=2'), 'a=1&b=2');
+    assert.strictEqual(unescapeExtra('a=1&amp;b=2'), 'a=1&b=2');
+    assert.strictEqual(unescapeExtra('a=1&b=2'), 'a=1&b=2');
+    assert.strictEqual(unescapeExtra(''), '');
+    assert.strictEqual(unescapeExtra(null), '');
   });
-  test('live: buildLiveUrl 参数构造与钳制（cookie 必须 URL 编码）', () => {
-    assert.strictEqual(buildLiveUrl('', 1, {}), '');
-    assert.strictEqual(buildLiveUrl('http://a:1', 0, {}), '');
-    const u = buildLiveUrl('http://a:1/', 88, { bufMs: 4000, res: 360, bv: '900k', trans: 1, ck: 'SESSDATA=x%2Cy; bili_jct=z' });
-    assert.strictEqual(u.indexOf('http://a:1/live?'), 0, u);
-    assert.ok(u.indexOf('room=88') > 0, u);
-    assert.ok(u.indexOf('buf=4000') > 0, u);
-    assert.ok(u.indexOf('res=360') > 0, u);
-    assert.ok(u.indexOf('bv=900k') > 0, u);
-    assert.ok(u.indexOf('trans=1') > 0, u);
-    assert.ok(u.indexOf('ck=SESSDATA%3Dx%252Cy%3B%20bili_jct%3Dz') > 0, u);
-    const u2 = buildLiveUrl('http://a:1', 5, { bufMs: 999999, res: 111, bv: 'zzz', trans: 0 });
-    assert.ok(u2.indexOf('buf=20000') > 0, u2);
-    assert.ok(u2.indexOf('res=254') > 0, u2); // 非法 res（含废弃的 540）→ 默认 254
-    assert.ok(u2.indexOf('bv=700k') > 0, u2);
-    assert.ok(u2.indexOf('trans=0') > 0, u2);
-    assert.ok(buildLiveUrl('http://a:1', 5, { res: 540 }).indexOf('res=254') > 0, '540 已废弃');
+  test('live: joinCodecUrl —— host + base_url + 反转后的 extra', () => {
+    const c = {
+      base_url: '/live-bvc/1/x.flv?',
+      url_info: [{ host: 'https://d1.bilivideo.com', extra: 'expires=1\\u0026qn=250' }]
+    };
+    assert.strictEqual(joinCodecUrl(c), 'https://d1.bilivideo.com/live-bvc/1/x.flv?expires=1&qn=250');
+    assert.strictEqual(joinCodecUrl({ base_url: '/a', url_info: [] }), '');
+    assert.strictEqual(joinCodecUrl({ base_url: '', url_info: [{ host: 'https://h' }] }), '');
+    assert.strictEqual(joinCodecUrl(null), '');
   });
-  test('live: resolveLiveUrl —— 未配地址→liveaddr；正常→双进程(音频同源)+durationMs=0', () => {
-    const bad = resolveLiveUrl({ live: {} }, { kind: 'live', roomid: 9 });
-    assert.strictEqual(bad.ok, false);
-    assert.strictEqual(bad.stage, 'liveaddr');
-    assert.ok(describePlayError(bad).indexOf('无法播放') > 0, describePlayError(bad));
-    const r = resolveLiveUrl(
-      { live: { addr: 'http://s:2050', bufMs: 3000, res: 480, bv: '700k', trans: 1 } },
-      { kind: 'live', roomid: 9, title: 'T' }
+  test('live: pickCodec —— flv/avc 优先，其次 flv/hevc，再次 ts/avc', () => {
+    const mk = (proto, fmt, codec, name) => ({
+      protocol_name: proto,
+      format: [{ format_name: fmt, codec: [{ codec_name: codec, current_qn: 250, base_url: '/' + name, url_info: [{ host: 'https://h', extra: 'q=1' }] }] }]
+    });
+    const streams = [
+      mk('http_hls', 'fmp4', 'hevc', 'fmp4hevc'),
+      mk('http_hls', 'ts', 'avc', 'tsavc'),
+      mk('http_stream', 'flv', 'hevc', 'flvhevc'),
+      mk('http_stream', 'flv', 'avc', 'flvavc')
+    ];
+    const r = pickCodec(streams);
+    assert.strictEqual(r.best.format, 'flv');
+    assert.strictEqual(r.best.codec, 'avc');
+    assert.ok(r.best.url.indexOf('flvavc') > 0, r.best.url);
+    assert.strictEqual(r.candidates.length, 4);
+    // 只有 hevc flv 时也能选出来（不硬性要求 avc）
+    const r2 = pickCodec([mk('http_stream', 'flv', 'hevc', 'onlyhevc')]);
+    assert.strictEqual(r2.best.codec, 'hevc');
+    // 空输入
+    assert.strictEqual(pickCodec([]).best, null);
+    assert.strictEqual(pickCodec(null).best, null);
+  });
+  test('live: parsePlayInfo —— 未开播 / 无流 / 正常（含 1280x720 真实分辨率）', () => {
+    // 未开播：live_status != 1
+    const off = parsePlayInfo({ ok: true, data: { live_status: 0 } });
+    assert.strictEqual(off.ok, false);
+    assert.strictEqual(off.stage, 'offline');
+    // 无 playurl_info
+    assert.strictEqual(parsePlayInfo({ ok: true, data: { live_status: 1 } }).stage, 'parse');
+    assert.strictEqual(
+      parsePlayInfo({ ok: true, data: { live_status: 1, playurl_info: { playurl: { stream: [] } } } }).stage,
+      'parse'
     );
+    // 接口失败原样透出
+    const bad = parsePlayInfo({ ok: false, stage: 'api', code: -352, message: '风控' });
+    assert.strictEqual(bad.ok, false);
+    assert.strictEqual(bad.code, -352);
+    // 正常
+    const good = parsePlayInfo({
+      ok: true,
+      data: {
+        live_status: 1,
+        playurl_info: {
+          playurl: {
+            stream: [{
+              protocol_name: 'http_stream',
+              format: [{
+                format_name: 'flv',
+                codec: [{
+                  codec_name: 'avc',
+                  current_qn: 250,
+                  media_info: { width: 1280, height: 720 },
+                  base_url: '/live-bvc/a.flv?',
+                  url_info: [{ host: 'https://d1.bilivideo.com', extra: 'expires=1\\u0026qn=250' }]
+                }]
+              }]
+            }]
+          }
+        }
+      }
+    });
+    assert.strictEqual(good.ok, true);
+    assert.strictEqual(good.qn, 250);
+    assert.strictEqual(good.width, 1280);
+    assert.strictEqual(good.height, 720);
+    assert.strictEqual(good.proto, 'http_stream');
+    assert.strictEqual(good.format, 'flv');
+    assert.strictEqual(good.codec, 'avc');
+    assert.strictEqual(good.url, 'https://d1.bilivideo.com/live-bvc/a.flv?expires=1&qn=250');
+    assert.ok(good.host.indexOf('bilivideo.com') > 0, good.host);
+  });
+  test('live: parsePlayInfo 拒收非 https / 超长 / 含空白 的直链', () => {
+    const wrap = (url) => ({
+      ok: true,
+      data: {
+        live_status: 1,
+        playurl_info: {
+          playurl: {
+            stream: [{
+              protocol_name: 'http_stream',
+              format: [{ format_name: 'flv', codec: [{ codec_name: 'avc', base_url: url, url_info: [{ host: '', extra: '' }] }] }]
+            }]
+          }
+        }
+      }
+    });
+    // host 为空 → joinCodecUrl 给空串 → 没有可用流
+    assert.strictEqual(parsePlayInfo(wrap('/x.flv')).stage, 'parse');
+  });
+  test('live: fetchLivePlayUrl —— 房间号非法不发请求；正常走绝对地址透传', async () => {
+    let seen = '';
+    const client = {
+      request: async (path, query) => {
+        seen = path + '?' + query;
+        return { ok: true, data: { live_status: 1, playurl_info: { playurl: { stream: [{
+          protocol_name: 'http_stream',
+          format: [{ format_name: 'flv', codec: [{
+            codec_name: 'avc', current_qn: 250, media_info: { width: 1280, height: 720 },
+            base_url: '/b.flv?', url_info: [{ host: 'https://d1.bilivideo.com', extra: 'e=1' }]
+          }] }]
+        }] } } } };
+      }
+    };
+    assert.strictEqual((await fetchLivePlayUrl(client, 0)).stage, 'param');
+    assert.strictEqual(seen, '', '房间号非法时不得发请求');
+    const r = await fetchLivePlayUrl(client, 12345);
+    assert.strictEqual(r.ok, true);
+    assert.ok(seen.indexOf(LIVE_PLAYINFO_URL) === 0, seen);
+    assert.ok(seen.indexOf('room_id=12345') > 0, seen);
+  });
+  test('live: resolveLiveUrl —— 直连双进程（音频同源）+ durationMs=0 + 真实分辨率', async () => {
+    const mkClient = (data) => ({
+      request: async () => ({ ok: true, data })
+    });
+    const streams = [{
+      protocol_name: 'http_stream',
+      format: [{ format_name: 'flv', codec: [{
+        codec_name: 'avc', current_qn: 250, media_info: { width: 1280, height: 720 },
+        base_url: '/b.flv?', url_info: [{ host: 'https://d1.bilivideo.com', extra: 'e=1' }]
+      }] }]
+    }];
+    const ctx = { client: mkClient({ live_status: 1, playurl_info: { playurl: { stream: streams } } }) };
+    const r = await resolveLiveUrl(ctx, { kind: 'live', roomid: 9, title: 'T' });
     assert.strictEqual(r.ok, true);
     assert.strictEqual(r.live, true);
-    assert.strictEqual(r.audioUrl, r.url); // v2.9.4：直播走音视频分离双进程，音频进程拉同一条 URL
+    // v2.9.4 起直播走音视频分离双进程：音频进程拉同一条 URL（单进程串行写两路会被视频背压拖死）
+    assert.strictEqual(r.audioUrl, r.url);
     assert.strictEqual(r.durationMs, 0);
     assert.strictEqual(r.aid, 0);
-    assert.strictEqual(r.fps, LIVE_FPS);
+    assert.strictEqual(r.fps, LIVE_FPS_MOD);
     assert.strictEqual(r.roomid, 9);
-    assert.ok(r.url.indexOf('room=9') > 0, r.url);
-    // kind=live 会绕过 bvid 校验（直播本来就没有 bvid）
-    assert.strictEqual(resolveLiveUrl({ live: { addr: 'http://s' } }, { kind: 'live', roomid: 0 }).stage, 'param');
+    assert.strictEqual(r.qn, 250);
+    // 信箱比例必须按**源**分辨率算（硬解下 kmssink 做硬件缩放），不能写死 452x254
+    assert.strictEqual(r.width, 1280);
+    assert.strictEqual(r.height, 720);
+    // 未开播
+    const off = await resolveLiveUrl({ client: mkClient({ live_status: 0 }) }, { kind: 'live', roomid: 9 });
+    assert.strictEqual(off.ok, false);
+    assert.strictEqual(off.stage, 'offline');
+    assert.ok(describePlayError(off).length > 0);
+    // 房间号非法 → 不发请求
+    assert.strictEqual((await resolveLiveUrl({ client: mkClient({}) }, { kind: 'live', roomid: 0 })).stage, 'param');
   });
-  test('live: parseHealth 解析 host（=301 链终点的权威来源）', () => {
-    const h = parseHealth('{"ok":true,"version":"5.0","host":"tunnel.example.net:8080","lan":["http://192.168.1.100:2050"],"load":{"sessions":2,"load1":0.6,"high":false}}');
-    assert.strictEqual(h.ok, true);
-    assert.strictEqual(h.host, 'tunnel.example.net:8080');
-    assert.strictEqual(h.addr, 'http://tunnel.example.net:8080');
-    assert.strictEqual(h.version, '5.0');
-    assert.strictEqual(h.load.sessions, 2);
-    assert.strictEqual(h.lan.length, 1);
-    assert.strictEqual(parseHealth('not json'), null);
-    assert.strictEqual(parseHealth('{"ok":false}'), null);
-    assert.strictEqual(parseHealth(''), null);
-    assert.strictEqual(buildHealthUrl('http://a:1/'), 'http://a:1/health');
-    assert.strictEqual(buildHealthUrl(''), '');
-  });
-  test('live: ensureLiveAddr —— 缓存命中 / 失效重解析 / 全失败兜底 / 未配置', async () => {
-    const mk = (map) => async (url) => {
-      if (!map[url]) throw new Error('NET_FAIL ' + url);
-      return { statusCode: 200, body: JSON.stringify(map[url]) };
-    };
-    assert.strictEqual((await ensureLiveAddr(mk({}), normalizeLive(null))).ok, false);
-    // ① 缓存活着 → 直接用缓存（不再碰入口）
-    const r1 = await ensureLiveAddr(mk({ 'http://real:7/health': { ok: true, host: 'real:7' } }),
-      { addr: 'http://entry', resolvedAddr: 'http://real:7' });
-    assert.strictEqual(r1.ok, true);
-    assert.strictEqual(r1.source, 'cache');
-    assert.strictEqual(r1.addr, 'http://real:7');
-    assert.strictEqual(r1.changed, false);
-    // ② 缓存死了 + 入口可解析 → 重解析（changed=true，调用方回写缓存）
-    const r2 = await ensureLiveAddr(mk({ 'http://entry/health': { ok: true, host: 'real:8' } }),
-      { addr: 'http://entry', resolvedAddr: 'http://real:7' });
-    assert.strictEqual(r2.source, 'resolved');
-    assert.strictEqual(r2.addr, 'http://real:8');
-    assert.strictEqual(r2.changed, true);
-    assert.strictEqual(r2.stale, true);
-    // ③ 全失败 → 兜底用入口地址（播放时再暴露错误）
-    const r3 = await ensureLiveAddr(mk({}), { addr: 'http://entry', resolvedAddr: 'http://real:7' });
-    assert.strictEqual(r3.ok, true);
-    assert.strictEqual(r3.source, 'entry');
-    assert.strictEqual(r3.addr, 'http://entry');
-    assert.strictEqual(r3.degraded, true);
-    // ④ 只有入口（无缓存）→ 解析一次；缓存为空 → changed=true（表示"应回写缓存"）
-    const r4 = await ensureLiveAddr(mk({ 'http://entry/health': { ok: true, host: 'entry' } }),
-      { addr: 'http://entry', resolvedAddr: '' });
-    assert.strictEqual(r4.source, 'resolved');
-    assert.strictEqual(r4.addr, 'http://entry');
-    assert.strictEqual(r4.changed, true);
-    // 探测失败不抛（返回 null）
-    assert.strictEqual(await probeAddr(async () => { throw new Error('x'); }, 'http://x', PROBE_MS), null);
-  });
+
+
 
   // ---------------- reply 评论（读/写） ----------------
   test('reply: fixture 全链读取（解析/分页/请求形态）', async () => {
@@ -1447,6 +1524,12 @@ async function main() {
     const n = normalizeHistory(raw);
     assert.ok(n.items.length <= MAX_HISTORY);
     assert.strictEqual(n.items[0].bvid, 'BV1ZCeb6NEyM'); // 去重保留首条
+    // 旧版本写入的裸 hdslb 封面必须被改写到可达 CDN（本机 DNS 解析不到 hdslb）
+    const cov = normalizeHistory({
+      version: HISTORY_VERSION,
+      items: [{ bvid: 'BV1ZCeb6NEyM', cover: 'http://i0.hdslb.com/bfs/archive/a.jpg' }]
+    });
+    assert.strictEqual(cov.items[0].cover, 'http://archive.biliimg.com/bfs/archive/a.jpg');
   });
   test('history: pushHistory 置顶去重 + 时间戳', () => {
     let h = { version: HISTORY_VERSION, items: [] };
@@ -1529,7 +1612,7 @@ async function main() {
     assert.strictEqual(r.session.qn, 16);
     assert.strictEqual(r.session.durationMs, 206000);
     const o = w.calls.open[0];
-    assert.deepStrictEqual(o.rect, { x: 0, y: 174, width: 254, height: 452 });
+    assert.deepStrictEqual(o.rect, { x: 0, y: 450, width: 240, height: 427 });
     assert.strictEqual(o.userAgent, DEFAULT_UA);
     assert.strictEqual(o.referer, REFERER);
     assert.strictEqual(o.fps, HTML5_FPS); // 不锁死数值：锚定 openVideo 传递配置常量（v2.5.1 起 24）
@@ -1566,8 +1649,8 @@ async function main() {
     assert.strictEqual(r.session.cid, 777);
     assert.strictEqual(r.session.durationMs, 60000);
     assert.strictEqual(r.session.title, 'feed标题', 'item 标题优先');
-    // 16:9 横屏 → 居中横矩形
-    assert.deepStrictEqual(w.calls.open[0].rect, { x: 0, y: 174, width: 254, height: 452 });
+    // 16:9 横屏 → 视频区(448x240)内居中的横矩形
+    assert.deepStrictEqual(w.calls.open[0].rect, { x: 0, y: 450, width: 240, height: 427 });
   });
   test('play_session: 竖屏稿件(1080x1920) → 物理竖柱 rect（不拉伸成横屏）', async () => {
     const w = fakePlayDeps();
@@ -1575,10 +1658,10 @@ async function main() {
     const r = await openVideo(w, { kind: 'video', bvid: 'BV1ZCeb6NEyM', cid: 1, durationSec: 1, title: '' });
     assert.strictEqual(r.ok, true, r.message);
     const rect = w.calls.open[0].rect;
-    // 信箱适配：逻辑 {329,0,143,254} → 物理 {0,329,254,143}（宽高互换的竖柱，比例=9:16 不变形）
-    assert.deepStrictEqual(rect, { x: 0, y: 329, width: 254, height: 143 });
+    // 信箱适配：逻辑 {229,0,135,240} → 物理 {0,596,240,135}（宽高互换的竖柱，比例=9:16 不变形）
+    assert.deepStrictEqual(rect, { x: 0, y: 596, width: 240, height: 135 });
     assert.ok(rect.height < rect.width, '竖屏输出应为竖长方形');
-    // 输出比例 ≈ 源比例（不拉伸）：物理 h/w = 143/254 ≈ 1080/1920
+    // 输出比例 ≈ 源比例（不拉伸）：物理 h/w = 135/240 ≈ 1080/1920
     const outRatio = rect.height / rect.width;
     const srcRatio = 1080 / 1920;
     assert.ok(Math.abs(outRatio - srcRatio) < 0.02, 'ratio=' + outRatio);
@@ -1714,29 +1797,215 @@ async function main() {
     assert.ok(r.message.indexOf('-352') >= 0);
   });
 
-  // ---------------- 播放几何（174+452+174=800）----------------
-  test('screen: playVideoRects 居中，物理 {0,174,254,452}（与真机证据一致）', () => {
-    const r = playVideoRects(640, 360);
-    assert.deepStrictEqual(r.logical, { x: 174, y: 0, width: 452, height: 254 });
-    assert.deepStrictEqual(r.physical, { x: 0, y: 174, width: 254, height: 452 });
-    assert.strictEqual(BAR_WIDTH, 174);
-    assert.strictEqual(BAR_WIDTH + r.logical.width + BAR_WIDTH, 800);
+  // ---------------- 互动（点赞/投币/收藏）----------------
+  // /x/v2/view 已下线（返回 HTML），改用 /x/web-interface/view 的 stat + 三个本人态接口。
+  const actMod = await import('../src/services/bili/action.js');
+
+  test('action: parseViewState 合并总数与本人态', () => {
+    const view = {
+      ok: true,
+      data: { stat: { view: 10707, like: 179, coin: 16, favorite: 41, share: 10, danmaku: 3 } }
+    };
+    const r = actMod.parseViewState(view, { like: 1, coin: 2, favoured: true });
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.like, 1);
+    assert.strictEqual(r.coin, 2);
+    assert.strictEqual(r.favorite, true);
+    assert.strictEqual(r.likeCount, 179);
+    assert.strictEqual(r.coinCount, 16);
+    assert.strictEqual(r.favCount, 41);
+    assert.strictEqual(r.viewCount, 10707);
+    assert.strictEqual(r.share, 10);
   });
-  test('screen: 竖屏 playVideoRects → 物理竖柱 {0,329,254,143}（9:16 不变形）', () => {
+
+  test('action: parseViewState 未登录（mine=null）→ 计数仍在、本人态归零', () => {
+    const view = { ok: true, data: { stat: { view: 5, like: 7, coin: 3, favorite: 2, share: 1 } } };
+    const r = actMod.parseViewState(view, null);
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.like, 0);
+    assert.strictEqual(r.coin, 0);
+    assert.strictEqual(r.favorite, false);
+    // 关键回归：未登录也必须显示全站总数，否则左栏徽标全空
+    assert.strictEqual(r.likeCount, 7);
+    assert.strictEqual(r.coinCount, 3);
+    assert.strictEqual(r.favCount, 2);
+  });
+
+  test('action: parseViewState 计数缺失/异常归一为 0', () => {
+    const r = actMod.parseViewState({ ok: true, data: {} }, { like: 0, coin: 0, favoured: false });
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.likeCount, 0);
+    assert.strictEqual(r.coinCount, 0);
+    assert.strictEqual(r.favCount, 0);
+    assert.strictEqual(r.viewCount, 0);
+  });
+
+  test('action: parseViewState 失败透传 stage/code', () => {
+    const r = actMod.parseViewState({ ok: false, stage: 'api', code: -404, message: '啥都木有' }, null);
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.stage, 'api');
+    assert.strictEqual(r.code, -404);
+  });
+
+  test('action: parseViewState coin 钳到 0..2，like 归一到 0/1', () => {
+    const view = { ok: true, data: { stat: {} } };
+    assert.strictEqual(actMod.parseViewState(view, { like: 2, coin: 9 }).coin, 2);
+    assert.strictEqual(actMod.parseViewState(view, { like: 2, coin: -1 }).coin, 0);
+    assert.strictEqual(actMod.parseViewState(view, { like: 2 }).like, 1);
+  });
+
+  test('action: fetchViewState 并行取 view + 三个本人态接口', async () => {
+    const calls = [];
+    const fake = {
+      request: (path, q, o) => {
+        calls.push({ path, q, o });
+        if (path === actMod.VIEW_URL) {
+          return Promise.resolve({ ok: true, data: { stat: { like: 9, coin: 4, favorite: 2 } } });
+        }
+        if (path === actMod.HAS_LIKE_URL) return Promise.resolve({ ok: true, data: 1 });
+        if (path === actMod.COINS_URL) return Promise.resolve({ ok: true, data: { multiply: 2 } });
+        if (path === actMod.FAVOURED_URL) return Promise.resolve({ ok: true, data: { favoured: true } });
+        return Promise.resolve({ ok: false, stage: 'api', code: -101 });
+      }
+    };
+    const r = await actMod.fetchViewState(fake, 117510305224263);
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.like, 1);
+    assert.strictEqual(r.coin, 2);
+    assert.strictEqual(r.favorite, true);
+    assert.strictEqual(r.likeCount, 9);
+    assert.strictEqual(calls.length, 4);
+    // 本人态三接口必须带 acceptCodes:[-101,0]，否则未登录会被当硬失败
+    for (const c of calls.slice(1)) {
+      assert.deepStrictEqual(c.o.acceptCodes, [-101, 0]);
+      assert.strictEqual(c.q.aid, 117510305224263);
+    }
+  });
+
+  test('action: fetchViewState 未登录（-101）仍返回全站计数', async () => {
+    const fake = {
+      request: (path) => {
+        if (path === actMod.VIEW_URL) {
+          return Promise.resolve({ ok: true, data: { stat: { like: 179, coin: 16, favorite: 41, view: 10707 } } });
+        }
+        return Promise.resolve({ ok: true, code: -101, data: null });
+      }
+    };
+    const r = await actMod.fetchViewState(fake, 1);
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.like, 0);
+    assert.strictEqual(r.coin, 0);
+    assert.strictEqual(r.favorite, false);
+    assert.strictEqual(r.likeCount, 179);
+    assert.strictEqual(r.favCount, 41);
+  });
+
+  test('action: fetchViewState 缺 aid → param 失败且不发请求', async () => {
+    let n = 0;
+    const fake = {
+      request: () => {
+        n++;
+        return Promise.resolve({ ok: true, data: {} });
+      }
+    };
+    const r = await actMod.fetchViewState(fake, 0);
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.stage, 'param');
+    assert.strictEqual(n, 0);
+  });
+
+  test('action: has/like 兼容数字与 {is_like} 两种形态', async () => {
+    const mk = (data) => ({
+      request: (path) => {
+        if (path === actMod.VIEW_URL) return Promise.resolve({ ok: true, data: { stat: {} } });
+        if (path === actMod.HAS_LIKE_URL) return Promise.resolve({ ok: true, data: data });
+        return Promise.resolve({ ok: true, data: null });
+      }
+    });
+    assert.strictEqual((await actMod.fetchViewState(mk(1), 1)).like, 1);
+    assert.strictEqual((await actMod.fetchViewState(mk(0), 1)).like, 0);
+    assert.strictEqual((await actMod.fetchViewState(mk({ is_like: true }), 1)).like, 1);
+    assert.strictEqual((await actMod.fetchViewState(mk({ is_like: false }), 1)).like, 0);
+  });
+
+  test('action: setLike 取消赞必须发 like=2（不是 0）', async () => {
+    const forms = [];
+    const fake = {
+      postForm: (url, form) => {
+        forms.push({ url, form });
+        return Promise.resolve({ ok: true, code: 0 });
+      }
+    };
+    await actMod.setLike(fake, 42, true, 'tok');
+    await actMod.setLike(fake, 42, false, 'tok');
+    assert.ok(forms[0].form.indexOf('like=1') >= 0, forms[0].form);
+    assert.ok(forms[1].form.indexOf('like=2') >= 0, forms[1].form);
+    assert.ok(forms[1].form.indexOf('like=0') < 0, '取消赞不能发 0');
+  });
+
+  test('action: addCoin 参数与 select_like', async () => {
+    const forms = [];
+    const fake = {
+      postForm: (url, form) => {
+        forms.push({ url, form });
+        return Promise.resolve({ ok: true, code: 0 });
+      }
+    };
+    await actMod.addCoin(fake, 42, 2, true, 'tok');
+    assert.ok(forms[0].form.indexOf('aid=42') >= 0, forms[0].form);
+    assert.ok(forms[0].form.indexOf('multiply=2') >= 0, forms[0].form);
+    assert.ok(forms[0].form.indexOf('select_like=1') >= 0, forms[0].form);
+  });
+
+  test('action: dealFav 必须 type=2，且 add/del 都空时 param 失败', async () => {
+    const forms = [];
+    const fake = {
+      postForm: (url, form) => {
+        forms.push({ url, form });
+        return Promise.resolve({ ok: true, code: 0 });
+      }
+    };
+    await actMod.dealFav(fake, 42, [7], [], 'tok');
+    assert.ok(forms[0].form.indexOf('rid=42') >= 0, forms[0].form);
+    assert.ok(forms[0].form.indexOf('type=2') >= 0, forms[0].form);
+    assert.ok(forms[0].form.indexOf('add_media_ids=7') >= 0, forms[0].form);
+    const before = forms.length;
+    const r = await actMod.dealFav(fake, 42, [], [], 'tok');
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(forms.length, before);
+  });
+
+  test('action: 写接口缺 csrf → param 失败', async () => {
+    const fake = { postForm: () => Promise.resolve({ ok: true, code: 0 }) };
+    assert.strictEqual((await actMod.setLike(fake, 1, true, '')).stage, 'param');
+    assert.strictEqual((await actMod.addCoin(fake, 1, 1, false, '')).stage, 'param');
+    assert.strictEqual((await actMod.dealFav(fake, 1, [1], [], '')).stage, 'param');
+  });
+
+  // ---------------- 播放几何（64 + 16 + 432 + 448 = 960）----------------
+  test('screen: playVideoRects 16:9 居中，物理 {0,450,240,427}（真·旋转变换）', () => {
+    const r = playVideoRects(640, 360);
+    assert.deepStrictEqual(r.logical, { x: 83, y: 0, width: 427, height: 240 });
+    assert.deepStrictEqual(r.physical, { x: 0, y: 450, width: 240, height: 427 });
+    assert.strictEqual(BAR_WIDTH, 76);
+    assert.strictEqual(BAR_WIDTH + r.logical.width + BAR_WIDTH, 579); // 16:9 只占 427
+  });
+  test('screen: 竖屏 playVideoRects → 物理竖柱（9:16 不变形）', () => {
     const r = playVideoRects(360, 640);
-    assert.deepStrictEqual(r.logical, { x: 329, y: 0, width: 143, height: 254 });
-    assert.deepStrictEqual(r.physical, { x: 0, y: 329, width: 254, height: 143 });
-    // 比例守恒：物理 {w:254,h:143} 是逻辑 {w:143,h:254} 的转置 → h/w = 143/254 ≈ 1080/1920
+    assert.deepStrictEqual(r.logical, { x: 229, y: 0, width: 135, height: 240 });
+    assert.deepStrictEqual(r.physical, { x: 0, y: 596, width: 240, height: 135 });
+    // 比例守恒：物理 {w:240,h:135} 是逻辑 {w:135,h:240} 的转置 → h/w = 135/240 ≈ 1080/1920
     const src = 1080 / 1920;
     const out = r.physical.height / r.physical.width;
     assert.ok(Math.abs(out - src) < 0.02, 'src=' + src + ' out=' + out);
     assert.ok(isRectInsidePanel(r.physical));
   });
-  test('screen: 宽比例视频必须信箱进 452 列内（越列溢出回归防护）', () => {
-    // 历史 bug：fit box=全屏 800×254 → 比 16:9 更宽的视频按高适配得 w>452 →
-    // 物理 y 越出 [174,626] → 画面溢出到左栏按钮与右栏评论区（真机实测）。
+  test('screen: 宽比例视频必须信箱进视频区 448x240（越区溢出回归防护）', () => {
+    // 历史 bug（X5 800x254）：fit box=全屏 → 比 16:9 更宽的视频按高适配得 w>列宽 →
+    // 画面溢出到左栏按钮与右栏评论区（真机实测）。
+    // X6 Pro 视频区逻辑 {x:64,y:0,w:448,h:240}，下方 y∈[240,266) 是进度条（26px）。
     const cases = [
-      [1920, 1080], // 16:9 回归（历史恰好 452 未暴露）
+      [1920, 1080], // 16:9 回归
       [1920, 800], // 2.4:1
       [1920, 817], // 2.35:1 宽银幕
       [2560, 1080], // 21:9
@@ -1747,12 +2016,26 @@ async function main() {
     for (const c of cases) {
       const r = playVideoRects(c[0], c[1]);
       const tag = c.join('x');
-      assert.ok(r.logical.width <= 452, tag + ' logical.width=' + r.logical.width);
-      assert.ok(r.logical.width <= r.logical.height * 4, tag + ' 逻辑比例异常');
+      const g = r.logical;
+      // 1) 逻辑面必须整块落在视频区内（左右不出区、上下不出 240 高）
+      assert.ok(g.x >= VIDEO_AREA.x, tag + ' 逻辑 x 越出视频区首: ' + g.x);
+      assert.ok(g.x + g.width <= VIDEO_AREA.x + VIDEO_AREA.width, tag + ' 逻辑 x 越出视频区尾');
+      assert.ok(g.y >= VIDEO_AREA.y, tag + ' 逻辑 y 越出视频区首: ' + g.y);
+      assert.ok(g.y + g.height <= VIDEO_AREA.y + VIDEO_AREA.height, tag + ' 逻辑 y 压到进度条');
+      // 2) 物理面必须落在面板的 266 宽列内（native 再加 PANEL_X_OFFSET=107）
       const p = r.physical;
       assert.ok(isRectInsidePanel(p), tag + ' 不在面板内');
-      assert.ok(p.y >= BAR_WIDTH, tag + ' 物理 y 越出列首: ' + p.y);
-      assert.ok(p.y + p.height <= 800 - BAR_WIDTH, tag + ' 物理 y 越出列尾: ' + (p.y + p.height));
+      assert.ok(p.x >= 0 && p.x + p.width <= PHYSICAL.width, tag + ' 物理 x 越出列');
+      // 3) **进度条安全**：进度条逻辑 y∈[240,266) → 物理 x∈[240,266)。
+      //    视频物理 x 是逻辑 y 的直映，故 x+width 必须 <= 240。
+      assert.ok(
+        p.x + p.width <= VIDEO_AREA.height,
+        tag + ' 压住进度条: 物理 x+w=' + (p.x + p.width) + ' > ' + VIDEO_AREA.height
+      );
+      // 4) 比例守恒（物理是逻辑的转置，宽高互换）
+      const src = c[0] / c[1];
+      const out = p.height / p.width;
+      assert.ok(Math.abs(out - src) / src < 0.02, tag + ' 变形: src=' + src + ' out=' + out);
     }
   });
 }

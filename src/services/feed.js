@@ -12,6 +12,7 @@
 //     规避无 CA 库下 https ImageLoader 的未知风险。
 import { logWarn } from './storage.js';
 import { buildSignedQuery } from './bili/wbi.js';
+import { normalizeImageUrl } from './imgurl.js';
 
 export const RCMD_PAGE_SIZE = 20; // 实测上限
 export const POPULAR_PAGE_SIZE = 12;
@@ -21,16 +22,14 @@ export const SEARCH_PAGE_SIZE = 20;
 
 const BV_RE = /^BV[0-9A-Za-z]{10}$/;
 
-// //x → http://x；hdslb 域 https → http（CDN 实测 http 200）；其它原样
+// X6 Pro 真机网络实测（2026-10-29）：
+//   i0/i1/i2.hdslb.com 在设备上**无法解析**（name resolution failure，
+//   nslookup 223.5.5.5 超时，直连 IP 亦超时）→ 封面全部黑块。
+//   archive.biliimg.com 可正常访问，且提供**完全相同**的 /bfs/archive/<hash>.jpg
+//   路径（实测 http/https 均 200，1311x737 JPEG）。
+// 归一逻辑收敛到 services/imgurl.js（feed / article / 头像共用一份）。
 export function normalizeCover(url) {
-  if (typeof url !== 'string' || !url) return '';
-  let u = url.trim();
-  if (u.indexOf('//') === 0) return 'http:' + u;
-  if (/^https:\/\//i.test(u)) {
-    const host = u.replace(/^https:\/\//i, '').split('/')[0].toLowerCase();
-    if (/\.hdslb\.com(:\d+)?$/.test(host)) return 'http://' + u.slice(8);
-  }
-  return u;
+  return normalizeImageUrl(url);
 }
 
 // 时长秒 → "mm:ss" / "h:mm:ss"；非正数 → ''
@@ -280,6 +279,29 @@ function _searchType(client, mixinKey, keyword, page, searchType) {
 // 视频搜索（兼容入口；autotest 与历史调用使用）
 export function searchVideos(client, mixinKey, keyword, page) {
   return searchBili(client, mixinKey, keyword, page, 'video');
+}
+
+// 相关推荐（播放页右栏「更多视频」）
+//   GET /x/web-interface/archive/related?aid= | bvid=  → data[]（最多 40 条）
+//   data[] 条目形态基本同 /x/v2/view 的 data：{aid,bvid,cid,pic,title,duration,owner.name,stat.view,dimension}
+//   注：没有 cid 也能播（播放链有无条件 view 补 cid），这里 cid 缺失填 0 即可。
+export async function fetchRelated(client, opts) {
+  const o = opts || {};
+  const bvid = typeof o.bvid === 'string' ? o.bvid : '';
+  const aid = Math.floor(Number(o.aid) || 0);
+  const q = {};
+  if (BV_RE.test(bvid)) q.bvid = bvid;
+  else if (aid > 0) q.aid = aid;
+  else return { ok: false, stage: 'param', message: '缺少稿件标识' };
+  const res = await client.request('/x/web-interface/archive/related', q);
+  if (!res.ok) return failFrom(res);
+  const arr = Array.isArray(res.data) ? res.data : (res.data && res.data.list) || [];
+  const items = [];
+  arr.forEach((raw) => {
+    const it = normalizeVideo(raw, 'related');
+    if (it) items.push(it);
+  });
+  return { ok: true, items: items, noMore: true };
 }
 
 // 四段错误 → 面板一行文案

@@ -1,5 +1,6 @@
 // 播放历史（本地 schema，version 化；给「我的」页用）
 import { KEYS, getJson, setJson } from './storage.js';
+import { normalizeImageUrl } from './imgurl.js';
 
 export const HISTORY_VERSION = 1;
 export const MAX_HISTORY = 10;
@@ -25,7 +26,9 @@ export function normalizeHistory(raw) {
       cid: Number(it.cid) || 0,
       title: typeof it.title === 'string' && it.title ? it.title : '未命名',
       up: typeof it.up === 'string' ? it.up : '',
-      cover: typeof it.cover === 'string' ? it.cover : '',
+      // 历史条目是**旧版本写下的**（v2.9.4 之前的封面还是裸 i0.hdslb.com）：
+      // 本机 DNS 解析不到 hdslb，必须过一遍归一化，否则「我的 → 播放历史」永远灰块。
+      cover: normalizeImageUrl(typeof it.cover === 'string' ? it.cover : ''),
       durationSec: Number(it.durationSec) || 0,
       view: Number(it.view) || 0,
       source: 'history',

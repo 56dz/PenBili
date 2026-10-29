@@ -1,31 +1,30 @@
 @import "var.less";
 
 // 链路自检页（diag）样式 —— 从原 base.less 拆出，只服务 pages/diag。
-// 坐标全部来自 profiles/youdao-x5.md：逻辑 800x254。
-// 布局：左列 452px = 视频洞（native 写 fb 的逻辑矩形 {0,0,452,254}，
-// 对应物理 {0,174,254,452}，见 services/screen.js::probeVideoRects）；
-// 右列 348px = 步骤面板。
+// 坐标全部来自 X6 Pro 真机截屏 + cfg.json：逻辑 960x266（详见 app.js DESIGN_WIDTH 说明）。
+// 布局：左列 608px = 视频洞（与首页 play-col 同宽，见 services/screen.js::VIDEO_COL_WIDTH）；
+// 右列 352px = 步骤面板。
 .page {
-  width: 800px;
-  height: 254px;
+  width: 960px;
+  height: 266px;
   flex-direction: row;
   background-color: @background-color;
 }
 
 .video-col {
-  width: 452px;
-  height: 254px;
+  width: 608px;
+  height: 266px;
 }
 
 .video-hole {
-  width: 452px;
-  height: 254px;
+  width: 608px;
+  height: 266px;
   background-color: rgba(0, 0, 0, 0);
 }
 
 .video-idle {
-  width: 452px;
-  height: 254px;
+  width: 608px;
+  height: 266px;
   justify-content: center;
   align-items: center;
 }
@@ -36,8 +35,8 @@
 }
 
 .panel {
-  width: 348px;
-  height: 254px;
+  width: 352px;
+  height: 266px;
   flex-direction: column;
   padding-left: 10px;
   padding-right: 8px;
@@ -52,7 +51,9 @@
 }
 
 .title {
-  flex: 1;
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0px;
   font-size: 15px;
   color: @text-color;
   lines: 1;
@@ -89,7 +90,9 @@
 }
 
 .detail {
-  flex: 1;
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0px;
   font-size: 12px;
   color: @text-color-dim;
   lines: 1;
@@ -137,7 +140,9 @@
 }
 
 .summary {
-  flex: 1;
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0px;
   font-size: 12px;
   color: @text-color;
   lines: 2;

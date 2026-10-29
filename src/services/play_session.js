@@ -2,79 +2,53 @@
 //
 // 视频链：**无条件 view**（权威 cid/时长/标题/显示宽高）→ WBI 密钥 → playurl html5 qn 阶梯
 //         → player.open(按真实宽高信箱适配的居中矩形 + UA/Referer)。
-// 直播链：搜索 kind=live → 服务端 /live?...（转码，见 server/live_proxy.py v5 HLS）→
-//         302 → index.m3u8 → 同一个 player.open（单输入，durationMs=0）。
+// 直播链：搜索 kind=live → getRoomPlayInfo 取 FLV 直链（见 services/bili/live.js）
+//         → 同一个 player.open（音频进程拉同一条 URL，durationMs=0）。
 // 控制：toggle / seekBy(±20s) / readStatus / closeSession，全部幂等、结构化错误。
-// 直播技术留档：getRoomPlayInfo 唯一 avc 档是 720p，本机软解 0.76x 不实时 → **必须经服务端转码**；
-//         服务端 v5 以 HLS 1s 分片回传，笔端实测 480p30 解 1.2x 余量（2026-10-07 真机）。
+//
+// 硬解（v3.0.0 / X6 Pro）：native 侧已从「ffmpeg 软解成 RGB 帧」改为「ffmpeg 只搬压缩包 +
+// gst mppvideodec 硬解上屏」。因此下面 MAX_DECODE_PIXELS 这类**软解时代的像素预算不再适用**
+// ——RK3562 的 MPP 硬解 720p 实测 33x 实时，1280×720 直播/高码率稿件都不再有压力。
 import { DASH_QN_LADDER, QN_LADDER, HTML5_FPS, buildPlayurlQuery, parseHtml5Response, parseDashResponse, validateStreamUrl } from './bili/playurl.js';
+import { fetchLivePlayUrl, LIVE_FPS } from './bili/live.js';
 import { deriveMixinKey } from './bili/wbi.js';
 import { playVideoRects } from './screen.js';
 
 export const SEEK_STEP_MS = 20000;
 
-// 解码预算（v2.6.0）：实测 640×360(230K px) 软解吞吐 1.1~1.9x（4×A53，无弹幕）；2 倍像素即
-// CPU 100% 吞吐 93%（2026-10-01 soak 实证）。预算卡 310K（≈640×480 / 480×640 竖屏），超出 → durl。
+/* 软解时代的解码预算，仅保留给「硬解不可用时的降级」判断参考；硬解路径不看这个值。 */
 export const MAX_DECODE_PIXELS = 310000;
 
-// ---- 直播（v2.9.0）：服务端以 HLS 分片回传，笔端只把 /live?... 当**点播地址**消费 ----
-//   链路：搜索 kind=live → http://<addr>/live?room&ck&res&bv&trans&buf → 302 →
-//         .../hls/<sid>/index.m3u8（ffmpeg 自动跟随 302；终点 .m3u8 → hls demuxer）；
-//         单输入（input2=''）走 durl/直播那条 native 路径。
-//   durationMs=0：native 以"时长未知"处理 → 不判播完、seek 无上界（正是直播想要的语义）。
-//   地址取自「我的 → 直播设置」；未填时这里直接给出可读错误，页面据此提示。
-//   （真机实证：笔端 ffmpeg 4.4 支持 hls demuxer + hls/http 协议；480p30 实时解码 ~1.2x 余量）
-export const LIVE_FPS = 30; /* 服务端 HLS 输出固定 30fps（-vf fps=30 与 -g 30 对齐分片） */
-/* 服务端默认输出尺寸（16:9 源的 -2:254 → 452x254），**正好等于视口视频列**：
- * 2026-10-07 真机实测——只有输出尺寸 == 显示尺寸时 player.c 的 scale 才走恒等快路径
- * （854x480→0.83x 卡 / 640x360→1.03x 紧 / 452x254→2.3~2.8x 流畅）。改这里要同步改服务端 TRANS_H。 */
-export const LIVE_VIDEO_RECT = { width: 452, height: 254 };
-/* 画质档：输出**高度**；254=匹配屏幕（默认），360/480 仅调试（真机必卡，见 storage.LIVE_LIMITS） */
-export const LIVE_RES_ALLOWED = [254, 360, 480];
-export const LIVE_RES_DEFAULT = 254;
-
-// 纯函数（可测）：服务端 /live 地址。addr 为空 / room 非法 → ''
-export function buildLiveUrl(addr, roomid, opts) {
-  const a = String(addr == null ? '' : addr).trim().replace(/\/+$/, '');
-  const room = Math.floor(Number(roomid) || 0);
-  if (!a || !(room > 0)) return '';
-  const o = opts || {};
-  const buf = Math.max(2000, Math.min(20000, Math.floor(Number(o.bufMs) || 6000)));
-  const res = LIVE_RES_ALLOWED.indexOf(Number(o.res)) >= 0 ? Number(o.res) : LIVE_RES_DEFAULT;
-  const bv = /^\d+[km]?$/i.test(String(o.bv || '')) ? String(o.bv).toLowerCase() : '700k';
-  const q = ['room=' + room, 'buf=' + buf, 'res=' + res, 'bv=' + bv, 'trans=' + (o.trans === 0 ? 0 : 1)];
-  if (o.ck) q.push('ck=' + encodeURIComponent(String(o.ck)));
-  return a + '/live?' + q.join('&');
-}
-
-// → {ok, live:true, url, audioUrl:'', qn:0, cid, roomid, aid:0, durationMs:0, title, width, height, host, fps}
-export function resolveLiveUrl(ctx, item) {
-  const cfg = (ctx && ctx.live) || {};
-  const addr = String(cfg.addr == null ? '' : cfg.addr).trim().replace(/\/+$/, '');
+/* 直播：→ {ok, live:true, url, audioUrl:url, qn, cid, roomid, aid:0, durationMs:0,
+ *          title, width, height, host, fps} | {ok:false, stage, code?, message}
+ *
+ * 每次播放都重新取直链（URL 带 expires，过期即 403）——转码时代的「服务器地址 +
+ * 解析缓存」已随 server/live_proxy.py 一起删除。
+ * 音频走**同一条 URL 的独立进程**（player.c 的 spawn_ffaudio）：单进程串行写两个输出时
+ * 视频 pipe 背压会连带音频停摆（v2.9.4 真机 30 分钟长跑定位，X5 时代的结论，机制不变）。
+ * 实测（2026-10-29 X6 Pro）：同一 FLV 直链并发跑 2~3 个 ffmpeg 全部成功。 */
+export async function resolveLiveUrl(ctx, item) {
   const roomid = Number(item && item.roomid) || 0;
   if (!(roomid > 0)) return { ok: false, stage: 'param', message: '直播间号无效' };
-  if (!addr) return { ok: false, stage: 'liveaddr', message: '未填写转码服务器地址' };
-  const url = buildLiveUrl(addr, roomid, cfg);
-  if (!url) return { ok: false, stage: 'liveaddr', message: '转码服务器地址不合法' };
+  const r = await fetchLivePlayUrl(ctx.client, roomid, { log: ctx.log });
+  if (cancelled(ctx)) return { ok: false, stage: 'cancel', message: '已取消' };
+  if (!r.ok) return r;
   return {
     ok: true,
     live: true,
-    url: url,
-    /* v2.9.4：直播也走「音视频分离双进程」—— 音频进程独立拉**同一条** URL。
-     * 动机（真机 30 分钟长跑定位）：单进程 ffmpeg 串行写两个输出，视频 pipe（32MB 缓冲）
-     * 被填满时 ffmpeg 整体阻塞 → 音频同停 → 环/管道被抽干 → ALSA underrun（实测 8 次、
-     * 最长 2.36s）→ **音频内容永久落后**（累计 3.17s），而画面按墙钟照走。
-     * 拆成两个独立进程后，视频背压不再牵连音频产出。 */
-    audioUrl: url,
-    qn: 0,
+    url: r.url,
+    audioUrl: r.url,
+    qn: r.qn,
     cid: roomid,
     roomid: roomid,
     aid: 0, /* 直播不接评论（reply 无 oid） */
     durationMs: 0, /* 时长未知：不判播完、seek 不设上界 */
     title: (item && item.title) || '',
-    width: LIVE_VIDEO_RECT.width,
-    height: LIVE_VIDEO_RECT.height,
-    host: addr,
+    /* 用服务端上报的真实分辨率（实测 1280×720）而不是写死的输出尺寸：
+     * 硬解路径下 kmssink 的 render-rectangle 做硬件缩放，信箱比例必须按源算。 */
+    width: r.width || 1280,
+    height: r.height || 720,
+    host: r.host || '',
     fps: LIVE_FPS
   };
 }
@@ -273,6 +247,7 @@ export async function openVideo(ctx, item) {
     audio: true,
     transpose: 2,
     rect: rects.physical,
+    /* '' = 自动：已连蓝牙耳机走 bluealsa，否则内置扬声器（player.c 的 detect_bt_pcm） */
     audioDevice: '',
     userAgent: ctx.mediaUa,
     referer: ctx.mediaReferer
@@ -425,8 +400,8 @@ export async function closeSession(ctx) {
 export function describePlayError(res) {
   if (!res || res.ok) return '';
   if (res.stage === 'cancel') return '';
-  // 直播未配服务器：给出用户指定的完整提示（页面直接用这一行）
-  if (res.stage === 'liveaddr') return (res.message || '未填写转码服务器地址') + '，无法播放';
+  // 直播未开播：接口明确给了 live_status != 1，直接给用户一行话
+  if (res.stage === 'offline') return res.message || '主播未开播';
   const stageText = {
     param: '参数错误',
     view: '稿件信息失败',

@@ -1,23 +1,66 @@
 # PenBili
 
-**有道词典笔 X5 上的哔哩哔哩播放器**（Falcon / QuickJS mini-app，Vue 2 SFC）。本发布以仓库 `v2.7.0` 源码为基线，当前版本号为 `2.9.4`。
+**有道词典笔（X5 / X6 Pro）上的哔哩哔哩播放器**（Falcon / QuickJS mini-app，Vue 2 SFC）。本发布以仓库 `v2.7.0` 源码为基线，当前版本号为 `3.0.0`。
 
-在逻辑分辨率 800×254 的设备屏幕上提供推荐流、DASH 播放、视频/图文/直播三栏搜索、图文阅读、评论浏览/发表、TV 协议扫码登录与播放历史。
+在逻辑分辨率 800×254（X5）与 **960×266（X6 Pro）** 的设备屏幕上提供推荐流、DASH 播放、视频/图文/直播三栏搜索、图文阅读、评论浏览/发表、TV 协议扫码登录与播放历史。
+
+> **X6 Pro 适配**：屏幕从 800×254 换成 960×266，界面按 iPad 版 B 站重做——左侧窄导航栏（76px，只包住按钮文字）+ 884px 内容区 5 列封面卡片网格；播放页为 64px 纯图标栏（返回 / 点赞 / 投币 / 收藏 / 播放暂停，点赞投币收藏放大且计数在图标下方）+ 432px 视频区（与图标栏留 16px 间距）+ 448px 右栏（默认评论区，点收藏切换到收藏夹覆盖层）+ 视频下方可拖动进度条。配色 B 站粉 `#FB7299` / 蓝 `#00AEEC`。真机几何常量、测量方法与踩坑记录见 **[`docs/x6pro-adaptation.md`](docs/x6pro-adaptation.md)**，播放链路见 **[`docs/x6pro-video-playback.md`](docs/x6pro-video-playback.md)**。
+
 弹幕已于 v2.7.0 移除，以避免弱设备上的逐帧文字渲染拖慢视频解码。
 
 > **`2.9.0` 变更**：**直播间播放上线** —— 搜索三栏的「直播」由占位转为可用：直播间经**服务端转码**取 360/480/540p 流（服务端以 **HLS 分片**回传，笔端当点播地址播放）；「我的 → 直播设置」配置转码服务器地址与起播缓冲，并带**重定向解析缓存**（外网端口每次打洞都会变，启动时 2s 探测、失效自动重解析）。
 > **`2.9.1` 变更**：**修掉搜索偶发「B站 code=?：WBI 密钥获取失败」** —— 根因是笔端 HTTP 栈偶发 DNS 解析超时（真机 `YHttpManager` 日志 `Resolving timed out after 6000 milliseconds`，连系统自有域名一起偶发），`nav` 取签名密钥被殃及。改为**短退避重试 3 趟（jsapi → native libcurl → jsapi）+ 双栈兜底**，单趟超时收敛到 7s；同时把真实失败原因（stage/code）透传到界面，不再只显示 `code=?`。新增 `wbiStress` 诊断种子与 5 条单测（107 条全绿）。
 > **`2.9.2` 变更**：**修掉直播卡顿/帧率低（~4fps）且无声** —— 根因是 native 播放器的「音频锚节流」在**单进程音视频**路径（直播）上形成自锁：视频 pipe 上限仅 1MB、音频 writer 要等环形缓冲蓄满 800ms 才开写、而 ffmpeg 同进程产出音视频 → 视频 writer 等音频锚（恒 0，实测 `drift ≡ -frames×33ms`）每帧撞满 200ms 限幅 → ffmpeg 被满 pipe 堵死 → 环永远蓄不满 → **帧率恒 4.2fps 且 aplay 全程无数据（无声）**。改为**直播走墙钟节拍**（`duration_ms<=0`）+ **直播关闭水位滞回**（可闻滞后收敛到管道+ALSA ≈0.56s）+ 墙钟基线对齐首帧、并按音频管道延迟补偿画面。同时把直播默认画质从 480p 改为 **254（= 视口 452×254，1:1 无缩放）**：480p 在本机软解+缩放+转置+rgb32 链上只有 0.83x（必卡），254 有 2.3~2.8x。实测：**4.2fps → 30.0fps**、音频 19.7KB/s → **176KB/s（实时）**、欠载 0、音画偏移稳定 -0.5s（不再漂移）。
 > **`2.9.3` 变更**：**给笔端真正加上缓冲，消掉「卡一下→画面突然加快」的循环**。① 笔端的缓冲深度由**两条管道**决定（视频 pipe = 画面延迟、aplay pipe = 声音延迟），而视频 pipe 的 8MB 扩容**一直没生效**（`/proc/sys/fs/pipe-max-size` 默认 1MB 把申请顶回去，程序无 CAP_SYS_RESOURCE）→ 现在启动时先放宽该 sysctl，视频 pipe 实测拿到 **32MB（≈1.5–2s 存量）**，直播同时把 aplay 管道加深到 256KB（≈1.68s）使两侧量级相当；② 墙钟落后时的追赶**限制在 1.25 倍速**（原来是不限速快放，所以观感是「整段突然加快」）；③ 新增**自适应音画对齐伺服**：用实测 avDrift 反向微调画面目标，把这台设备/这套缓冲下的残差压到 **±30ms**（起播约 10s 内收敛）。另：把设置项「起播缓冲」正名为 **「服务端分片窗口」**——它只决定服务端保留多少分片（笔端落后时的抗抖动余量），**并不影响起播时间**（此前命名误导）。
+> **`3.0.0` 变更（X6 Pro）**：**芯片硬解 + 直播去云端转码 + 界面重做**。
+> ① **视频硬解**：X6 Pro 是 RK3562，带 MPP 视频解码单元。`ffmpeg` 只做 demux + `-c:v copy`（把压缩包原样搬进 FIFO），解码交给 GStreamer 的 `mppvideodec`，再直接送 `kmssink`（DRM 平面 76）上屏。实测 720p **33x 实时**，CPU 从「软解 + 每帧 rgb32 拷贝」降到「只搬压缩包」。旋转也交给解码器（`mppvideodec rotation=`），不再走 ffmpeg `transpose` 滤镜。
+> ② **直播改本地直连**：X5 时代 4×A53 软解 720p 只有 0.76x 实时，只能靠自建转码服务器把 480p30 HLS 推回来。X6 Pro 上这条链路**整体删除**——笔端直接调 `getRoomPlayInfo` 取 `http_stream/flv/avc` 直链（实测 1.2~2.2Mbps，设备外网吞吐 10Mbps），本机硬解播放。「我的 → 直播设置」（服务器地址 / 分片窗口 / 画质档 / 测连 / 解析缓存）随之移除。
+> ③ **界面重做**：见上方 X6 Pro 适配说明。
+> ④ **互动补齐**：播放页左图标栏接入点赞 / 投币 / 收藏（含收藏夹选择），右栏三态切换，底部进度条可拖动定位。
+
 > **`2.9.4` 变更**：**修掉「连续播放 30 分钟后音频落后视频约 1.5 秒」+ 打通外网直播链路**。
 > ① **音视频分离双进程**：单进程 ffmpeg 串行写视频/音频两个输出，视频 pipe（32MB 缓冲）被填满时 ffmpeg **整体阻塞** → 音频同停 → 环/管道被抽干 → ALSA underrun（真机实测 8 次、最长 2.36s）→ **音频内容永久落后**（累计 3.17s）。改为视频进程 + 音频进程各自独立拉同一条转码地址，视频背压不再牵连音频产出。
 > ② **外网链路修复**（STUN 打洞 + Cloudflare 301 场景）：CF 的 301 规则**会丢弃 query string**（`best/live?room=...` → `xyz:端口/live`，服务端 400）；`jsapi.http` 不跟随 301，重定向解析改走 **native libcurl**（`FOLLOWLOCATION=1`）拿终点 host 回写 `resolvedAddr`，播放直连打洞地址绕过 301；降级（解析失败）不再回写缓存；探测超时 2s/5s → 8s/15s（打洞端口 TCP connect 实测可达 5s+）；直播首帧上限 15s→60s、并禁用断流重启（`-ss` seek 对 HLS 直播滑动窗口无效，会卡死循环）。
 > **30 分钟外网长测**（某在播房间，手机热点 + STUN 打洞）：帧率 **29.95fps**、位置增速 **1.00x 实时**、**underrun 0 次**（修复前 8 次累计 3.17s）、丢帧/重启 0；音画偏移 `d` 全程稳定，仅 19.7 分钟处一次外网抖动导致音频进程短暂断供 ~2s（偏移最深 -2232ms），**伺服 30s 内自愈到 -40ms，无永久落后**（修复前会永久落后 1.5s）。
 
-![version](https://img.shields.io/badge/version-2.9.4-blue)
+![version](https://img.shields.io/badge/version-3.0.0-blue)
 ![license](https://img.shields.io/badge/license-GPL--3.0-green)
 
 ## 截图
+
+**X6 Pro（960×266，B 站风格界面）**
+
+**推荐流**
+
+![X6 Pro 推荐流](docs/screenshots/x6-home.png)
+
+**热门**
+
+![X6 Pro 热门](docs/screenshots/x6-hot.png)
+
+**搜索（图文栏）**
+
+![X6 Pro 搜索](docs/screenshots/x6-search.png)
+
+**图文详情**
+
+![X6 Pro 图文详情](docs/screenshots/x6-article.png)
+
+**评论区**
+
+![X6 Pro 评论区](docs/screenshots/x6-comments.png)
+
+**我的**
+
+![X6 Pro 我的](docs/screenshots/x6-mine.png)
+
+**扫码登录**
+
+![X6 Pro 扫码登录](docs/screenshots/x6-qr.png)
+
+以上为 X6 Pro 真机 `miniapp_cli capture` 采集（截图为 Falcon 画布，不含 DRM 视频平面）。
+
+**X5（800×256，`2.7.1` 旧界面）**
 
 **主页（推荐流）**
 
@@ -41,7 +84,7 @@
 - **音频**：独立解码进程与音频环形缓冲，支持设备默认输出和 A2DP 音频路由。
 - **评论**：分页浏览、子回复、系统输入法发表评论；评论面板打开时维持音频播放并避免视频闪烁；评论类型参数化（视频=1、专栏图文=12）。
 - **搜索**：关键词搜索，结果分「视频 / 图文 / 直播」三栏，各自独立缓存与分页。
-- **直播播放**：搜索直播间 → 经服务端转码取流（`/live?room=N`，笔端登录 cookie 由服务端代为拉 720p 源，避免未登录风控）；服务端以 **HLS（1s 分片、滑动窗口）**回传，笔端 ffmpeg 的 hls demuxer 当普通点播地址消费，`durationMs=0` → 不判播完、不提供定位。**输出高度默认 254**（= 视口 452×254，与屏 1:1 → 笔端缩放被跳过，2.3~2.8x 余量）；480p 会被笔端缩回 452×254 却只剩 0.83x（必卡），故不再作推荐档。
+- **直播播放**：搜索直播间 → 直接调 `getRoomPlayInfo` 取 `http_stream/flv/avc` 直链，笔端本地解码播放，不再依赖任何自建服务器。`durationMs=0` → 不判播完、不提供定位；直播地址带 `expires`，过期后自动重取一次。未登录上限 720p（`current_qn=250`）。
 - **图文阅读**：专栏详情以文本/图片混排块渲染（opus 结构化段落优先，content HTML 兜底）；正文按块级标签分段（每段独立成块），段内 `<br>` 视为软换行；`/x/article/view` 需 WBI 签名，走 native libcurl 传输并携带完整浏览器头（瘦请求头会被风控判 -352）；图片按原始比例等比渲染。
 - **登录**：TV 协议扫码登录、登录态持久化、过期检查与刷新。
 
@@ -49,79 +92,51 @@
 
 | 项目 | 值 |
 | --- | --- |
-| 机型 | 有道词典笔 X5 |
+| 机型 | 有道词典笔 X5 / **X6 Pro** |
 | 运行时 | Falcon mini-app / QuickJS 20200705 |
-| 逻辑屏幕 | 800×254 |
-| 视频区域 | 452×254，按源视频宽高信箱适配 |
+| 逻辑屏幕 | X5：800×254　**X6 Pro：960×266** |
+| 视频区域 | X5：452×254　**X6 Pro：432×240**（另留 16px 与图标栏间距），均按源视频宽高信箱适配 |
+| 面板朝向 | `direction = 270`，物理面板 480×960（X6 Pro） |
+
+两套几何由 `src/app.js` 的 `DESIGN_WIDTH` 与 `src/services/screen.js` 的
+`LOGICAL` / `PHYSICAL` / `VIDEO_COL_WIDTH` / `BAR_WIDTH` 决定；X6 Pro 的真机测量过程见
+[`docs/x6pro-adaptation.md`](docs/x6pro-adaptation.md)。
 
 设备画像、诊断日志、运行截图及本地环境信息不随此版本分发。更换设备或固件时应重新验证屏幕几何与解码能力。
 
-## 转码服务器（直播服务端）
+## X6 Pro 适配待办
 
-直播必须有一台**自建转码服务器**：词典笔既解不动 720p、也播不了 https 源，所以由服务端拉流转码后回传。
-服务端源码与完整文档在 **[`server/`](server/)**（`live_proxy.py` 单文件 + systemd 单元 + 依赖说明，
-发布包 `PenBili-server.zip` 与客户端 AMR 一同附在 Release 页）。
-
-### 服务端如何使用
-
-```bash
-# 1) 依赖：Python 3.7+（纯标准库，无需 pip install）+ 系统 ffmpeg（带 libx264）
-sudo apt install ffmpeg
-
-# 2) 启动（默认端口 2050）
-python3 server/live_proxy.py --port 2050
-# 常驻运行：把 server/penbili-live.service 放进 /etc/systemd/system/ 后
-#   sudo systemctl enable --now penbili-live
-
-# 3) 验证
-curl -s http://127.0.0.1:2050/health          # → {"ok":true,"version":"5.1",...}
-curl -si 'http://127.0.0.1:2050/live?room=<房间号>' | grep -i location   # 302 → m3u8 地址
-```
-
-笔端侧：「我的 → **直播设置**」填 `http://<服务器IP>:2050`（**只认 http**），点**测连**确认连通；
-未填写时点直播会提示「未填写转码服务器地址，无法播放」。人在外面时需自建一条 http 隧道——
-Cloudflare 这类强制 https 的 CDN 会 301 并**丢掉 query**，笔端吃不了。
-
-**接口**：`GET /health`（探测/负载/重定向解析）、`GET /live?room=&ck=&res=&bv=&trans=&buf=&seg=` →
-302 到 `/hls/<sid>/index.m3u8`、`GET /hls/<sid>/…`（播放列表与分片）。
-常用参数：`ck` 笔端 cookie（解锁 720p 源并隔离多用户）、`res` 输出高度（默认 254）、
-`bv` 码率（默认 700k）、`trans=0` 直通不转码、`buf` 服务端分片窗口（默认 6s，**只影响抗抖动余量、不影响起播**）。
-并发默认 6 路、空闲 25s 回收会话、同参数重入复用会话（重连秒开）。
-
-### 服务端实现思路
-
-- **为什么用 HLS 而不是长连接**：早期版本推一条 chunked FLV，两端强耦合（服务端要蓄水/剥头，
-  笔端要墙钟节流/丢音频）。v5 改为「1 秒分片 + 滑动窗口」的 HLS 后，**笔端用 ffmpeg 自带的
-  hls demuxer 当普通点播地址播**，点播代码零改动，断线重连也只是重读列表，天然容忍重启。
-- **会话模型**：`sid = sha1(room|ck|res|bv|trans|seg)[:12]` → 同参数复用同一会话（秒开）；
-  按 cookie 哈希隔离多用户、同 cookie 换房间旧会话让位；janitor 每 5s 回收 25s 无请求的会话；
-  ffmpeg 因源站断流/直链过期退出时自动重取新线路重开。
-- **转码参数全是真机结论**：`probesize` 必须 256KB（否则 1/3 概率探不到音频 → 整段无声）；
-  视频码率用 `-maxrate`+`-bufsize` VBV 锁上限（只给 `-b:v` 会超发 2 倍）；
-  音频**绝不加裸 `-maxrate`**（无 `-bufsize` 时 ffmpeg 静默丢整条音轨）；`preset veryfast` 非
-  `ultrafast`（防马赛克）；GOP=30 与 1s 分片对齐，每片恰好 1 个关键帧。
-- **输出高度默认 254**：笔端视频视口就是 452×254，**输出==视口时 sws_scale 走恒等快路径被跳过**，
-  真机吞吐 480p 只有 0.83x（必卡）、360p 1.03x（零余量）、**452×254 有 2.3~2.8x**。
-- **安全**：cookie 只保留可打印 ASCII、分片名白名单防路径穿越、上游只放行 B 站 CDN 域名防 SSRF；
-  服务端本身**无鉴权，请勿把端口直接暴露公网**，部署在内网或加密隧道后。
+- [x] 逻辑画布 960×266（`src/app.js` `DESIGN_WIDTH = 960`）
+- [x] 三栏骨架 176 / 608 / 176，几何纯函数与单测同步到 960×266
+- [x] B 站风格视觉重做（`src/styles/var.less` + `src/styles/base.less`）
+- [x] 封面图 CDN 重写（`src/services/imgurl.js`，规避 hdslb 域名解析失败）
+- [x] 历史封面同样归一化（`src/services/history.js`）
+- [x] `flex: 1` 简写改长写（Falcon 运行时简写会算错 flex 子项宽度）
+- [x] aarch64 `libjsapi_httpjson.so` 落地 → 图文详情、扫码登录恢复
+- [x] aarch64 `libjsapi_player.so` 落地（MPP 硬解 + KMS 平面直出）→ 播放态恢复
 
 ## 性能诊断记录
 
-一次约 4.5 分钟的播放采样（253 个样本）中，播放稳定期未观察到超过 1 秒的停帧；超过 1 秒的停顿出现在流启动或首帧恢复阶段。该轮中视频解码约占单核 55–81%，应用进程约 5%，全机约 25%。这说明该样本中的停顿更像首帧/流启动等待，而非持续的解码饱和；不同视频和网络下结果可能不同。
+X6 Pro 换用芯片硬解后，视频解码不再占用 CPU。`ffmpeg` 只做 demux 与容器解包（`-c:v copy`），
+压缩后的 H.264 Annex-B 码流经 FIFO 交给 `mppvideodec`，解码结果直接由 `kmssink` 送上 KMS 覆盖平面。
+实测 640×360@30 的直播源，解码吞吐约 **33 倍实时**——瓶颈完全落在网络而非算力。
 
-`2.7.1` 真机自检（有道 X5，DASH 360p / AVC）实测：首帧约 1.1 秒；稳定播放期音画漂移 2–36 ms、重同步 0 次、缓冲约 0.56 秒；±20 秒定位后约 1.5 秒恢复出帧。音频首帧会等待视频首帧后同步开播，避免起播瞬间的唇音错位。该数据仍适用于 `2.9.4`（点播 DASH 本就是双进程，本轮只改直播链路，点播未动）。
+画面节拍以音频时钟为锚：每帧按 `1/fps` 排程，再用「当前可闻音频位置 − 本帧应有位置」的残余漂移
+做 ±1~3ms 的低通微调，而不是硬等到音频位置跨过阈值才放行。早期版本正是硬等音频锚（以 8KB
+写块为单位，约 46ms 一台阶），导致连续几帧卡在同一台阶、台阶一跳又整批放行，
+表现为**约每秒一次的顿挫**；改为节拍器后实测相邻两次上屏的最大间隔从 126ms 降到 30~33ms
+（正好一帧），丢帧计数从 544 降到 2，音画漂移稳定在 ±60ms 内。
 
-`2.9.4` 外网直播 30 分钟长测（手机热点 + STUN 打洞 + CF 301，某在播房间，服务端 res=254）：
-帧率 29.95fps、位置 1.00x 实时、underrun 0 次、丢帧/重启 0、音画偏移 `d` 全程稳定在 ±100ms（除 19.7 分钟一次外网抖动致音频进程短暂断供 ~2s、偏移 -2232ms，伺服 30s 内自愈）。
-对照：修复前（单进程）30 分钟后音频永久落后 1.5s、underrun 8 次累计 3.17s。
-
-`2.9.0` 直播实测（笔端直连服务端内网 2050，在播房间）：笔端 ffmpeg 拉 HLS 12 秒解出 360 帧（恰好 30fps、零丢帧），起播阶段大于 2 倍速、稳态 1.23 倍速；服务端侧 ffmpeg 播同一条 m3u8 12 秒零告警。
-
-`2.9.2` 直播实测（同上房间，服务端 res=254）：修复前 **4.2fps**（`frames` 每 5s 仅 +21、播放位置每 5s 只走 700ms ≈ 0.14x、音频仅 19.7KB/s、aplay 零消耗）；修复后 **30.0fps**（每 5s +150 帧、位置 1000ms/s）、音频 **176KB/s 实时**、欠载/丢包 0、`avDrift` 稳定 −0.5s。服务端分片 452×254@30fps + aac 44100。
+旋转交给解码器：`mppvideodec` 自带 `rotation` 属性，直接按面板朝向（`direction=270`）出正立画面，
+不需要 `videoconvert` 之类的软件转换，也省掉了整帧旋转的 CPU 开销。
 
 ## 构建与测试
 
-前置：Node.js 18+、有道小程序打包器 **aiot-vue-cli**（1.0.32 验证）；重建 native 库另需 Zig（`arm-linux-gnueabihf.2.23` target）。
+前置：Node.js 18+、有道小程序打包器 **aiot-vue-cli**（1.0.32 验证）；重建 native 库另需 Zig。
+
+X6 Pro 是 aarch64，native 库必须用 `aarch64-linux-gnu.2.17` target 重建（`EI_CLASS=64`、`machine=183`）；
+X5 用的是 `arm-linux-gnueabihf.2.23`。32 位库在 X6 Pro 上会被 `dynamic_load_jsapi` 直接拒绝
+（`wrong ELF class: ELFCLASS32`）。
 
 ```bash
 npm ci
@@ -149,9 +164,9 @@ adb shell miniapp_cli start 8002026091900004 index   # 页面名**不带** `--`�
 
 ## 致谢
 
-- [SocialSisterYi/bilibili-API-collect](https://github.com/SocialSisterYi/bilibili-API-collect)：B 站接口文档。
-- 腾讯 **WorkBuddy**：开发环境与 Agent 工具链。
-- **GLM-5.3-Flash**（智谱）、DeepSeek 与小米 MiMo：代码协作与排障。
+- [SocialSisterYi/bilibili-API-collect](https://github.com/SocialSisterYi/bilibili-API-collect)：
+  我基本是照着这份接口文档把点赞、投币、收藏、评论一路接完的，省了大量抓包时间。
+- 有道 Falcon 小程序的官方示例与 `falcon-ui` 组件库：布局、样式和触摸事件的行为都以它为准。
 
 ## 免责声明
 

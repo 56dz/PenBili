@@ -11,19 +11,20 @@
 
 import { buildSignedQuery } from './wbi.js';
 import { httpGetTextNative } from '../net.js';
+import { normalizeImageUrl } from '../imgurl.js';
 
-const ART_W = 436; /* 图文正文列显示宽（art-scroll 452 - 左右 padding 8） */
-const IMG_DEFAULT_H = 258; /* 无尺寸元数据时的 16:9 兜底高 */
+const ART_W = 880; /* 图文正文列显示宽（astage/art-scroll 896 - 左右 padding 8） */
+const IMG_DEFAULT_H = 495; /* 无尺寸元数据时的 16:9 兜底高（880×9/16） */
 
-// 协议相对地址 → https（dsh bilibili_x5 实证：专栏图 https 直链笔上可加载）
+// 图片地址归一：hdslb 图床在 X6 Pro 上无法解析 → archive.biliimg.com + http（见 services/imgurl.js）
+// 旧实现只把 // 补成 https:，在 X6 Pro 上专栏图会全部加载失败。
 function toHttps(u) {
-  if (typeof u !== 'string' || !u) return '';
-  if (u.indexOf('//') === 0) return 'https:' + u;
-  return u;
+  return normalizeImageUrl(u);
 }
 
 function clampH(h) {
-  return Math.min(620, Math.max(60, Math.round(Number(h) || IMG_DEFAULT_H)));
+  // 上限 1000：正文列已加宽到 880，1:1 图应得 880 高；旧上限 620 会把方图压扁。
+  return Math.min(1000, Math.max(60, Math.round(Number(h) || IMG_DEFAULT_H)));
 }
 
 // opus 富文本段落 → 混排块[]：{t:'text', text} | {t:'img', src, dw, dh}

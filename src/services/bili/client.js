@@ -160,9 +160,16 @@ export function createClient(opts) {
   }
 
   // form POST（原样 x-www-form-urlencoded body；native httpjson 路径）
-  // url 绝对地址；form 为**已签名 body 字符串**（调用方保证与 sign 的顺序/编码一致）
-  async function postForm(url, form, reqOpts) {
+  // form 为**已签名 body 字符串**（调用方保证与 sign 的顺序/编码一致）
+  //
+  // 2026-10-29 真机 bug 修复：path 允许与 request() 一样传**相对路径**。
+  // 之前 action.js / reply.js 传的都是 '/x/web-interface/archive/like' 这种相对路径，
+  // 而这里直接把它交给 native libcurl → 无 scheme 的 URL 立即失败 →
+  // 点赞/投币/收藏/发评论全部 stage='transport'（用户现象：「点了没反应」）。
+  // 统一在这里补 BILI_API 前缀，与 request() 口径一致；绝对地址仍原样透传。
+  async function postForm(path, form, reqOpts) {
     const ro = reqOpts || {};
+    const url = /^https?:\/\//i.test(path) ? path : BILI_API + path;
     const t0 = now();
     let res;
     try {

@@ -1,32 +1,62 @@
-﻿$ErrorActionPreference = 'Stop'
-# 交叉编译 native 模块（zig 工具链，与 video_player_x5 / deepseek-x5 同源）：
-#   libjsapi_player.so  = player.c v1.1.0（open() 尾部 userAgent/referer）
-#   libjsapi_httpjson.so = httpjson.c（form POST 原样 body；B 站 TV 登录 POST 必需）
-#   两者均已在 youdao-x5-fw3.4.6 真机验证；产物由 aiot-vue-cli 原样打包进 AMR libs/
-# 路径可移植：$base 由脚本位置推出；zig 用 $env:ZIG_EXE，或回退本机开发布局（../env/pyzig）
+param(
+  [string]$Target = ''
+)
+$ErrorActionPreference = 'Stop'
+# Cross-compile native modules (zig toolchain):
+#   libjsapi_player.so   = player.c (v3.0.0 KMS overlay + mppvideodec hw decode)
+#   libjsapi_httpjson.so = httpjson.c (form POST raw body; bilibili TV login POST)
+# Output is packaged into the AMR libs/ by aiot-vue-cli as-is.
+#
+# ===== Target arch (confirm before build!) =====
+#   X5 (youdao-x5, fw3.4.6)    : armv7 hard-float 32-bit -> dynamic loader wants ELFCLASS32
+#   X6 Pro (melon_pro, fw4.3.5): aarch64 64-bit          -> loading 32-bit lib fails with
+#                                "wrong ELF class: ELFCLASS32:dlopen in dynamic_load_jsapi"
+# Default target: aarch64 (current daily driver is X6 Pro).
+# For X5: .\build.ps1 -Target arm   (or set env PENBILI_TARGET=arm|aarch64)
+if (-not $Target) {
+  $Target = if ($env:PENBILI_TARGET) { $env:PENBILI_TARGET } else { 'aarch64' }
+}
+if ($Target -ne 'aarch64' -and $Target -ne 'arm') { Write-Error "bad -Target: $Target" }
+
+# Portable paths: $base derived from script location; zig via $env:ZIG_EXE,
+# else local dev layout (../env/pyzig).
 $base = Split-Path -Parent $PSScriptRoot
 $zig = $env:ZIG_EXE
 if (-not $zig) {
   $cand = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'env\pyzig\ziglang\zig.exe'
   if (Test-Path $cand) { $zig = $cand }
 }
-if (-not $zig -or -not (Test-Path $zig)) { Write-Error '找不到 zig：请设置 ZIG_EXE 指向 zig.exe（ziglang.org 或 pip install ziglang）' }
+if (-not $zig -or -not (Test-Path $zig)) { Write-Error 'zig not found: set ZIG_EXE to zig.exe (ziglang.org, or pip install ziglang)' }
 $cache = if ($env:ZIG_CACHE) { $env:ZIG_CACHE } else { Join-Path $env:TEMP 'penbili-zig-cache' }
 $env:ZIG_GLOBAL_CACHE_DIR = $cache
 $env:ZIG_LOCAL_CACHE_DIR = $cache + '-local'
 
-if (-not (Test-Path $zig)) { Write-Error "找不到 zig: $zig" }
+if ($Target -eq 'aarch64') {
+  # aarch64 needs ELFCLASS64 import stubs for libquickjs/libcurl
+  $triple = 'aarch64-linux-gnu.2.17'
+  $stubDir = "$base\native\stubs-aarch64"
+  # X6 Pro has no /dev/fb0: player.c drops the fbdev backend and uses the KMS overlay plane
+  $extra = @('-DPENBILI_KMS_ONLY=1')
+  Write-Host "target = aarch64 (X6 Pro)"
+} else {
+  $triple = 'arm-linux-gnueabihf.2.23'
+  $stubDir = "$base\native\stubs"
+  $extra = @()
+  Write-Host "target = arm 32-bit (X5)"
+}
+if (-not (Test-Path $stubDir)) { Write-Error "stub dir not found: $stubDir" }
 
 $common = @(
-  # -g0：不生成 DWARF（否则本机源码绝对路径会进 .so——开源前敏感终检的命中项）
-  # -Wl,-s：strip 符号表（保留 .dynsym 导出，custom_init_jsapis 不受影响，构建脚本自检）
-  'cc', '-target', 'arm-linux-gnueabihf.2.23', '-O2', '-g0', '-Wl,-s', '-fPIC', '-shared', '-fvisibility=hidden',
+  # -g0: no DWARF (otherwise absolute source paths land in the .so - a sensitive-info hit)
+  # -Wl,-s: strip symtab (keeps .dynsym exports; custom_init_jsapis unaffected; build self-check)
+  'cc', '-target', $triple, '-O2', '-g0', '-Wl,-s', '-fPIC', '-shared', '-fvisibility=hidden',
   '-I', "$base\native\iot-miniapp-sdk\include"
-)
+) + $extra
+
 $zargs = $common + @(
   '-o', "$base\libs\libjsapi_player.so",
   "$base\native\csrc\player.c",
-  "$base\native\stubs\libquickjs.so",
+  "$stubDir\libquickjs.so",
   '-lpthread',
   '-Wl,-soname,libjsapi_player.so'
 )
@@ -36,8 +66,8 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 $hargs = $common + @(
   '-o', "$base\libs\libjsapi_httpjson.so",
   "$base\native\csrc\httpjson.c",
-  "$base\native\stubs\libquickjs.so",
-  "$base\native\stubs\libcurl.so.4",
+  "$stubDir\libquickjs.so",
+  "$stubDir\libcurl.so.4",
   '-lpthread',
   '-Wl,-soname,libjsapi_httpjson.so'
 )
@@ -45,8 +75,9 @@ $hargs = $common + @(
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Get-ChildItem "$base\libs\*.so" | Select-Object Name, Length
-# ELF 结构 / 导出符号检查（进入 AMR 前的必做项）
+# ELF structure / export check (mandatory before packaging into AMR)
+# inspect_elf.py validates EI_CLASS + e_machine per target: aarch64 must be ELFCLASS64/183
 foreach ($so in @('libjsapi_player.so', 'libjsapi_httpjson.so')) {
-  python "$base\tools\inspect_elf.py" "$base\libs\$so" | Select-Object -Last 5
+  python "$base\tools\inspect_elf.py" "$base\libs\$so" --target $Target | Select-Object -Last 5
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }

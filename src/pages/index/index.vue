@@ -1,57 +1,68 @@
 <template>
-  <div :class="mode === 'play' ? 'page page-live' : 'page'">
-    <!-- 左侧栏：浏览态=选项栏，播放态=播放控制，图文态=详情返回 -->
-    <div class="bar">
-      <text class="brand">PenBili</text>
-      <template v-if="mode === 'browse'">
-        <div
-          v-for="t in tabs"
-          :key="t.id"
-          :class="tab === t.id ? 'tab tab-on' : 'tab'"
-          @click="selectTab(t.id)"
-        >
-          <text :class="tab === t.id ? 'tab-text tab-text-on' : 'tab-text'">{{ t.label }}</text>
+  <!-- page-live 只在「视频像素真的在 fb 上」时启用透明背景（见 base.less 注释）；
+       未起播/起播失败/已播完时必须用不透明底色，否则会把上一屏的 fb 残留像素透出来。 -->
+  <div :class="holeVisible ? 'page page-live' : 'page'">
+    <!-- 浏览态左栏：只有四个标签，不再有 PenBili 字样（用户要求删掉，把高度还给内容） -->
+    <div v-if="mode === 'browse'" class="bar">
+      <!-- 软件 logo（用户要求 m07040-1：首页左上角加软件标志） -->
+      <image class="bar-logo" :src="ic.logo" :width="30" :height="30"></image>
+      <div
+        v-for="t in tabs"
+        :key="t.id"
+        :class="tab === t.id ? 'tab tab-on' : 'tab'"
+        @click="selectTab(t.id)"
+      >
+        <text :class="tab === t.id ? 'tab-text tab-text-on' : 'tab-text'">{{ t.label }}</text>
+      </div>
+      <text class="bar-status">{{ statusText }}</text>
+    </div>
+
+    <!-- 播放/图文态左栏：纯图标工具条（参考 iPad 版 B站 播放页）
+         点赞/投币/收藏在图标右侧带全站计数，激活后整体变粉（用户要求 m07040）。 -->
+    <div v-else class="ibar">
+      <div class="ibtn" @click="onIbarBack">
+        <image class="ibtn-icon" :src="ic.back" :width="26" :height="26"></image>
+      </div>
+      <template v-if="mode === 'play'">
+        <!-- 用户要求 m09254：点赞/投币/收藏**放大**、数量移到**图标下方**；
+             左栏不再保留评论区按钮（评论区已是右栏默认态）。 -->
+        <div class="ibtn ibtn-big" @click="onToggleLike">
+          <image class="ibtn-icon ibtn-icon-big" :src="act.like ? ic.likeOn : ic.like" :width="32" :height="32"></image>
+          <text :class="act.like ? 'ibtn-count ibtn-count-on' : 'ibtn-count'">{{ formatCount(act.likeCount) }}</text>
         </div>
-        <text class="bar-status">{{ statusText }}</text>
-      </template>
-      <template v-else-if="mode === 'article'">
-        <div class="ctrl" @click="onBackArticle">
-          <text class="ctrl-text">返回图文列表</text>
+        <div class="ibtn ibtn-big" @click="onAddCoin">
+          <image class="ibtn-icon ibtn-icon-big" :src="act.coin ? ic.coinOn : ic.coin" :width="32" :height="32"></image>
+          <text :class="act.coin ? 'ibtn-count ibtn-count-on' : 'ibtn-count'">{{ formatCount(act.coinCount) }}</text>
         </div>
-        <text class="bar-time">图文详情</text>
-        <text class="bar-state">评论区可在右栏进入</text>
+        <div class="ibtn ibtn-big" @click="openFavOverlay">
+          <image class="ibtn-icon ibtn-icon-big" :src="act.fav ? ic.starOn : ic.star" :width="32" :height="32"></image>
+          <text :class="act.fav ? 'ibtn-count ibtn-count-on' : 'ibtn-count'">{{ formatCount(act.favCount) }}</text>
+        </div>
+        <div class="ibtn" @click="onTogglePlay">
+          <image class="ibtn-icon" :src="play.state === 'playing' ? ic.pause : ic.play" :width="26" :height="26"></image>
+        </div>
       </template>
       <template v-else>
-        <div class="ctrl" @click="onBack">
-          <text class="ctrl-text">返回列表</text>
+        <div class="ibtn" @click="toggleArticleComments">
+          <image class="ibtn-icon" :src="commentsOpen ? ic.commentOn : ic.comment" :width="28" :height="28"></image>
         </div>
-        <div class="ctrl ctrl-main" @click="onTogglePlay">
-          <text class="ctrl-text">{{ btnText }}</text>
-        </div>
-        <!-- 直播不支持定位（时长未知、HLS 只有滑动窗口）→ 隐藏 ±20s -->
-        <div v-if="!play.session.live" class="ctrl-row">
-          <div class="ctrl ctrl-half" @click="onSeek(-seekStepSec)">
-            <text class="ctrl-text">{{ '-' + seekStepSec + 's' }}</text>
-          </div>
-          <div class="ctrl ctrl-half" @click="onSeek(seekStepSec)">
-            <text class="ctrl-text">{{ '+' + seekStepSec + 's' }}</text>
-          </div>
-        </div>
-        <!-- 播放进度移至左栏 ±20 下方（用户指定布局） -->
-        <text class="bar-time">{{ timeText }}</text>
-        <text class="bar-state">{{ stateLabel }}{{ play.note ? ' · ' + play.note : '' }}</text>
       </template>
+      <div class="info-spacer"></div>
+      <text class="ibar-time">{{ ibarTimeCur }}</text>
+      <text class="ibar-time-sub">{{ ibarTimeDur }}</text>
     </div>
 
     <!-- 浏览内容 -->
     <div v-if="mode === 'browse'" class="content">
-      <!-- 推荐 / 热门：视频行 + 底部（刷新 | 加载更多） -->
+      <!-- 推荐 / 热门：封面卡片网格 + 底部（刷新 | 加载更多） -->
       <scroller v-if="tab === 'rcmd' || tab === 'hot'" class="list">
-        <div v-for="it in currentItems" :key="it.bvid" class="vrow" @click="onPlayItem(it)">
-          <image class="thumb" :src="it.cover" :width="112" :height="63"></image>
-          <div class="vinfo">
-            <text class="vtitle">{{ it.title }}</text>
-            <text class="vmeta">{{ vmeta(it) }}</text>
+        <div class="grid">
+          <div v-for="it in currentItems" :key="it.bvid" class="vrow" @click="onPlayItem(it)">
+            <image class="thumb" :src="it.cover" :width="166" :height="93"></image>
+            <div class="vinfo">
+              <text class="vtitle">{{ it.title }}</text>
+              <text class="vmeta">{{ vmeta(it) }}</text>
+            </div>
           </div>
         </div>
         <div v-if="currentItems.length" class="more-row">
@@ -86,10 +97,11 @@
             <text :class="searchType === st.id ? 'stype-text stype-text-on' : 'stype-text'">{{ st.label }}</text>
           </div>
         </div>
-        <!-- 视频：与推荐/热门同款卡片 -->
+        <!-- 视频/图文/直播：同款封面卡片网格 -->
+        <div class="grid">
         <template v-for="it in searchItems">
           <div v-if="it.kind === 'video'" :key="it.key" class="vrow" @click="onPlayItem(it)">
-            <image class="thumb" :src="it.cover" :width="112" :height="63"></image>
+            <image class="thumb" :src="it.cover" :width="166" :height="93"></image>
             <div class="vinfo">
               <text class="vtitle">{{ it.title }}</text>
               <text class="vmeta">{{ vmeta(it) }}</text>
@@ -97,21 +109,22 @@
           </div>
           <!-- 图文：同款卡片，进入图文详情（评论区与视频同族，专栏实测 type=12） -->
           <div v-else-if="it.kind === 'article'" :key="it.key" class="vrow" @click="openArticle(it)">
-            <image class="thumb" :src="it.cover" :width="112" :height="63"></image>
+            <image class="thumb" :src="it.cover" :width="166" :height="93"></image>
             <div class="vinfo">
               <text class="vtitle">{{ it.title }}</text>
               <text class="vmeta">{{ it.up }}{{ it.view ? ' · 阅读 ' + formatCount(it.view) : '' }}{{ it.reply ? ' · 评论 ' + it.reply : '' }}</text>
             </div>
           </div>
-          <!-- 直播：点击开播（经「我的 → 直播设置」里的转码服务器；未填地址 → 播放页提示） -->
+          <!-- 直播：点击开播（本机 MPP 硬解，直连 B 站 FLV 源） -->
           <div v-else-if="it.kind === 'live'" :key="it.key" class="vrow" @click="onPlayItem(it)">
-            <image class="thumb" :src="it.cover" :width="112" :height="63"></image>
+            <image class="thumb thumb-sq" :src="it.cover" :width="93" :height="93"></image>
             <div class="vinfo">
               <text class="vtitle">{{ it.title }}</text>
               <text class="vmeta">{{ it.up }}{{ it.online ? ' · 人气 ' + formatCount(it.online) : '' }}{{ it.cate ? ' · ' + it.cate : '' }}</text>
             </div>
           </div>
           </template>
+        </div>
           <!-- 与推荐/热门同款（刷新 | 加载更多）双按钮 -->
         <div v-if="searchItems.length" class="more-row">
           <div class="more-half" @click="onRefreshTab">
@@ -130,10 +143,8 @@
       <scroller v-else-if="mineView === 'info'" class="list">
         <div class="mine-head">
           <div class="mine-idcol">
-            <text class="mine-name">{{ profile ? profile.uname : (buvidShort || '未登录 · 点击扫码登录') }}</text>
-            <text class="mine-id">
-              {{ profile ? ('Lv.' + profile.level + ' · mid ' + profile.mid + (profile.vipType ? ' · 大会员' : '')) : '登录后个性化推荐 · 身份持久保存' }}
-            </text>
+            <text class="mine-name">{{ profile ? profile.uname : '未登录' }}</text>
+            <text class="mine-id">{{ profile ? ('Lv.' + profile.level + ' · mid ' + profile.mid + (profile.vipType ? ' · 大会员' : '')) : '登录后个性化推荐 · 身份持久保存' }}</text>
           </div>
         </div>
         <div v-if="!profile" class="mine-row" @click="onGoLogin">
@@ -153,43 +164,33 @@
         <div class="mine-secrow">
           <text class="mine-sec">播放历史（{{ history.length }}）</text>
         </div>
-        <div v-for="h in history" :key="'h' + h.bvid" class="vrow" @click="onPlayItem(h)">
-          <image class="thumb" :src="h.cover" :width="112" :height="63"></image>
-          <div class="vinfo">
-            <text class="vtitle">{{ h.title }}</text>
-            <text class="vmeta">{{ h.up }} · {{ historyTime(h.at) }}</text>
+        <div v-if="history.length" class="grid">
+          <div v-for="h in history" :key="'h' + h.bvid" class="vrow" @click="onPlayItem(h)">
+            <image class="thumb" :src="h.cover" :width="166" :height="93"></image>
+            <div class="vinfo">
+              <text class="vtitle">{{ h.title }}</text>
+              <text class="vmeta">{{ h.up }} · {{ historyTime(h.at) }}</text>
+            </div>
           </div>
         </div>
         <div v-if="!history.length" class="mine-row">
           <text class="mine-label">还没有播放记录</text>
         </div>
         <div class="mine-secrow">
-          <text class="mine-sec">直播设置（转码服务器）</text>
+          <text class="mine-sec">直播</text>
         </div>
-        <div class="mine-row" @click="onLiveAddrEdit">
-          <text class="mine-label">服务器地址</text>
-          <text class="mine-value">{{ live.addr || '未填写 · 点此输入' }}</text>
+        <div class="mine-row">
+          <text class="mine-label">取流方式</text>
+          <text class="mine-value">本地直连 · 芯片硬解</text>
         </div>
-        <div class="mine-row" @click="onLiveBufferCycle">
-          <text class="mine-label">服务端分片窗口</text>
-          <text class="mine-value">{{ (live.bufMs / 1000).toFixed(0) }} s</text>
+        <div class="mine-row">
+          <text class="mine-label">清晰度</text>
+          <text class="mine-value">720p（未登录上限）</text>
         </div>
-        <div class="mine-row" @click="onLiveQualityCycle">
-          <text class="mine-label">直播画质</text>
-          <text class="mine-value">{{ live.res === 254 ? '匹配屏幕' : live.res + 'p' }} · {{ live.bv }}{{ live.trans ? '' : ' · 直通' }}</text>
-        </div>
-        <div class="mine-row" @click="onLiveProbe">
-          <text class="mine-label">测连服务器</text>
-          <text class="mine-value">{{ liveTestText || '点此测试' }}</text>
-        </div>
-        <div class="mine-row" @click="onLiveCacheClear">
-          <text class="mine-label">解析缓存</text>
-          <text class="mine-value">{{ live.resolvedAddr || '空' }}</text>
-        </div>
-        <text v-if="liveNote" class="mine-notice">{{ liveNote }}</text>
+        <text class="mine-notice">直播由本机 MPP 硬解，不再经云端转码；搜索「直播」栏即可开播。</text>
         <div class="mine-row">
           <text class="mine-label">PenBili</text>
-          <text class="mine-value">v2.9.4 · {{ profile ? '已登录' : '匿名' }}</text>
+          <text class="mine-value">v3.0.0 · {{ profile ? '已登录' : '匿名' }}</text>
         </div>
       </scroller>
 
@@ -218,8 +219,133 @@
       </div>
     </div>
 
-    <!-- 评论覆盖面板：不透明覆盖播放/图文内容区（左栏控制保留；视频被盖 → 面板内滑动无视频可闪） -->
-    <div v-if="(mode === 'play' || mode === 'article') && commentsOpen" class="comments-col">
+    <!-- 播放态：中列视频（KMS 覆盖平面，UI 画不上去）+ 下方可拖动进度条 -->
+    <div v-if="mode === 'play'" class="stage">
+      <div class="video-box">
+        <hole v-if="holeVisible" class="video-hole"></hole>
+        <div v-else class="play-idle">
+          <text class="play-idle-text">{{ idleText }}</text>
+        </div>
+      </div>
+      <div
+        class="seek"
+        @touchstart="onSeekTouch"
+        @touchmove="onSeekTouch"
+        @touchend="onSeekRelease"
+      >
+        <div class="seek-track">
+          <div class="seek-fill" :style="{ width: seekFillW + 'px' }"></div>
+          <div class="seek-knob"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 播放态右栏：默认评论区（用户要求 m07040-5：不要选项栏）；
+         点收藏按钮时整栏被收藏夹选择覆盖，上方有退出按钮，退出恢复评论区。 -->
+    <div v-if="mode === 'play'" class="side">
+      <!-- 收藏夹覆盖层 -->
+      <template v-if="favOverlay">
+        <div class="fav-head">
+          <div class="fav-exit" @click="closeFavOverlay">
+            <text class="fav-exit-text">‹ 退出</text>
+          </div>
+          <text class="fav-title">选择收藏夹</text>
+        </div>
+        <div class="side-body">
+          <scroller class="side-scroll">
+            <div
+              v-for="f in favFolders"
+              :key="'f' + f.id"
+              :class="f.has ? 'favrow favrow-on' : 'favrow'"
+              @click="onFavPick(f)"
+            >
+              <text :class="f.has ? 'favrow-name favrow-name-on' : 'favrow-name'">{{ f.title }}</text>
+              <text :class="f.has ? 'favrow-count favrow-count-on' : 'favrow-count'">{{ f.count }}</text>
+            </div>
+            <text v-if="favStatus" class="side-status">{{ favStatus }}</text>
+          </scroller>
+        </div>
+      </template>
+      <!-- 评论区（默认） -->
+      <template v-else>
+        <div class="side-body side-body-full">
+          <scroller class="side-scroll">
+            <div class="sc-writeline">
+              <div class="reply-write" @click="onWriteReply">
+                <text class="reply-write-text">写评论</text>
+              </div>
+              <text v-if="!hasLogin" class="sc-login-hint">未登录 · 只能查看</text>
+            </div>
+            <text v-if="replyStatus" class="reply-status">{{ replyStatus }}</text>
+            <div v-for="rp in replies" :key="'rp' + rp.rpid" class="reply-block reply-block-n">
+              <div class="reply-item" @click="toggleReply(rp)">
+                <text class="reply-name">{{ rp.name }}</text>
+                <text class="reply-msg">{{ rp.message }}</text>
+                <text class="reply-meta">{{ replyMeta(rp) }}{{ replyOpen.root === rp.rpid ? ' · 收起' : (rp.rcount > 0 ? ' › 查看' + rp.rcount + '回复' : '') }}</text>
+              </div>
+              <div v-if="replyOpen.root === rp.rpid" class="reply-children">
+                <text v-if="replyOpen.loading && !replyOpen.items.length" class="reply-sub-status">回复加载中…</text>
+                <div v-for="ch in replyOpen.items.slice(0, replyOpen.shown)" :key="'ch' + ch.rpid" class="reply-child">
+                  <text class="reply-name">{{ ch.name }}</text>
+                  <text class="reply-msg">{{ ch.message }}</text>
+                </div>
+                <div v-if="!replyOpen.loading && (replyOpen.shown < replyOpen.items.length || !replyOpen.noMore)" class="reply-more" @click="moreChildren">
+                  <text class="reply-more-text">更多回复</text>
+                </div>
+                <text v-if="!replyOpen.items.length && !replyOpen.loading" class="reply-sub-status">暂无回复</text>
+              </div>
+            </div>
+            <div v-if="replies.length && !replyNoMore" class="reply-more" @click="loadMoreReplies">
+              <text class="reply-more-text">{{ replyLoading ? '加载中…' : '加载更多评论' }}</text>
+            </div>
+            <text v-if="!replies.length && !replyLoading && !replyStatus" class="reply-status">暂无评论</text>
+            <text v-if="!replies.length && replyLoading" class="reply-status">评论加载中…</text>
+          </scroller>
+        </div>
+        <!-- 操作反馈（点赞/投币/收藏结果、进度条调试），同时兼作播放提示 -->
+        <text class="side-foot">{{ act.status || play.note }}</text>
+      </template>
+    </div>
+
+    <!-- 图文详情：中列正文（896 宽，评论打开时被评论面板替换） -->
+    <div v-if="mode === 'article' && !commentsOpen" class="astage">
+      <scroller class="art-scroll">
+        <div v-if="article.state === 'loading'" class="art-loading">
+          <text class="play-idle-text">图文加载中…</text>
+        </div>
+        <div v-else-if="article.state === 'error'" class="art-loading">
+          <text class="play-idle-text">{{ article.note || '图文加载失败 · 返回列表' }}</text>
+        </div>
+        <template v-else>
+          <image
+            v-if="article.cover"
+            class="art-cover"
+            :src="article.cover"
+            :width="880"
+            :height="article.coverDh || 160"
+            :style="{ width: '880px', height: (article.coverDh || 160) + 'px' }"
+          ></image>
+          <text class="art-title">{{ article.title }}</text>
+          <text class="art-author">{{ article.author }}{{ article.read ? ' · 阅读 ' + formatCount(article.read) : '' }}{{ article.like ? ' · 点赞 ' + formatCount(article.like) : '' }}</text>
+          <template v-for="(b, bi) in article.blocks">
+            <image
+              v-if="b.t === 'img'"
+              :key="'ab' + bi"
+              class="art-img"
+              :src="b.src"
+              :width="b.dw || 880"
+              :height="b.dh || 240"
+              :style="{ width: (b.dw || 880) + 'px', height: (b.dh || 240) + 'px' }"
+            ></image>
+            <text v-else :key="'ab' + bi" class="art-p">{{ b.text }}</text>
+          </template>
+          <text class="art-end">— 全文完 —</text>
+        </template>
+      </scroller>
+    </div>
+
+    <!-- 图文评论面板（896 宽，盖住正文区） -->
+    <div v-if="mode === 'article' && commentsOpen" class="comments-col">
       <div class="comments-head">
         <text class="comments-title">评论{{ replyCount ? ' · ' + replyCount : '' }}</text>
         <div class="ctrl comments-close" @click="closeComments">
@@ -260,75 +386,6 @@
         <text v-if="!replies.length && replyLoading" class="reply-status">评论加载中…</text>
       </scroller>
     </div>
-
-    <!-- 播放内容：中列视频洞 + 右列信息（评论面板打开时两列收起） -->
-    <div v-if="mode === 'play' && !commentsOpen" class="play-col">
-      <hole v-if="holeVisible" class="video-hole"></hole>
-      <div v-else class="play-idle">
-        <text class="play-idle-text">{{ idleText }}</text>
-      </div>
-    </div>
-    <div v-if="mode === 'play' && !commentsOpen" class="info-col">
-      <text class="info-title">{{ infoTitle }}</text>
-      <text class="info-up">{{ infoUp }}</text>
-      <!-- 右栏按钮：评论区入口（容器 flex 居中，数字变长也不偏）。弹幕功能已于 v2.7.0 移除
-           （drawtext×4 逐帧渲染占解码预算 ~20%，弱稿件软解跌破实时 → 卡顿，用户决策移除） -->
-      <div v-if="!play.session.live" class="info-ctrl" @click="openComments">
-        <text class="info-ctrl-text">评论区{{ replyCount ? ' · ' + replyCount : '' }}</text>
-      </div>
-      <!-- 直播：无评论区（reply 无 oid）→ 显示播放态，不提供入口 -->
-      <text v-else class="info-live-tag">{{ play.state === 'playing' ? '直播中' : stateLabel }}</text>
-      <div class="info-spacer"></div>
-      <text class="info-state">{{ play.note }}</text>
-      <text class="info-hint">{{ play.session.live ? '直播不支持定位/回看' : '左侧：暂停/开始 · ±' + seekStepSec + 's' }}</text>
-    </div>
-
-    <!-- 图文详情：中列正文滚动 + 右列信息（评论面板打开时两列收起；评论区与视频同族，专栏实测 type=12） -->
-    <div v-if="mode === 'article' && !commentsOpen" class="play-col">
-      <scroller class="art-scroll">
-        <div v-if="article.state === 'loading'" class="art-loading">
-          <text class="play-idle-text">图文加载中…</text>
-        </div>
-        <div v-else-if="article.state === 'error'" class="art-loading">
-          <text class="play-idle-text">{{ article.note || '图文加载失败 · 返回列表' }}</text>
-        </div>
-        <template v-else>
-          <image
-            v-if="article.cover"
-            class="art-cover"
-            :src="article.cover"
-            :width="436"
-            :height="article.coverDh || 140"
-            :style="{ width: '436px', height: (article.coverDh || 140) + 'px' }"
-          ></image>
-          <text class="art-title">{{ article.title }}</text>
-          <text class="art-author">{{ article.author }}{{ article.read ? ' · 阅读 ' + formatCount(article.read) : '' }}{{ article.like ? ' · 点赞 ' + formatCount(article.like) : '' }}</text>
-          <template v-for="(b, bi) in article.blocks">
-            <image
-              v-if="b.t === 'img'"
-              :key="'ab' + bi"
-              class="art-img"
-              :src="b.src"
-              :width="b.dw || 436"
-              :height="b.dh || 240"
-              :style="{ width: (b.dw || 436) + 'px', height: (b.dh || 240) + 'px' }"
-            ></image>
-            <text v-else :key="'ab' + bi" class="art-p">{{ b.text }}</text>
-          </template>
-          <text class="art-end">— 全文完 —</text>
-        </template>
-      </scroller>
-    </div>
-    <div v-if="mode === 'article' && !commentsOpen" class="info-col">
-      <text class="info-title">{{ article.title }}</text>
-      <text class="info-up">{{ article.author }}{{ article.words ? ' · ' + article.words + ' 字' : '' }}</text>
-      <div class="info-ctrl" @click="openComments">
-        <text class="info-ctrl-text">评论区{{ replyCount ? ' · ' + replyCount : '' }}</text>
-      </div>
-      <div class="info-spacer"></div>
-      <text class="info-state">{{ article.state === 'ok' ? '图文详情' : article.note }}</text>
-      <text class="info-hint">左侧：返回图文列表</text>
-    </div>
   </div>
 </template>
 
@@ -343,10 +400,25 @@ import {
   formatDuration,
   formatCount
 } from '../../services/feed.js';
+import { fetchViewState, fetchFavFolders, setLike, addCoin, dealFav } from '../../services/bili/action.js';
+// 图标：本地 PNG 走 aiot-vue-cli 的 image 插件 → 产物 images/<md5>.png（见 rollup-plugins/image.js）。
+// 不用 falcon-ui 的 icon 组件：它依赖 font-family: falcon-icons，但包内没有该字体文件（渲染为空）。
+import icHome from '../../assets/icons/home.png';
+import icLike from '../../assets/icons/like.png';
+import icLikeOn from '../../assets/icons/like_on.png';
+import icCoin from '../../assets/icons/coin.png';
+import icCoinOn from '../../assets/icons/coin_on.png';
+import icStar from '../../assets/icons/star.png';
+import icStarOn from '../../assets/icons/star_on.png';
+import icComment from '../../assets/icons/comment.png';
+import icCommentOn from '../../assets/icons/comment_on.png';
+import icPlay from '../../assets/icons/play.png';
+import icPause from '../../assets/icons/pause.png';
+import icBack from '../../assets/icons/back.png';
+import icLogo from '../../assets/icons/logo.png';
 import { fetchArticle } from '../../services/bili/article.js';
 import { createClient, cookieFromSession, DEFAULT_UA, REFERER } from '../../services/bili/client.js';
-import { KEYS, getJson, setJson, loadSession, logWarn, loadLive, saveLive, normalizeLive, normalizeLiveAddr, LIVE_LIMITS } from '../../services/storage.js';
-import { ensureLiveAddr } from '../../services/live.js';
+import { KEYS, getJson, setJson, loadSession, logWarn } from '../../services/storage.js';
 import { loadHistory, saveHistory, pushHistory, formatHistoryTime } from '../../services/history.js';
 import {
   parseGenerate,
@@ -360,7 +432,7 @@ import {
   TV_POLL_URL,
   tvForm
 } from '../../services/bili/qrlogin.js';
-import { httpGet, httpGetTextNative, cancelNativePosts } from '../../services/net.js';
+import { cancelNativePosts } from '../../services/net.js';
 import { fetchReplies, addReply, fetchSubReplies } from '../../services/bili/reply.js';
 import { encodeQr, rowRuns } from '../../services/bili/qrcode.js';
 import { saveSession } from '../../services/storage.js';
@@ -385,8 +457,8 @@ const TABS = [
 ];
 
 // 搜索三分栏（与 feed.js searchBili 的 search_type 对应）：
-//   video/article/live 三栏本版全部可用。live 走服务端转码（HLS 分片回传，见 server/live_proxy.py v5），
-//   地址取「我的 → 直播设置」；未填地址时点播会提示"未填写转码服务器地址，无法播放"。
+//   video/article/live 三栏本版全部可用。live 直连 B 站 FLV 源、本机 MPP 硬解
+//   （见 services/bili/live.js）；未开播时播放页会给出「主播未开播」提示。
 const SEARCH_TYPES_UI = [
   { id: 'video', label: '视频' },
   { id: 'article', label: '图文' },
@@ -478,11 +550,6 @@ export default {
       buvidShort: '',
       seekStepSec: SEEK_STEP_MS / 1000,
       play: idlePlay(),
-      // 直播设置（转码服务器地址 / 起播缓冲 / 画质）+ 重定向解析缓存（服务端外网端口会变）
-      live: normalizeLive(null),
-      liveActiveAddr: '', // 本次会话实际使用的服务器地址（缓存探测或重解析的结果）
-      liveNote: '',       // 直播设置区状态说明
-      liveTestText: '',   // 测连结果
       // 登录 / 扫码
       mineView: 'info',
       profile: null,
@@ -498,7 +565,15 @@ export default {
       // 展开中的子楼（单实例：root=0 收起）
       replyOpen: { root: 0, items: [], shown: 0, page: 1, noMore: false, loading: false },
       // 评论面板（弹幕功能已于 v2.7.0 移除：drawtext 烧帧拖垮弱稿软解）
-      commentsOpen: false
+      commentsOpen: false,
+      // 播放页右栏：默认只显示评论区；点收藏时整栏被收藏夹选择覆盖（favOverlay=true）
+      favOverlay: false,
+      // 互动（点赞/投币/收藏）状态与结果反馈
+      act: { like: 0, coin: 0, fav: false, status: '', busy: false, likeCount: 0, coinCount: 0, favCount: 0 },
+      favFolders: [],
+      favStatus: '',
+      // 可拖动进度条：拖动中的临时位置（null=未拖动，跟随播放）
+      seekDragMs: null
     };
   },
   computed: {
@@ -557,6 +632,46 @@ export default {
       if (this.qr.state === 'expired' || this.qr.state === 'error') return '重新生成';
       if (this.qr.state === 'generate') return '生成中…';
       return '取消';
+    },
+    // 图标表（模板里按状态选白/粉两版）
+    ic() {
+      return {
+        home: icHome,
+        like: icLike,
+        likeOn: icLikeOn,
+        coin: icCoin,
+        coinOn: icCoinOn,
+        star: icStar,
+        starOn: icStarOn,
+        comment: icComment,
+        commentOn: icCommentOn,
+        play: icPlay,
+        pause: icPause,
+        back: icBack,
+        logo: icLogo
+      };
+    },
+    // 图标栏底部小屏显：图文态显示「图文」，播放态显示进度。
+    // 必须拆成两行——64px 宽 10px 字号装不下 "00:08 / 08:54" 13 个字符，会折成
+    // "00:08 / 08:5" + "4"（真机实测）。
+    ibarTimeCur() {
+      if (this.mode === 'article') return '图文';
+      const s = this.play.session;
+      return formatDuration((s ? this.play.positionMs || 0 : 0) / 1000);
+    },
+    ibarTimeDur() {
+      if (this.mode === 'article') return '';
+      const s = this.play.session;
+      return s ? formatDuration((s.durationMs || 0) / 1000) : '';
+    },
+    // 进度条填充宽（px）：轨道 432，圆点 10，二者同排 → 填充最多 422
+    seekFillW() {
+      const s = this.play.session;
+      const dur = s ? s.durationMs || 0 : 0;
+      if (!(dur > 0)) return 0;
+      const ms = this.seekDragMs == null ? this.play.positionMs : this.seekDragMs;
+      const r = Math.max(0, Math.min(1, ms / dur));
+      return Math.round(406 * r);
     }
   },
   async created() {
@@ -598,17 +713,7 @@ export default {
         mediaReferer: REFERER,
         nowSec: () => Math.floor(Date.now() / 1000),
         log: logWarn,
-        cancelled: () => this.gen !== myGen,
-        // 直播配置：地址优先用"本次会话已解析出来的"，其次缓存，最后入口地址。
-        // ck = 笔端登录 cookie（服务端用它拉 720p 源，并按 cookie 隔离多用户会话）。
-        live: {
-          addr: this.liveActiveAddr || this.live.resolvedAddr || this.live.addr,
-          bufMs: this.live.bufMs,
-          res: this.live.res,
-          bv: this.live.bv,
-          trans: this.live.trans,
-          ck: cookieFromSession(this.session)
-        }
+        cancelled: () => this.gen !== myGen
       };
     },
     vmeta(it) {
@@ -630,14 +735,11 @@ export default {
     async loadLocal() {
       const h = await loadHistory();
       this.history = h.items;
-      this.live = await loadLive();
-      // 回写一次：normalizeLive 可能做了 schema 迁移（如 v1→v2 把画质 480/360 纠正为匹配屏幕的 254），
-      // 落盘后存储即与内存一致，避免"设置里显示旧值"的错觉。
-      saveLive(this.live);
       const sess = await loadSession();
       this.session = sess;
       if (sess.buvid3) {
-        this.buvidShort = '触点 ' + sess.buvid3.slice(0, 8) + '…' + sess.buvid3.slice(-4);
+        // 仅供诊断页/日志使用；「我的」页不展示这种短码，未登录时给用户看得懂的引导文案
+        this.buvidShort = sess.buvid3;
       }
       if (sess.login && sess.login.SESSDATA) {
         // 登录态恢复：Cookie 立即生效（首屏请求依赖它）；nav 验证放后台不阻塞首屏
@@ -654,11 +756,6 @@ export default {
             logWarn('[bili] session restore verify fail: ' + prof.stage + ' ' + prof.message);
           }
         })();
-      }
-      // 直播服务器地址：启动时**后台**探测缓存的解析结果（2s 内无响应 → 重新解析并回写缓存）。
-      // 不阻塞首屏；结果只影响直播播放，失败不打扰用户（进「我的」手动测连即可）。
-      if (this.live.addr || this.live.resolvedAddr) {
-        this.checkLiveAddr(false).catch(() => {});
       }
       const at = await getJson(KEYS.autotest, null);
       if (at && (at === true || at.enabled === true)) {
@@ -989,121 +1086,6 @@ export default {
       this.tab = 'search';
     },
 
-    /* ---------- 直播设置 + 重定向解析缓存 ---------- */
-    // 解析/校验服务器地址：ensureLiveAddr 先探缓存地址（2s），失效则重走入口地址解析并回写缓存。
-    // withUi=true 时把结果写进「测连」文案（用户手动触发）；启动时传 false（后台静默）。
-    async checkLiveAddr(withUi) {
-      if (!this.live.addr && !this.live.resolvedAddr) {
-        this.liveNote = '未填写服务器地址 → 直播无法播放';
-        this.liveTestText = withUi ? '未填写地址' : this.liveTestText;
-        return { ok: false, message: '未配置服务器地址' };
-      }
-      // 外网入口 live.example.com 是 CF 301 → tunnel.example.net:<动态端口>；
-      // jsapi.http 不跟随 301（/health 只拿到 301 的 HTML → 解析降级回入口域名 → 播放时
-      // ffmpeg 跟 301 又丢 query → 400）。必须走 native libcurl（CURLOPT_FOLLOWLOCATION=1）
-      // 才能拿到终点 host 回写 resolvedAddr。
-      const r = await ensureLiveAddr((u, o) => httpGetTextNative(u, o), this.live, {});
-      if (!r.ok) {
-        this.liveActiveAddr = '';
-        this.liveNote = '地址不可用：' + (r.message || '解析失败');
-        if (withUi) this.liveTestText = '连接失败';
-        return r;
-      }
-      this.liveActiveAddr = r.addr;
-      // 只在「解析出真实终点」时回写缓存；degraded（解析失败、用入口域名兜底）不回写——
-      // 否则会把入口域名（如 live.example.com）当成有效缓存，下次探缓存"命中"入口域名，
-      // 播放时 ffmpeg 跟 301 又丢 query → 400（2026-10-07 外网真机踩到）。
-      if (r.changed && !r.degraded) {
-        // 解析结果变了（外网端口重新打洞）→ 回写缓存
-        this.live = normalizeLive(
-          Object.assign({}, this.live, { resolvedAddr: r.addr, resolvedAt: Date.now() })
-        );
-        saveLive(this.live);
-      }
-      const h = r.health || {};
-      const load = h.load || {};
-      const srcText = r.source === 'cache' ? '缓存命中' : r.source === 'resolved' ? '重新解析' : '入口兜底';
-      this.liveNote =
-        r.addr + '（' + srcText + '）' +
-        (h.version ? ' · 服务端 v' + h.version : '') +
-        (load.sessions != null ? ' · 会话 ' + load.sessions : '') +
-        (load.high ? ' · 负载高' : '');
-      if (withUi) this.liveTestText = r.degraded ? '可用（兜底）' : '连接正常';
-      logWarn('[live] addr=' + r.addr + ' source=' + r.source + ' changed=' + r.changed);
-      return r;
-    },
-    // 服务器地址（系统输入法输入；改地址即作废旧解析缓存）
-    async onLiveAddrEdit() {
-      const myGen = this.gen;
-      this.imBusy = true;
-      try {
-        const r = await input.open({ value: this.live.addr, placeholder: '如 http://192.168.1.100:2050', maxlength: 80 });
-        if (this.gen !== myGen) return;
-        if (r && r.error) {
-          this.liveTestText = '输入法不可用';
-          return;
-        }
-        if (!(r && r.confirmed)) return;
-        const addr = normalizeLiveAddr((r.text || '').trim());
-        this.live = normalizeLive(
-          Object.assign({}, this.live, { addr: addr, resolvedAddr: '', resolvedAt: 0 })
-        );
-        saveLive(this.live);
-        this.liveActiveAddr = '';
-        this.liveTestText = '';
-        this.liveNote = addr ? '已保存：' + addr : '已清空服务器地址';
-        logWarn('[live] addr saved len=' + addr.length);
-        if (addr) this.checkLiveAddr(true).catch(() => {});
-      } finally {
-        this.imBusy = false;
-      }
-    },
-    onLiveBufferCycle() {
-      const list = [2000, 3000, 4000, 6000, 8000, 12000];
-      const i = list.indexOf(this.live.bufMs);
-      const next = list[(i + 1) % list.length];
-      this.live = normalizeLive(Object.assign({}, this.live, { bufMs: next }));
-      saveLive(this.live);
-      this.liveNote =
-        '服务端保留 ' + Math.round(next / 1000) + 's 分片：只影响笔端落后时还能取到多旧的分片（抗抖动余量）；' +
-        '不影响起播时间（起播只由「服务端出首个分片 + 笔端探流」决定）。';
-      logWarn('[bili] live window -> ' + next + 'ms');
-    },
-    // 画质档循环：匹配屏幕(254) → 标清(360) → 高清(480) → 循环
-    // 顺序即推荐度：254 是唯一"清晰 + 流畅"档（服务端输出 == 视口 452x254，笔端缩放被跳过）；
-    // 360/480 输出会被笔端再缩回 452x254，白烧 CPU，真机实测 1.03x / 0.83x → 必卡，仅留调试。
-    onLiveQualityCycle() {
-      const seq = [
-        { res: 254, trans: 1 },
-        { res: 360, trans: 1 },
-        { res: 480, trans: 1 }
-      ];
-      let i = 0;
-      for (let k = 0; k < seq.length; k++) {
-        if (seq[k].res === this.live.res && seq[k].trans === this.live.trans) {
-          i = k;
-          break;
-        }
-      }
-      const n = seq[(i + 1) % seq.length];
-      this.live = normalizeLive(Object.assign({}, this.live, n));
-      saveLive(this.live);
-      this.liveNote =
-        n.res === 254
-          ? '匹配屏幕 452×254：服务端输出尺寸 == 视口，笔端零缩放 → 清晰且流畅（推荐）'
-          : n.res + 'p：会被笔端缩回 452×254，白烧解码预算（实测 360→1.03x / 480→0.83x，会卡）';
-    },
-    async onLiveProbe() {
-      this.liveTestText = '测试中…';
-      await this.checkLiveAddr(true);
-    },
-    onLiveCacheClear() {
-      this.live = normalizeLive(Object.assign({}, this.live, { resolvedAddr: '', resolvedAt: 0 }));
-      saveLive(this.live);
-      this.liveActiveAddr = '';
-      this.liveNote = '已清空解析缓存；下次播放或测连会重新解析';
-    },
-
     /* ---------- 播放 ---------- */
     async onPlayItem(item) {
       if (!item) return;
@@ -1120,6 +1102,12 @@ export default {
       this.commentsOpen = false;
       this.replyCtx = { oid: 0, type: 1 };
       this.replyOpen = { root: 0, items: [], shown: 0, page: 1, noMore: false, loading: false };
+      // 换片即重置右栏与互动态（避免上一条的点赞数/收藏夹残留）
+      this.favOverlay = false;
+      this.act = { like: 0, coin: 0, fav: false, status: '', busy: false, likeCount: 0, coinCount: 0, favCount: 0 };
+      this.favFolders = [];
+      this.favStatus = '';
+      this.seekDragMs = null;
       this.play = {
         state: 'loading',
         session: {
@@ -1173,6 +1161,7 @@ export default {
       saveHistory({ version: 1, items: this.history });
       this.replyCtx = { oid: r.session.aid || 0, type: 1 };
       this.loadReplies(r.session.aid || 0, 1); // 评论首屏（不阻塞播放；无 aid 内部直接返回）
+      this.refreshAct();  // 点赞/投币/收藏当前态 + 计数徽标
       this.startPoll(myGen);
       logWarn('[bili] play start ' + r.session.bvid + ' qn=' + r.session.qn + ' dur=' + r.session.durationMs + 'ms');
     },
@@ -1385,30 +1374,292 @@ export default {
       this.play.note = '';
       logWarn('[bili] seek ' + (deltaSec > 0 ? '+' : '') + deltaSec + 's → pos=' + r.positionMs + 'ms');
     },
-    /* 评论面板显示权交接：打开=暂停 fb 输出（解码/音频照常）→ UI 独占无闪；关闭恢复。
-       图文模式无播放会话，不碰 player。 */
+    /* 播放态右栏只有评论区；点收藏按钮时用收藏夹覆盖层顶掉它（m07040-5）。
+       覆盖层不遮挡视频（视频在 KMS 平面），切换时不暂停 render。 */
     openComments() {
-      if (!(this.replyCtx && this.replyCtx.oid > 0)) {
-        this.statusText = '评论加载中，请稍候';
+      if (this.mode === 'play') {
+        this.favOverlay = false;
+        this.ensureReply();
         return;
       }
+      if (this.commentsOpen) return;
+      const ctx = this.replyCtx || { oid: 0, type: 1 };
+      const ready = ctx.oid > 0;
+      // 面板先开、再补数据：以前这里是「无 oid 直接 return」，而 oid 只在 openVideo **成功**路径
+      // 才会被写入 → 播放器起不来（如 X6 Pro 的 PLAYER_NATIVE_MISSING）时评论区成了死路，
+      // 表现是点按钮毫无反应。现在改为：面板打开 + 若无 oid 用 bvid 补一次 view 拿 aid。
       this.commentsOpen = true;
-      if (this.mode === 'play') {
-        player.pauseRender().catch(function (e) {
-          logWarn('[bili] pauseRender: ' + (e && e.message));
-        });
-        logWarn('[bili] comments open → render paused');
+      if (ready) return;
+      this.resolveReplyCtx();
+    },
+    // 评论 oid 兜底解析：feed 层不带 aid，正常靠 openVideo 成功时回传的 session.aid；
+    // 播放失败 / 直播 / 图文异常时这里按 bvid 现取一次（x/web-interface/view 已在播放链用过，有缓存）。
+    async resolveReplyCtx() {
+      const bvid = (this.play.session && this.play.session.bvid) || '';
+      if (!/^BV[0-9A-Za-z]{10}$/.test(bvid)) {
+        this.replyLoading = false;
+        this.replyStatus = '评论暂不可用（拿不到稿件号）';
+        return;
       }
+      const myGen = this.gen;
+      this.replyLoading = true;
+      this.replyStatus = '评论加载中…';
+      let v = { ok: false };
+      try {
+        v = await this.client.fetchView(bvid);
+      } catch (e) {
+        logWarn('[bili] replyCtx view fail: ' + (e && e.message));
+      }
+      if (this.gen !== myGen) return;
+      const aid = (v && v.ok && v.aid) || 0;
+      if (!(aid > 0)) {
+        this.replyLoading = false;
+        this.replyStatus = '评论加载失败（拿不到稿件号）';
+        return;
+      }
+      this.replyCtx = { oid: aid, type: 1 };
+      logWarn('[bili] replyCtx resolved aid=' + aid + ' bvid=' + bvid);
+      await this.loadReplies(aid, 1); // loadReplies 内部会自己置 loading 状态
     },
     closeComments() {
       if (!this.commentsOpen) return;
       this.commentsOpen = false;
-      if (this.mode === 'play') {
-        player.resumeRender().catch(function (e) {
-          logWarn('[bili] resumeRender: ' + (e && e.message));
-        });
-        logWarn('[bili] comments close → render resumed');
+    },
+
+    /* ---------- 左图标栏 ---------- */
+    // 返回：播放态走 onBack（停会话回列表），图文态走 onBackArticle（回搜索结果）
+    onIbarBack() {
+      if (this.mode === 'article') this.onBackArticle();
+      else this.onBack();
+    },
+    // 图文态图标栏的评论开关
+    toggleArticleComments() {
+      if (this.commentsOpen) this.closeComments();
+      else this.openComments();
+    },
+
+    /* ---------- 播放页右栏：评论区 + 收藏夹覆盖层 ---------- */
+    // 打开收藏夹覆盖层（点左栏收藏按钮）
+    openFavOverlay() {
+      this.favOverlay = true;
+      this.loadFavFolders();
+    },
+    // 退出收藏夹覆盖层 → 回到评论区
+    closeFavOverlay() {
+      this.favOverlay = false;
+      this.ensureReply();
+    },
+    // 当前稿件 aid：优先播放会话回传的，其次评论上下文（起播失败时靠 bvid 补解析过）
+    playAid() {
+      const s = this.play.session || {};
+      const a = Math.floor(Number(s.aid) || 0);
+      if (a > 0) return a;
+      return Math.floor(Number(this.replyCtx && this.replyCtx.oid) || 0);
+    },
+    // 评论区就位：已有 oid 直接拉，没有就走 bvid → view 兜底解析
+    async ensureReply() {
+      const ctx = this.replyCtx || { oid: 0, type: 1 };
+      if (ctx.oid > 0) {
+        if (!this.replies.length && !this.replyLoading) await this.loadReplies(ctx.oid, ctx.type);
+        return;
       }
+      await this.resolveReplyCtx();
+    },
+    // csrf（bili_jct）：点赞/投币/收藏都要带
+    async csrfToken() {
+      try {
+        const sess = await loadSession();
+        return (sess && sess.login && sess.login.bili_jct) || '';
+      } catch (e) {
+        return '';
+      }
+    },
+    // 互动状态回读（点赞/投币/收藏夹选中态）
+    async refreshAct() {
+      const aid = this.playAid();
+      if (!(aid > 0)) return;
+      const r = await fetchViewState(this.client, aid);
+      if (!r.ok) return;
+      this.act.like = r.like;
+      this.act.coin = r.coin;
+      this.act.fav = !!r.favorite;
+      // 左栏计数徽标（全站总数，不是本人状态）
+      this.act.likeCount = r.likeCount || 0;
+      this.act.coinCount = r.coinCount || 0;
+      this.act.favCount = r.favCount || 0;
+    },
+    async onToggleLike() {
+      if (this.act.busy) return;
+      const aid = this.playAid();
+      if (!(aid > 0)) {
+        this.act.status = '拿不到稿件号';
+        return;
+      }
+      const csrf = await this.csrfToken();
+      if (!csrf) {
+        this.act.status = '需要登录后才能点赞';
+        return;
+      }
+      const on = !(this.act.like > 0);
+      this.act.busy = true;
+      const r = await setLike(this.client, aid, on, csrf);
+      this.act.busy = false;
+      if (!r.ok) {
+        this.act.status = '点赞失败：' + r.message;
+        logWarn('[bili] like fail stage=' + r.stage + ' code=' + r.code);
+        return;
+      }
+      this.act.like = on ? 1 : 0;
+      this.act.likeCount = Math.max(0, (this.act.likeCount || 0) + (on ? 1 : -1));
+      this.act.status = on ? '已点赞' : '已取消赞';
+      logWarn('[bili] like → ' + this.act.like);
+    },
+    async onAddCoin() {
+      if (this.act.busy) return;
+      const aid = this.playAid();
+      if (!(aid > 0)) {
+        this.act.status = '拿不到稿件号';
+        return;
+      }
+      if (this.act.coin >= 2) {
+        this.act.status = '已投满 2 枚';
+        return;
+      }
+      const csrf = await this.csrfToken();
+      if (!csrf) {
+        this.act.status = '需要登录后才能投币';
+        return;
+      }
+      this.act.busy = true;
+      const r = await addCoin(this.client, aid, 1, false, csrf);
+      this.act.busy = false;
+      if (!r.ok) {
+        this.act.status = '投币失败：' + r.message;
+        logWarn('[bili] coin fail stage=' + r.stage + ' code=' + r.code);
+        return;
+      }
+      this.act.coin = Math.min(2, this.act.coin + 1);
+      this.act.coinCount = (this.act.coinCount || 0) + 1;
+      this.act.status = '已投 ' + this.act.coin + ' 枚';
+      logWarn('[bili] coin → ' + this.act.coin);
+    },
+    async loadFavFolders() {
+      const aid = this.playAid();
+      if (!(aid > 0)) {
+        this.favStatus = '拿不到稿件号';
+        return;
+      }
+      const mid = (this.profile && this.profile.mid) || 0;
+      if (!(mid > 0)) {
+        this.favStatus = '需要登录后才能收藏';
+        return;
+      }
+      this.favStatus = '加载中…';
+      const myGen = this.gen;
+      // 收藏夹列表的 fav_state 是「该夹是否含此稿件」——list-all 不带 rid 时恒为 0，
+      // 所以选中态判断不了具体夹，这里按整稿收藏态（act.fav）兜底标注。
+      const r = await fetchFavFolders(this.client, mid);
+      if (this.gen !== myGen) return;
+      if (!r.ok) {
+        this.favStatus = '收藏夹加载失败：' + r.message;
+        return;
+      }
+      this.favFolders = r.items;
+      if (r.needLogin) this.favStatus = '需要登录后才能收藏';
+      else if (!r.items.length) this.favStatus = '还没有收藏夹 · 请先在手机端创建';
+      else this.favStatus = this.act.fav ? '已收藏 · 点一行可移出' : '点一行加入该收藏夹';
+    },
+    async onFavPick(f) {
+      if (!f || this.act.busy) return;
+      const aid = this.playAid();
+      if (!(aid > 0)) return;
+      const csrf = await this.csrfToken();
+      if (!csrf) {
+        this.favStatus = '需要登录后才能收藏';
+        return;
+      }
+      this.act.busy = true;
+      const r = await dealFav(this.client, aid, f.has ? [] : [f.id], f.has ? [f.id] : [], csrf);
+      this.act.busy = false;
+      if (!r.ok) {
+        this.favStatus = '操作失败：' + r.message;
+        logWarn('[bili] fav deal fail stage=' + r.stage + ' code=' + r.code);
+        return;
+      }
+      // 用户要求 m09254：点击后该收藏夹行**变粉**（favrow-on）+ **数量 +1**，作为添加成功的反馈。
+      // f.has 决定 class（模板已绑 favrow/favrow-on），f.count 是行尾数字，两者都要动。
+      // 用 $set 确保 Vue 2 能侦测到变化。
+      const on = !f.has;
+      this.$set(f, 'has', on);
+      this.$set(f, 'count', Math.max(0, (Number(f.count) || 0) + (on ? 1 : -1)));
+      this.act.fav = this.favFolders.some((x) => x.has);
+      this.act.favCount = Math.max(0, (this.act.favCount || 0) + (on ? 1 : -1));
+      this.favStatus = (on ? '已加入「' : '已移出「') + f.title + '」';
+      logWarn('[bili] fav ' + (on ? 'add' : 'del') + ' id=' + f.id + ' n=' + f.count);
+    },
+
+    /* ---------- 可拖动进度条 ---------- */
+    // falcon 运行时只有 changedTouches[0].pageX / pageY（offsetX/clientX/touches 全为 0），
+    // 没有 panstart/panmove，所以自己按逻辑坐标算比例。
+    // 轨道几何固定：.seek 逻辑 x=80 起（图标栏 64 + 间隙 16）、左右 padding 8 → 轨道左端 88、宽 416。
+    // 轨道几何：pageX 是「相对被触摸元素」的坐标，不是整页坐标——实测在 .seek
+    // 内点逻辑 x=100 得到 pageX=37（偏移恒为 -63，即 -(.seek 逻辑 x)），点 420 得 357。
+    // 所以减的是 .seek 的 8px 左 padding，不是 88（图标栏 64 + 间隙 16 + 8）。
+    seekRatioAt(x) {
+      if (!isFinite(x)) return null;
+      return Math.max(0, Math.min(1, (x - 8) / 416));
+    },
+    onSeekTouch(e) {
+      const t = (e && e.changedTouches && e.changedTouches[0]) || null;
+      if (!t) return;
+      const s = this.play.session;
+      const dur = s ? s.durationMs || 0 : 0;
+      if (!(dur > 0)) return;
+      const ratio = this.seekRatioAt(Number(t.pageX));
+      if (ratio == null) return;
+      this.seekDragMs = Math.round(dur * ratio);
+    },
+    // touchend 必须再取一次触点：falcon 的 touchmove 在快速滑动时会被丢弃，
+    // 实测从 x=100 拖到 x=420（应 80.6%）只收到第 16 步（66%），落点会偏。
+    async onSeekRelease(e) {
+      const t = (e && e.changedTouches && e.changedTouches[0]) || null;
+      const s = this.play.session;
+      const dur = s ? s.durationMs || 0 : 0;
+      if (t && dur > 0) {
+        const ratio = this.seekRatioAt(Number(t.pageX));
+        if (ratio != null) this.seekDragMs = Math.round(dur * ratio);
+      }
+      const target = this.seekDragMs;
+      this.seekDragMs = null;
+      if (target == null) return;
+      await this.seekTo(target);
+    },
+    // 绝对定位（拖动结束/点击轨道时用）：复用 seekBy 的相对位移
+    async seekTo(targetMs) {
+      const s = this.play.session;
+      const st = this.play.state;
+      if (!s || !(s.durationMs > 0)) {
+        this.play.note = '时长未知，无法定位';
+        return;
+      }
+      if (st !== 'playing' && st !== 'paused') {
+        this.play.note = '尚未起播';
+        return;
+      }
+      const dur = s.durationMs;
+      const goal = Math.max(0, Math.min(dur - 1000, Math.floor(Number(targetMs) || 0)));
+      const myGen = this.gen;
+      this.play.note = '定位中…';
+      const r = await seekBy(this.makeCtx(myGen), this.play.positionMs, dur, goal - this.play.positionMs);
+      if (this.gen !== myGen) return;
+      if (!r.ok) {
+        this.play.note = r.message;
+        logWarn('[bili] seekTo fail: ' + r.message);
+        return;
+      }
+      this.play.positionMs = r.positionMs;
+      this.play.note = '';
+      logWarn('[bili] seekTo ' + goal + 'ms → pos=' + r.positionMs + 'ms');
     },
 
     /* ---------- 评论（覆盖面板 scroller 滑动 + 行内子楼） ---------- */
@@ -1600,7 +1851,8 @@ export default {
       }
       const enc = encodeQr(g.url, {});
       if (!enc.ok || enc.size > 49) {
-        // cell=4px 时 49x49(+quiet)=228px 正好放满 254 高；更大版本需另调 cell
+        // cell=4px 时 49x49(+quiet 4×2)=57 格 = 228px，正好等于 qr-box 的边长（X6 Pro 画布 266 高）
+        // 更大版本需另调 cell
         this.qr.state = 'error';
         this.qr.message = '二维码超尺寸 size=' + (enc.size || 0);
         logWarn('[bili] qr encode bad size=' + (enc.size || 0) + ' reason=' + (enc.reason || ''));
@@ -1762,7 +2014,7 @@ export default {
         logWarn('[bili] onHide during IM session → skip teardown');
         return;
       }
-      this.teardown('已停止（切后台）');
+      this.teardown('');
     },
     onUnload() {
       this.teardown('');
@@ -1799,18 +2051,14 @@ export default {
       logWarn('[bili] WBI stress done n=' + n + ' jsapi=' + okJsapi + ' native=' + okNative + ' fail=' + bad);
     },
     // 直播专项自检（种子 bili_autotest = {enabled:true, liveOnly:true, liveRoom:<id 可选>}）：
-    // 只跑直播链路 —— 解析服务器地址 → 直播栏搜索 → 播放 → 首帧断言 → 返回。
-    // 真机证据链：服务端 server.log 会出现 /live 请求与分片拉取（证明笔端 ffmpeg 在消费 HLS）。
+    // 只跑直播链路 —— 直播栏搜索 → 取 FLV 直链 → 播放 → 首帧断言 → 返回。
+    // 真机证据链：设备日志出现 `live playinfo streams=2` 与 `stream LIVE`（证明直连取流成功）。
     async runLiveAutotest(room, holdMs) {
       const ensure = (cond, msg) => {
         if (!cond) throw new Error(msg);
       };
       try {
         logWarn('[bili] LIVE AUTOTEST start' + (room ? ' room=' + room : ' (搜首个直播间)'));
-        await this.checkLiveAddr(true);
-        const addr = this.liveActiveAddr || this.live.resolvedAddr || this.live.addr;
-        ensure(!!addr, '直播服务器地址未配置');
-        logWarn('[bili] LIVE addr=' + addr);
         this.keyword = '游戏';
         this.searchType = 'live';
         await this.selectTab('search');
@@ -1852,14 +2100,20 @@ export default {
         await this.onTogglePlay();
         ensure(this.play.state === 'playing', '继续失败: ' + this.play.note);
 
-        // 评论面板开关回归 + 截图取证窗口（停留 7s，便于外部 captureFB 取图）
-        this.openComments();
-        await this.sleep(7000);
-        ensure(this.commentsOpen === true, '评论面板未打开');
-        ensure(this.replies.length > 0 || this.replyLoading, '评论面板打开后无评论数据');
-        this.closeComments();
+        // 右栏回归 + 截图取证窗口（每态停留 3s，便于外部 capture 取图）
+        // v3.0.0：播放态右栏只剩「评论区」，收藏夹改为覆盖层（favOverlay）。
+        this.closeFavOverlay();
+        await this.sleep(3000);
+        ensure(!this.favOverlay, '收藏夹覆盖层未关闭');
+        ensure(this.replies.length > 0 || this.replyLoading || !!this.replyStatus, '评论区无数据也无提示');
+        logWarn('[bili] AUTOTEST side comments n=' + this.replies.length);
+        this.openFavOverlay();
+        await this.sleep(3000);
+        ensure(this.favOverlay, '收藏夹覆盖层未打开');
+        ensure(this.favFolders.length > 0 || !!this.favStatus, '收藏夹覆盖层无数据也无提示');
+        logWarn('[bili] AUTOTEST fav overlay n=' + this.favFolders.length + ' st=' + this.favStatus);
+        this.closeFavOverlay();
         await this.sleep(500);
-        ensure(this.commentsOpen === false, '评论面板未关闭');
 
         /* 位置断言用"相对量"而非绝对值：onSeek 内部要等帧恢复（seek=重启解码+探流，弱网/重稿件
          * 下实测可达 15s+），这期间画面仍在前进 → 绝对位置天然会偏大（旧断言 <6000ms 会把
@@ -1904,6 +2158,28 @@ export default {
         await this.selectTab('search');
         ensure(this.searchItems.length > 0, '搜索结果为空: ' + this.statusText);
         logWarn('[bili] AUTOTEST search n=' + this.searchItems.length);
+
+        // 图文详情：切到「图文」分栏 → 打开首条 → 断言正文块渲染 → 返回搜索结果。
+        // 这条路径没有别的程序化入口（输入框需人工），只能靠自检覆盖。
+        this.setSearchType('article');
+        const artDeadline = Date.now() + 15000;
+        while (!this.searchResults.article.length && Date.now() < artDeadline) await this.sleep(300);
+        ensure(this.searchResults.article.length > 0, '图文搜索结果为空: ' + this.statusText);
+        const artItem = this.searchResults.article[0];
+        await this.openArticle(artItem);
+        ensure(this.mode === 'article', '图文详情未打开');
+        const artBody = Date.now() + 20000;
+        while (!(this.article.blocks && this.article.blocks.length) && this.article.state !== 'error' && Date.now() < artBody) {
+          await this.sleep(300);
+        }
+        ensure(this.article.blocks && this.article.blocks.length > 0, '图文正文为空: ' + this.article.note);
+        logWarn('[bili] AUTOTEST article aid=' + this.article.aid + ' blocks=' + this.article.blocks.length);
+        // 图文页取证窗口：外部 capture 取图用（3s 足够一次 adb pull）
+        await this.sleep(3000);
+        this.onBackArticle();
+        ensure(this.mode === 'browse' && this.tab === 'search', '图文返回失败');
+        this.setSearchType('video');
+        await this.sleep(300);
 
         await this.selectTab('mine');
         ensure(this.history.length >= 1, '播放历史未记录');

@@ -9,11 +9,11 @@
  *   - 音频走 /usr/bin/aplay（ALSA）
  *   - 单核 Cortex-A53：360p 软解 + 缩放约 1.1~1.9x 实时，720p 不可用
  *
- * 管线：
- *   ffmpeg -ss <start> -i <input> -map 0:v:0 -vf scale=..,transpose=.. -r <fps>
- *          -pix_fmt rgb32 -f rawvideo pipe:3
+ * 管线（v3.0.0 起：ffmpeg 只 demux + copy，解码交给 GStreamer/MPP）：
+ *   ffmpeg -ss <start> -i <input> -map 0:v:0 -c:v copy -bsf:v h264_mp4toannexb -f h264 pipe:3
  *          -map 0:a:0? -ac 2 -ar 44100 -f s16le pipe:4
- *   → 视频线程按帧读入并贴到 /dev/fb0 的物理矩形（当前 pan 缓冲）
+ *   → 视频线程按 Annex-B 起始码切出 access unit，按音频钟节拍逐个写进 FIFO
+ *   → gst-launch filesrc(fifo) ! h264parse ! mppvideodec ! kmssink(plane-id=76)
  *   → 音频线程把 pipe:4 的数据写进 aplay stdin（阻塞写＝用音频时钟给整条管线限速）
  *
  * 无音轨时 ffmpeg 会因 "Output file #1 does not contain any stream" 失败，
@@ -79,6 +79,30 @@
  *   两处收口：① 队列按流精确到 ~15s（原 1500 包 ≈62s，重启时白重下 ~2.7MB 把链路打满 → 首帧
  *   从 2s 拖到 6s → 正反馈）；② 冷却 6s → 15s。配合 v2.1.3 的"残余漂移反馈"（lead 收敛到实测
  *   重启耗时），落点误差 = Δ 的抖动（稳定网络下 →0）→ 重同步由"每 6s 一次"变为"收敛后不再触发"。
+ *
+ * v3.0.0 硬解重写（2026-10-29，X6 Pro / RK3562，用户诉求："别再软解了，用 MPP 硬解"）：
+ *   动机：RK3562 有 MPP 视频解码单元，实测 `mppvideodec` 解 40s 720p 只要 1.21s（**33x 实时**），
+ *   而软解在 640x360 上只有 1.1~1.9x —— 整条链路的余量、功耗、掉帧全部来自软解这一环。
+ *   为什么不能走 ffmpeg 硬解：ffmpeg 4.4 只有 h264_v4l2m2m/hevc_v4l2m2m，而 RK3562 的 MPP
+ *   **不走 V4L2 mem2mem**（/dev/video0..17 全是 rkcif/rkisp 摄像头驱动，`-c:v h264_v4l2m2m`
+ *   报 `Could not find a valid device`）⇒ 硬解只能交给 GStreamer。
+ *   做法（关键：**音画同步逻辑一行不改**，只把"像素搬运"换成"压缩包转发"）：
+ *     ffmpeg -ss S -i <input> -map 0:v:0 -c:v copy -bsf:v h264_mp4toannexb -f h264 pipe:3
+ *       → 本模块按 Annex-B 起始码切 AU → 按原节拍（音频锚/墙钟/漂移/重同步）逐 AU 写入 FIFO
+ *       → gst-launch filesrc ! h264parse ! mppvideodec rotation=R ! kmssink(plane 76)
+ *   为什么"只转发压缩包"反而更准：解码不再占用本进程 CPU，节拍逻辑（v1.8.0~v2.9.4 一路调出来的
+ *   音频锚/平滑快进/强制重同步）原样保留，`s->frames` 语义不变（= 已送显 AU 数）→ status 字段全保。
+ *   三个必须处理的新问题（都在下面代码里落了注释）：
+ *     ① **帧率**：copy 模式没有 `-r` 重采样，流的真实帧率 ≠ JS 传的 24（B 站 DASH 多为 30）→
+ *        必须从 ffmpeg stderr 的 `Input #0 ... 30 fps` 解析出来覆盖 s->fps，否则节拍慢 25%、
+ *        漂移一路涨到强制重同步。stderr 因此改走 pipe（同时解决 `-debug_ts` 洪水）。
+ *     ② **seek 落点**：`-ss` + copy 只能落在**前一个关键帧**（实测 -ss 10.5 → 首包 pts 10.0），
+ *        不像软解能解码丢帧到精确点。不修正的话 seek 后画面恒定落后声音 0~1 个 GOP。
+ *        用 `-debug_ts` 的第一条 `demuxer+ffmpeg ... pkt_pts_time:X` 拿到相对落点 X（<0），
+ *        把 video_base_ms 改成 S+X（= 关键帧真实内容时间）→ 前置 GOP 走①平滑快进瞬间吃掉，
+ *        之后与音频严格对齐。
+ *     ③ **背压**：FIFO 写是阻塞的，gst 消费慢时压住 video_thread 再压住 ffmpeg —— 这正是想要的
+ *        蓄水；但停播时不能永久阻塞，故 FIFO 写端 O_NONBLOCK + poll 带 stop_flag 检查。
  */
 
 #define _GNU_SOURCE 1 /* F_GETPIPE_SZ 等 GNU 扩展（zig cc/glibc 默认不定义） */
@@ -104,6 +128,7 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#include <dirent.h>      /* v2.2.8：回收残留 gst-launch（孤儿进程占着 overlay 平面） */
 
 #ifndef F_SETPIPE_SZ
 #define F_SETPIPE_SZ 1031 /* linux fcntl.h；老 sysroot 兜底 */
@@ -111,7 +136,7 @@
 
 static void raise_audio_thread_prio(void); /* 定义在 RING 水位区（feeder 调用点更早） */
 
-#define PLAYER_VERSION "2.2.7"
+#define PLAYER_VERSION "2.3.2"
 
 /* ---- v2.2.0 网络预取（用户诉求："像 B 站 App 那样：起播缓冲 ~0.5s，播放中用多余带宽尽量多缓冲，
  *      缓冲池保持 ~15s 音视频；不足 15s 就缓冲到片尾"）----
@@ -146,8 +171,30 @@ static void raise_audio_thread_prio(void); /* 定义在 RING 水位区（feeder 
 #define FB_STRIDE_PATH "/sys/class/graphics/fb0/stride"
 #define FB_BPP_PATH "/sys/class/graphics/fb0/bits_per_pixel"
 #define FB_VSIZE_PATH "/sys/class/graphics/fb0/virtual_size"
+
+/* ---- X6 Pro (RK3562) KMS overlay 后端 ----
+ * 该机型**完全没有 /dev/fb0**：Falcon/UI 由 weston 用 DRM plane 54 (Esmart0-win0) 合成，
+ * 视频必须交给另一个 overlay plane。真机实测（2026-10-29）：
+ *   - 空闲 plane 76 (Esmart1-win0) / 90 / 104 可供 kmssink 使用，zpos 高于 UI → 硬件叠加；
+ *   - 裸 DRM SETPLANE 自建 dumb buffer 一律 ENOSPC（Rockchip 需带 FB 才占得住），
+ *     **只有 kmssink 能真正占用该平面** ⇒ 帧必须交给 gst-launch；
+ *   - 帧链：ffmpeg --rawvideo pipe:3--> 本模块 --FIFO--> gst-launch filesrc blocksize=fsz
+ *     ! video/x-raw,format=BGRA ! videoconvert ! kmssink。用 FIFO+filesrc 而非 fdsrc
+ *     （本机 fdsrc 短读即 streaming error），也不链 libgstreamer（保持模块零外部依赖）；
+ *   - render-rectangle 是**面板绝对坐标 480x960**：Falcon 合成面实测占面板列 107..372，
+ *     故面板 x = 107 + 物理矩形 x；面内 y/宽/高与物理矩形一致（1:1，无缩放）；
+ *   - 必须显式 force-aspect-ratio=false，否则 kmssink 会在矩形内做信箱缩放；
+ *   - 注意：miniapp_cli capture 只截 Falcon 画布，**看不见 overlay 平面**；
+ *     真像素取证用 `gst-launch kmssrc plane-id=76 num-buffers=1 ! videoconvert ! pngenc`。
+ */
+#define PANEL_X_OFFSET 107
+#define KMS_PLANE_ID 76
+#define KMS_ID_STR "76"
+#define GST_LAUNCH_PATH "/usr/bin/gst-launch-1.0"
+#define KMS_FIFO_PATH "/tmp/vp_vid.fifo"
 #define FFMPEG_PATH "/usr/bin/ffmpeg"
 #define LOG_PATH "/tmp/vp_player.log"      /* 视频进程 stderr */
+#define GST_LOG_PATH "/tmp/vp_gst.log"     /* v3.0.0：gst-launch 的 stderr（硬解/协商失败取证） */
 #define LOG_AUDIO_PATH "/tmp/vp_audio.log" /* 音频独立进程 stderr（分文件防 O_TRUNC 互毁取证） */
 #define APLAY_PATH "/usr/bin/aplay"
 #define BT_LIST_CMD "/usr/bin/bluealsa-aplay -L 2>/dev/null"
@@ -226,7 +273,7 @@ static int read_pair_file(const char *path, long *a, long *b) {
     return 0;
 }
 
-static int fb_open(void) {
+static int fbdev_open(void) {
     long vsize[2];
     char modes[128];
     if (g_fb.map) return 0;
@@ -260,7 +307,7 @@ static int fb_open(void) {
     return 0;
 }
 
-static void fb_close(void) {
+static void fbdev_close(void) {
     if (g_fb.map) {
         munmap(g_fb.map, g_fb.map_len);
         g_fb.map = NULL;
@@ -277,7 +324,7 @@ static void fb_close(void) {
  * 用户就会看到另一块缓冲里的旧内容 —— 表现为"闪上一帧旧画面"。
  * 两块都写之后，无论 pan 到哪一块，视频都是一样的新帧。
  * 代价是每帧两次 memcpy（254x452x4 ≈ 458KB → 916KB，24fps 约 22MB/s），可忽略。 */
-static int fb_blit(const unsigned char *frame, int x, int y, int w, int h) {
+static int fbdev_blit(const unsigned char *frame, int x, int y, int w, int h) {
     int buf;
     int row;
     if (!g_fb.map || !frame || w <= 0 || h <= 0) return -1;
@@ -295,12 +342,326 @@ static int fb_blit(const unsigned char *frame, int x, int y, int w, int h) {
 }
 
 /* 当前正在显示的缓冲块序号（仅用于 status 上报，不影响写入） */
-static int fb_current_buffer(void) {
+static int fbdev_current_buffer(void) {
     long pan[2] = { 0, 0 };
     int visible = g_fb.visible_h > 0 ? g_fb.visible_h : g_fb.yres_virtual;
     if (read_pair_file(FB_PAN_PATH, &pan[0], &pan[1]) != 0) return 0;
     if (visible <= 0) return 0;
     return (int)(pan[1] / visible);
+}
+
+/* ---------------- KMS overlay 输出（X6 Pro，无 fbdev） ---------------- */
+
+static int wait_child(pid_t pid, int timeout_ms); /* 定义在下方 pipe 工具区 */
+
+struct render_info {
+    int kms;      /* 1 = 该机型无 /dev/fb0，走 KMS overlay */
+    pid_t gst_pid;
+    int fifo_fd;
+    int started;
+    int w, h;     /* 已建链的目标显示矩形（旋转后的"物理方向"，v3.0.0 起 = render-rectangle 尺寸） */
+    int rx, ry;   /* 已建链的物理矩形 */
+    int fps;      /* 保留（诊断用；v3.0.0 起不再进 caps） */
+    int transpose;/* 1=顺时针 90° / 2=逆时针 90°（ffmpeg 语义）→ 映射到 mppvideodec rotation */
+    char path[64];
+};
+
+static struct render_info g_rd = { 0, 0, -1, 0, 0, 0, 0, 0, 30, 1, "" };
+
+/* 非阻塞轮询打开 FIFO 写端：gst 起不来时不要永久阻塞视频线程。
+ * v3.0.0：打开后**保留 O_NONBLOCK** —— 压缩包转发是长写（一路写到播完），必须能在
+ * gst 消费慢时用 poll 等待并随时响应 stop_flag，不能卡在阻塞 write 里出不来。
+ * 需要"写满"语义的地方统一走 fifo_write_all()。 */
+static int fifo_open_write(const char *path, int timeout_ms) {
+    int waited = 0;
+    for (;;) {
+        int fd = open(path, O_WRONLY | O_NONBLOCK);
+        if (fd >= 0) return fd;
+        if (errno != ENXIO && errno != ENOENT) return -1;
+        if (waited >= timeout_ms) return -1;
+        usleep(20000);
+        waited += 20;
+    }
+}
+
+/* 阻塞写满（v3.0.0 起 FIFO 侧改用 fifo_write_all：需要能被 stop_flag 打断）。
+ * 保留给内部小块写用；当前无调用点，加 unused 属性避免 -Wunused-function。 */
+static int write_full(int fd, const unsigned char *buf, size_t n) __attribute__((unused));
+static int write_full(int fd, const unsigned char *buf, size_t n) {
+    size_t put = 0;
+    while (put < n) {
+        ssize_t w = write(fd, buf + put, n - put);
+        if (w > 0) { put += (size_t)w; continue; }
+        if (w < 0 && errno == EINTR) continue;
+        return -1;
+    }
+    return 0;
+}
+
+/* ---- v2.2.8: 回收"上一代"残留的 gst-launch ----
+ * gst-launch 是 setsid 出来的孤儿进程：模块被 JS 重启 / 页面重进 / app 被系统杀掉时，
+ * 父进程死了它还在跑，并且**一直占着 overlay plane 76**。于是新实例的 kmssink
+ * 抢不到平面（plane 保持 ACTIVE 但不再更新，画面冻在最后一帧），真机实测就是这个症状。
+ * 做法：按 cmdline 精确匹配本模块的 pipeline（含 FIFO 路径，不会误杀别的 gst 用户），
+ * 排除自己刚 fork 的子进程 pid，其余一律 SIGKILL。 */
+static void render_reap_orphans(void) {
+    DIR *d = opendir("/proc");
+    struct dirent *de;
+    if (!d) return;
+    while ((de = readdir(d)) != NULL) {
+        char path[64];
+        char cmd[512];
+        int fd;
+        ssize_t n;
+        long pid;
+        if (de->d_name[0] < '0' || de->d_name[0] > '9') continue;
+        pid = strtol(de->d_name, NULL, 10);
+        if (pid <= 0 || (pid_t)pid == g_rd.gst_pid) continue;
+        snprintf(path, sizeof(path), "/proc/%ld/cmdline", pid);
+        fd = open(path, O_RDONLY);
+        if (fd < 0) continue;
+        n = read(fd, cmd, sizeof(cmd) - 1);
+        close(fd);
+        if (n <= 0) continue;
+        cmd[n] = '\0';
+        {
+            size_t k;
+            for (k = 0; k < (size_t)n; k++) {
+                if (cmd[k] == '\0') cmd[k] = ' ';
+            }
+        }
+        if (strstr(cmd, "gst-launch-1.0") && strstr(cmd, KMS_FIFO_PATH)) {
+            kill((pid_t)pid, SIGKILL);
+        }
+    }
+    closedir(d);
+}
+
+static void render_stop(void) {
+    if (g_rd.fifo_fd >= 0) {
+        close(g_rd.fifo_fd);
+        g_rd.fifo_fd = -1;
+    }
+    if (g_rd.gst_pid > 0) {
+        kill(g_rd.gst_pid, SIGTERM);
+        wait_child(g_rd.gst_pid, 800);
+        g_rd.gst_pid = 0;
+    }
+    if (g_rd.path[0]) {
+        unlink(g_rd.path);
+        g_rd.path[0] = '\0';
+    }
+    g_rd.started = 0;
+    g_rd.w = 0;
+    g_rd.h = 0;
+    g_rd.rx = -1;
+    g_rd.ry = -1;
+}
+
+/* g_rd.path 是上下文里唯一的 FIFO 路径，建链前后都要存在。 */
+static void render_make_path(void) {
+    if (!g_rd.path[0]) snprintf(g_rd.path, sizeof(g_rd.path), "%s", KMS_FIFO_PATH);
+}
+
+/* ---- v3.0.0：FIFO 写 = 压缩字节流（非阻塞 + poll，可被 stop_flag 打断）----
+ * 为什么不用原来的 write_full：那时每帧 w*h*4 是定长小写（≤0.5MB）且写满即返回；
+ * 现在一路写到播完，gst 消费慢时 write 会阻塞——停播时不能永久卡在这里（stop_children
+ * 要 join 本线程）。故 FIFO 保持 O_NONBLOCK，用 poll 等可写，每次最多等 100ms 再看 stop_flag。
+ * 返回 0 = 写完；-1 = 写失败（EPIPE/对端关闭 → 调用方重建链）；1 = 被 stop_flag 中止。 */
+static int fifo_write_all(int fd, const unsigned char *buf, size_t n, const volatile int *stop) {
+    size_t put = 0;
+    while (put < n) {
+        ssize_t w = write(fd, buf + put, n - put);
+        if (w > 0) {
+            put += (size_t)w;
+            continue;
+        }
+        if (w < 0 && errno == EINTR) continue;
+        if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            struct pollfd p;
+            int pr;
+            if (stop && *stop) return 1;
+            p.fd = fd;
+            p.events = POLLOUT;
+            p.revents = 0;
+            pr = poll(&p, 1, 100);
+            if (pr < 0 && errno != EINTR) return -1;
+            continue;
+        }
+        return -1; /* EPIPE：gst 侧没了 */
+    }
+    return 0;
+}
+
+/* ---- v3.0.0：建链 = H.264 字节流 → h264parse → mppvideodec（MPP 硬解）→ kmssink ----
+ * 与旧链路（BGRA rawvideo → videoconvert → kmssink）的区别：
+ *   · FIFO 里不再是"整帧像素"，而是**变长 Annex-B 压缩字节流**（blocksize 只是 filesrc 读粒度）；
+ *   · 旋转由解码器做（mppvideodec rotation），不再走 ffmpeg transpose 滤镜；
+ *   · 缩放交给 KMS/RGA（kmssink render-rectangle 的硬件缩放），不再走 ffmpeg scale；
+ *   · 因此**不需要 videoconvert**：mppvideodec 输出 NV12，kmssink 直接吃。
+ *     若某些固件上 NV12 上屏颜色/尺寸不对，设环境变量 PENBILI_GST_CONVERT=1 插一层
+ *     videoconvert 即可（免重编排查用）。
+ * rotation 映射：s->transpose 是 ffmpeg 语义（1=顺时针 90°，2=逆时针 90°，3=180°），
+ *   mppvideodec rotation 是**顺时针角度**（0/90/180/270）。
+ *   2026-10-29 真机复验修正：早前用彩条源抓到 transpose=2 ≡ rotation=270 就定了，
+ *   但那个结论只在"把平面 PNG 抽出来单独转正后比对"的语境里成立，**没算面板自身的
+ *   竖屏朝向**。用户戴机实测（v3.0.0 首版 rotation=270）画面**上下倒置**——上下颠倒
+ *   恰好是 180° 之差，故 270 → 90。
+ *     transpose=1（顺时针 90°）≡ rotation=270
+ *     transpose=2（逆时针 90°）≡ rotation=90
+ *   JS 侧（play_session.js / probe.js）恒传 transpose=2 → rotation=90。
+ *   注意（v3.0.1）：本函数只读 g_rd.transpose，而 g_rd.transpose 曾经**从未被赋值**
+ *   （只有 s->transpose 被写），导致长期恒为 270、映射表改动毫无效果。
+ *   现在 open() 里两处同步赋值，真机 ps 应看到 rotation=90。 */
+static int rotation_for_transpose(int t) {
+    if (t == 2) return 90;
+    if (t == 3) return 180;
+    return 270;
+}
+
+static int render_start(int x, int y, int w, int h) {
+    char rect[80];
+    char location[96];
+    char rotation[24];
+    char blocksize[32];
+    char *argv[40];
+    const char *extra = NULL;
+    pid_t pid;
+    int px = PANEL_X_OFFSET + x;
+    int i = 0;
+    int rot = rotation_for_transpose(g_rd.transpose);
+
+    /* 先把路径定下来，render_stop() 才能 unlink 掉上一代 FIFO。
+     * render_stop() 会把 g_rd.path[0] 置空，所以之后必须重新赋值。 */
+    render_make_path();
+    render_stop();
+    render_reap_orphans(); /* v2.2.8：先清掉上一代孤儿，否则平面抢不到 */
+    render_make_path();
+    unlink(g_rd.path);
+    if (mkfifo(g_rd.path, 0666) != 0) return -1;
+
+    snprintf(location, sizeof(location), "location=%s", g_rd.path);
+    /* blocksize 只是 filesrc 的 read() 粒度：pipe 上的 read 会返回**已有字节**（不凑满），
+     * 所以它不影响帧延迟，只影响 syscall 密度。65536 是长期验证过的取值。
+     * （2026-10-30 曾怀疑「攒满 64KB 才推一批 → 每秒卡顿」，实测推翻，已回退。） */
+    snprintf(blocksize, sizeof(blocksize), "blocksize=%d", 65536);
+    snprintf(rotation, sizeof(rotation), "rotation=%d", rot);
+    snprintf(rect, sizeof(rect), "render-rectangle=<%d,%d,%d,%d>", px, y, w, h);
+    if (getenv("PENBILI_GST_CONVERT")) extra = "videoconvert";
+
+    pid = fork();
+    if (pid < 0) {
+        unlink(g_rd.path);
+        g_rd.path[0] = '\0';
+        return -1;
+    }
+    if (pid == 0) {
+        int logfd;
+        setsid();
+        logfd = open(GST_LOG_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (logfd >= 0) {
+            dup2(logfd, 2);
+            close(logfd);
+        }
+        argv[i++] = (char *)GST_LAUNCH_PATH;
+        argv[i++] = (char *)"-q";
+        argv[i++] = (char *)"filesrc";
+        argv[i++] = location;
+        argv[i++] = blocksize;
+        argv[i++] = (char *)"!";
+        argv[i++] = (char *)"h264parse";
+        argv[i++] = (char *)"!";
+        argv[i++] = (char *)"mppvideodec";
+        argv[i++] = rotation;
+        argv[i++] = (char *)"!";
+        if (extra) {
+            argv[i++] = (char *)extra;
+            argv[i++] = (char *)"!";
+        }
+        argv[i++] = (char *)"kmssink";
+        argv[i++] = (char *)"plane-id=" KMS_ID_STR;
+        argv[i++] = (char *)"driver-name=rockchip";
+        argv[i++] = (char *)"sync=false";
+        argv[i++] = (char *)"force-aspect-ratio=false";
+        argv[i++] = rect;
+        argv[i] = NULL;
+        execv(GST_LAUNCH_PATH, argv);
+        _exit(127);
+    }
+    g_rd.gst_pid = pid;
+    g_rd.fifo_fd = fifo_open_write(g_rd.path, 4000);
+    if (g_rd.fifo_fd < 0) {
+        render_stop();
+        return -1;
+    }
+    g_rd.w = w;
+    g_rd.h = h;
+    g_rd.rx = x;
+    g_rd.ry = y;
+    g_rd.started = 1;
+    return 0;
+}
+
+/* 统一入口：有 fbdev 走 memcpy，没 fbdev 走 KMS overlay */
+static int fb_open(void) {
+    if (g_fb.map) return 0;
+#ifndef PENBILI_KMS_ONLY /* -DPENBILI_KMS_ONLY：X6 Pro 无 /dev/fb0，构建期直接跳过 fbdev 探测 */
+    if (fbdev_open() == 0) return 0;
+#endif
+    /* X6 Pro 分支：没有 /dev/fb0，改为 KMS，首帧时按实际矩形建链 */
+    g_rd.kms = 1;
+    g_rd.rx = -1;
+    g_rd.ry = -1;
+    g_rd.started = 0;
+    return 0;
+}
+
+/* v3.0.0：把一段压缩字节写进 FIFO（建链按需、矩形变了就重建）。
+ * 返回 0 = 已写出；-1 = 失败（调用方按"显示链断开"处理）；1 = stop_flag 中止。
+ * 注意：这里**不再有帧尺寸概念**，w/h 只用于算 render-rectangle。 */
+static int fb_write_stream(const unsigned char *data, size_t n, int x, int y, int w, int h,
+                           const volatile int *stop) {
+    int attempt;
+    if (!g_rd.kms || !data || n == 0 || w <= 0 || h <= 0) return -1;
+    for (attempt = 0; attempt < 2; attempt++) {
+        if (!g_rd.started || g_rd.w != w || g_rd.h != h || g_rd.rx != x || g_rd.ry != y) {
+            if (render_start(x, y, w, h) != 0) return -1;
+        }
+        {
+            int r = fifo_write_all(g_rd.fifo_fd, data, n, stop);
+            if (r == 0) return 0;
+            if (r == 1) return 1;
+        }
+        /* gst 侧断了（EPIPE）：重建一次链再试。重建后 h264parse 需要 SPS/PPS —— 由调用方
+         * 在下一批数据的 AU 开头自带（Annex-B 流的 IDR 前必有 SPS/PPS，源流如此）。 */
+        render_stop();
+    }
+    return -1;
+}
+
+/* v3.0.0：KMS overlay 下"重绘"是空操作 —— 平面自己持着最后一帧（旧链路要靠重贴 RGB
+ * 才能恢复，因为 plane 内容会被别的东西冲掉；现在 gst 自己占着 plane，无需外部重贴）。
+ * fbdev 后端（X5）行为完全不变。 */
+static int fb_blit(const unsigned char *frame, int x, int y, int w, int h) {
+    if (g_fb.map) return fbdev_blit(frame, x, y, w, h);
+    if (g_rd.kms) return 0;
+    return -1;
+}
+
+static void fb_close(void) {
+    render_stop();
+    g_rd.kms = 0;
+    fbdev_close();
+}
+
+static int fb_current_buffer(void) {
+    if (g_rd.kms) return 0;
+    return fbdev_current_buffer();
+}
+
+static int fb_buffers_reported(void) {
+    if (g_rd.kms) return 1;
+    return g_fb.buffers;
 }
 
 /* ---------------- session ---------------- */
@@ -368,6 +729,9 @@ struct session {
     volatile int gate_passed;    /* 门等待已结束（正常开/15s超时放行都置1）→ gateActive=!passed */
     double last_blit_at;        /* 最近一帧产出的墙钟秒（巡检基准 → status.videoStallMs） */
     double gate_wait_ms;        /* 起播门实际等待时长（诊断 → status.gateWaitMs） */
+    /* v3.0.1 画面节拍器：以「固定帧间隔 + PLL 慢速纠偏」代替「硬等音频锚」。
+     * 理由见 video_thread 里的注释（音频锚是 46ms 台阶量，硬等会把台阶传导成画面卡顿）。 */
+    double last_pace_at;        /* 上一次节拍放行时刻（秒，单调钟） */
     long underruns;             /* writer 等水位/空环轮次（≥1 即发生过欠载等待） */
     long wr_errors;             /* aplay 写失败次数（设备崩溃/断流） */
     long ring_drops;            /* 环满被丢弃的字节数（蓝牙消费慢的直接证据） */
@@ -394,6 +758,22 @@ struct session {
     long audio_base_ms;         /* v1.9.3 音频时钟基准（writer_bytes==0 时的内容位置，= 起播 start_ms） */
     long video_base_ms;         /* v1.9.3 视频时钟基准（断流恢复后独立重置，通常=audio_base） */
     int video_retries;          /* v1.9.3 视频流中途断流重启次数（上限 5，防无限循环） */
+
+    /* ---- v3.0.0 硬解：stderr 泵（解析真实帧率 / seek 落点）+ Annex-B AU 累积 ---- */
+    int stderr_fd;              /* ffmpeg stderr 读端（泵线程独占） */
+    pthread_t sth;              /* stderr 泵线程 */
+    int sth_started;
+    int fps_known;              /* 1 = 已从流信息里解析出真实帧率（覆盖 JS 传值） */
+    int seek_pending;           /* 1 = 本次 spawn 带 -ss，等 -debug_ts 报出真实落点 */
+    int seek_land_valid;        /* 1 = seek_land_ms 已解析 */
+    long seek_land_ms;          /* 落点相对 -ss 的偏移（实测 -ss 10.5 → -500ms，即关键帧 10.0s） */
+    int seek_land_applied;      /* 1 = 已修正 video_base_ms（只修正一次） */
+    volatile int pump_quit;     /* stderr 泵线程退出标志（stop_flag 不适用：重启时不能置） */
+    unsigned char *au_buf;      /* Annex-B 累积缓冲（变长压缩字节，按 AU 边界切分后转发） */
+    size_t au_cap;
+    size_t au_len;
+    long au_bytes;              /* 累计转发的压缩字节数（诊断） */
+    int video_eof;              /* 1 = 视频 pipe 已 EOF（自然结束，不再走断流重试） */
 };
 
 static struct session g_s;
@@ -446,6 +826,8 @@ static void capture_log_tail(struct session *s) {
     set_error(s, buf);
 }
 
+/* v3.0.0 硬解链路下 video pipe 里不再是定长像素帧，read_full 已无调用点（保留备查）。 */
+static int read_full(int fd, unsigned char *buf, size_t n) __attribute__((unused));
 static int read_full(int fd, unsigned char *buf, size_t n) {
     size_t got = 0;
     while (got < n) {
@@ -502,6 +884,19 @@ static void close_fd(int *fd) {
 static long g_vpipe_bytes = -1;
 static int g_vpipe_errno = 0;
 
+/* ---- v2.2.8: -reconnect 只能用于网络输入 ----
+ * `-reconnect*` 是 **http/https 协议的私有 AVOption**，不是通用格式选项。喂本地文件
+ * （/tmp/x.mp4、本地转码缓存、file:// 源）时 ffmpeg 4.4 会在协议选项解析阶段直接退出：
+ *     Option reconnect not found.
+ * 症状：open() 返回 ok，但随后一帧都收不到，status 里 error="Option reconnect not found"。
+ * X5 上本地播放同样受影响，故三处 argv（视频带音轨 / 视频无音轨 / 独立音频）都要按协议门控。 */
+static int is_net_input(const char *url) {
+    if (!url || !url[0]) return 0;
+    return strncmp(url, "http://", 7) == 0 || strncmp(url, "https://", 8) == 0 ||
+           strncmp(url, "rtmp://", 7) == 0 || strncmp(url, "rtsp://", 7) == 0 ||
+           strncmp(url, "tcp://", 6) == 0;
+}
+
 static void ensure_pipe_max_raised(void) {
     static int done = 0;
     int fd;
@@ -517,14 +912,127 @@ static void ensure_pipe_max_raised(void) {
     }
 }
 
+/* ---- v3.0.0：ffmpeg stderr 泵 ----
+ * 为什么需要：copy 模式下有两件事**只能从 ffmpeg 日志里拿到**，而且都不能等进程结束：
+ *   ① **真实帧率**：`-c:v copy` 没有 `-r` 重采样，输出帧率 = 源帧率。JS 侧恒传 24
+ *      （src/services/bili/playurl.js 的 HTML5_FPS），但 B 站 DASH/直播多为 30fps →
+ *      节拍按 24 算会慢 25%，漂移一路涨到强制重同步（每 12s 跳一次画面）。
+ *      从 `Stream #0:0: Video: ... 30 fps,` 解析出真值覆盖 s->fps。
+ *   ② **seek 落点**：`-ss` + copy 只能落在**前一个关键帧**（实测 -ss 10.5 → 首包 pts 10.0），
+ *      不像软解能解码丢帧到精确点。`-debug_ts` 会打出 `demuxer+ffmpeg ... pkt_pts_time:-0.5`
+ *      （= 首包相对 -ss 的偏移）→ 用它把 video_base_ms 修正成关键帧的真实内容时间。
+ * 顺带把 stderr 转存到 LOG_PATH（保持 capture_log_tail 的取证能力），并**持续抽干**
+ * 管道——否则 64KB stderr 管道写满会把 ffmpeg 堵死（这是改成管道后必须配套做的事）。 */
+static void ff_stderr_pump_stop(struct session *s);
+static void *ff_stderr_thread(void *arg);
+
+/* 从 "… 30 fps," / "… 24 fps," 里取帧率。只在含 "Video:" 的 Stream 行上找，
+ * 避免命中 "tbr"/"tbn" 那些同样带数字的字段。 */
+static int parse_fps_line(const char *line) {
+    const char *p = line;
+    if (!strstr(line, "Video:")) return 0;
+    while ((p = strstr(p, " fps")) != NULL) {
+        const char *q = p;
+        int v = 0;
+        int nd = 0;
+        while (q > line && q[-1] >= '0' && q[-1] <= '9') {
+            q--;
+            nd++;
+        }
+        if (nd > 0 && nd <= 3) {
+            v = atoi(q);
+            if (v >= 1 && v <= 120) return v;
+        }
+        p += 4;
+    }
+    return 0;
+}
+
+/* 从 "demuxer+ffmpeg ... pkt_pts_time:-0.5" 取首包相对落点（秒，带小数）。
+ * 返回 1 = 解析成功。 */
+static int parse_land_line(const char *line, double *out_sec) {
+    const char *p;
+    if (!strstr(line, "demuxer+ffmpeg")) return 0;
+    p = strstr(line, "pkt_pts_time:");
+    if (!p) return 0;
+    p += strlen("pkt_pts_time:");
+    if (!((*p >= '0' && *p <= '9') || *p == '-' || *p == '+')) return 0;
+    *out_sec = atof(p);
+    return 1;
+}
+
+static void ff_stderr_pump_stop(struct session *s) {
+    if (s->sth_started) {
+        s->pump_quit = 1;
+        pthread_join(s->sth, NULL);
+        s->sth_started = 0;
+    }
+    s->pump_quit = 0;
+    close_fd(&s->stderr_fd);
+}
+
+static void *ff_stderr_thread(void *arg) {
+    struct session *s = (struct session *)arg;
+    char buf[8192];
+    char line[1024];
+    size_t llen = 0;
+    int logfd = open(LOG_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    int fd = s->stderr_fd;
+
+    while (fd >= 0 && !s->pump_quit) {
+        struct pollfd p;
+        ssize_t r;
+        size_t i;
+        p.fd = fd;
+        p.events = POLLIN;
+        p.revents = 0;
+        if (poll(&p, 1, 200) <= 0) continue; /* 200ms 轮询：ffmpeg 死/会话停都能及时退出 */
+        r = read(fd, buf, sizeof(buf));
+        if (r <= 0) break; /* EOF：ffmpeg 退出 */
+        for (i = 0; i < (size_t)r; i++) {
+            char ch = buf[i];
+            if (ch == '\n' || ch == '\r' || llen + 1 >= sizeof(line)) {
+                line[llen] = '\0';
+                if (llen > 0) {
+                    int f;
+                    double land;
+                    if (!s->fps_known && (f = parse_fps_line(line)) > 0) {
+                        s->fps = f;
+                        g_rd.fps = f;
+                        s->fps_known = 1;
+                    }
+                    if (s->seek_pending && !s->seek_land_valid &&
+                        parse_land_line(line, &land) == 1) {
+                        /* 落点只可能 ≤ 0（-ss 之后的首包必在 -ss 点之前或正好在它上面）。
+                         * 夹在 [-10s, 0] 防脏值把时钟推飞。 */
+                        if (land > 0.0) land = 0.0;
+                        if (land < -10.0) land = -10.0;
+                        s->seek_land_ms = (long)(land * 1000.0);
+                        s->seek_land_valid = 1;
+                    }
+                    /* -debug_ts 是**每包两行**的洪水（2h 片 ≈ 100MB），而 /tmp 是 tmpfs
+                     * （吃 RAM）。取证只留真正的诊断/错误行 → 丢弃含 "demuxer" 的包级行。 */
+                    if (logfd >= 0 && !strstr(line, "demuxer")) {
+                        if (write(logfd, line, llen) < 0) { /* ignore */ }
+                        if (write(logfd, "\n", 1) < 0) { /* ignore */ }
+                    }
+                }
+                llen = 0;
+                continue;
+            }
+            line[llen++] = ch;
+        }
+    }
+    if (logfd >= 0) close(logfd);
+    return NULL;
+}
+
 static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
     int vpipe[2] = { -1, -1 };
     int apipe[2] = { -1, -1 };
+    int spipe[2] = { -1, -1 }; /* v3.0.0：stderr 改走管道 → 解析真实帧率 / seek 落点 */
     pid_t pid;
     char ss[32];
-    char rbuf[32];
-    char vf[128]; /* scale+transpose（弹幕烧帧已移除：drawtext×4 逐帧渲染占解码预算 ~20%，
-                   * 是弱视频卡顿主因——2026-10-01 用户实测关弹幕即流畅） */
     char arbuf[16]; /* 音频采样率（蓝牙 48000 / 内置 44100） */
     char hdr[544]; /* "Referer: <url>\r\n"，仅当设置了 referer 才用 */
     char logfd_path_check[8];
@@ -533,6 +1041,13 @@ static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
     if (with_audio && pipe(apipe) != 0) {
         close(vpipe[0]);
         close(vpipe[1]);
+        return -1;
+    }
+    if (pipe(spipe) != 0) {
+        close(vpipe[0]);
+        close(vpipe[1]);
+        if (apipe[0] >= 0) close(apipe[0]);
+        if (apipe[1] >= 0) close(apipe[1]);
         return -1;
     }
     /* 视频 pipe 扩容（v1.9.2：8MB）/ 音频 256KB：
@@ -578,14 +1093,11 @@ static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
         }
     }
     if (with_audio) fcntl(apipe[1], F_SETPIPE_SZ, 262144);
-    /* 输出帧是"物理方向"的矩形（已转置），因此 scale 用 (out_h, out_w)。
-     * 弹幕烧帧已移除（v2.7.0）：drawtext×4 reload=1 逐帧重渲染文字占解码预算 ~20%，
-     * 弱稿件上把软解压到 1x 以下（CPU 100% 实证）→ 用户决策整体移除弹幕功能。 */
-    snprintf(vf, sizeof(vf),
-             "scale=%d:%d,transpose=%d,format=rgb32",
-             s->out_h, s->out_w, s->transpose);
+    /* v3.0.0：视频 pipe 不再搬像素，而是搬**压缩包**（copy 模式）。
+     * 20MB 压缩流 ≈ 数百秒（实测 640x360 24fps 码率 ~730kbps → 20MB ≈ 220s），
+     * 远深于旧的 1.5s 像素蓄水 → 网络抖动几乎不再穿透到画面。
+     * 保留原扩容逻辑（值不必变，深一点无害：pipe 是内核环形缓冲，不占用户态内存）。 */
     snprintf(ss, sizeof(ss), "%ld.%03ld", (long)(start_ms / 1000), (long)(start_ms % 1000));
-    snprintf(rbuf, sizeof(rbuf), "%d", s->fps);
     snprintf(arbuf, sizeof(arbuf), "%d", s->audio_rate > 0 ? s->audio_rate : 44100);
     (void)logfd_path_check;
 
@@ -599,7 +1111,7 @@ static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
     }
     if (pid == 0) {
         int logfd;
-        /* 子进程：视频 → fd3，音频 → fd4 */
+        /* 子进程：视频 → fd3，音频 → fd4，stderr → spipe[1]（父进程泵线程解析帧率/落点） */
         setpgid(0, 0);
         if (dup2(vpipe[1], 3) < 0) _exit(126);
         if (with_audio) {
@@ -609,11 +1121,11 @@ static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
         close(vpipe[1]);
         if (apipe[0] >= 0) close(apipe[0]);
         if (apipe[1] >= 0) close(apipe[1]);
-        logfd = open(LOG_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (logfd >= 0) {
-            dup2(logfd, 2);
-            close(logfd);
-        }
+        if (dup2(spipe[1], 2) < 0) _exit(126);
+        close(spipe[0]);
+        close(spipe[1]);
+        logfd = -1; /* v3.0.0：stderr 不再直接落文件（改由父进程泵线程转存 LOG_PATH） */
+        (void)logfd;
         if (with_audio) {
             char *argv[80]; /* 双输入 × (probesize/rw_timeout/reconnect/thread_queue_size/ss/ua/headers)
                              * 后最多 70 项，留 NULL 余量 */
@@ -621,17 +1133,16 @@ static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
             argv[i++] = "ffmpeg";
             argv[i++] = "-nostdin";
             argv[i++] = "-hide_banner";
+            /* v3.0.0：copy 模式仍需 info 级日志 —— 要从中解析**真实帧率**（Input #0 的
+             * "24 fps"）与 **seek 落点**（-debug_ts 的 pkt_pts_time）。日志由父进程泵线程
+             * 实时抽干（写 LOG_PATH + 解析），不会把 64KB stderr 管道堵死 ffmpeg。 */
             argv[i++] = "-loglevel";
-            argv[i++] = "error";
-            argv[i++] = "-threads";
-            argv[i++] = "4"; /* v1.9.5：4 线程吃满 4×A53（v2.6.0 起源分辨率受 310K 像素预算约束，
-                              * 内存 ~10MB 可控）；音频链多为阻塞等待，实测不需要独占核 */
-            argv[i++] = "-skip_loop_filter";
-            argv[i++] = "all"; /* v1.9.5：跳过 h264 环路滤波（解码成本 ~25%）——254px 屏上
-                                * 去块纹路不可见，换来的吞吐余量直接决定是否掉帧 */
-            /* v2.9.1 实测记录：曾试 `-flags2 +fast`（解码器非规范优化路径）→ 真机 40~50s 窗口
-             * 采样显示视频解码反而 60.3→69.6 jiffies/s（更贵），且属"非规范"标志有画质风险 →
-             * 已回退。结论：本机 CPU 不是瓶颈（整机仅约 25% 忙），解码降本旋钮收益为负，不加。 */
+            argv[i++] = "info";
+            if (start_ms > 0) {
+                argv[i++] = "-debug_ts"; /* 仅 seek 时开：定位 copy 模式的真实落点（见文件头 ②） */
+            }
+            /* v3.0.0 移除：-threads / -skip_loop_filter / -sws_flags —— 全是**解码器/滤镜**
+             * 选项，copy 模式下不参与（-skip_loop_filter 还会因找不到解码器而报错）。 */
             if (s->user_agent[0]) {
                 argv[i++] = "-user_agent";
                 argv[i++] = s->user_agent;
@@ -641,8 +1152,6 @@ static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
                 argv[i++] = "-headers";
                 argv[i++] = hdr;
             }
-            argv[i++] = "-sws_flags";
-            argv[i++] = "fast_bilinear";
             /* 收缩探测窗口：DASH 双 http 输入并发探测在窄带宽（实测 646kbps）下拖死首帧；
              * mp4 moov+首帧 64KB 足够定流（每输入前各放一份，为 input 选项） */
             argv[i++] = "-probesize";
@@ -655,12 +1164,14 @@ static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
              * 满断档本来就由 20s 缓冲吸收（缓冲有数据时画面照常播、漂移不涨），rw_timeout 只是
              * "断档确实持续"的确认 → 越晚确认越好（给网络恢复留时间）→ 与缓冲同量级 15s 最合适。 */
             argv[i++] = "15000000";
-            argv[i++] = "-reconnect";
-            argv[i++] = "1"; /* v1.9.3：CDN 断流协议级重连（Range 续传），修"视频/音频进程中途退出" */
-            argv[i++] = "-reconnect_streamed";
-            argv[i++] = "1";
-            argv[i++] = "-reconnect_delay_max";
-            argv[i++] = "10";
+            if (is_net_input(s->input)) { /* v2.2.8: 仅网络协议支持 -reconnect */
+                argv[i++] = "-reconnect";
+                argv[i++] = "1"; /* v1.9.3：CDN 断流协议级重连（Range 续传），修"视频/音频进程中途退出" */
+                argv[i++] = "-reconnect_streamed";
+                argv[i++] = "1";
+                argv[i++] = "-reconnect_delay_max";
+                argv[i++] = "10";
+            }
             argv[i++] = "-thread_queue_size";
             argv[i++] = AV_PREFETCH_PACKETS_VIDEO_STR; /* v2.2.0 输入线程预取压缩包（≈15~25s） */
             argv[i++] = "-ss";
@@ -676,12 +1187,14 @@ static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
                 argv[i++] = "5000000";
                 argv[i++] = "-rw_timeout";
                 argv[i++] = "15000000";
-                argv[i++] = "-reconnect";
-                argv[i++] = "1";
-                argv[i++] = "-reconnect_streamed";
-                argv[i++] = "1";
-                argv[i++] = "-reconnect_delay_max";
-                argv[i++] = "10";
+                if (is_net_input(s->audio_input)) { /* v2.2.8: 仅网络协议支持 -reconnect */
+                    argv[i++] = "-reconnect";
+                    argv[i++] = "1";
+                    argv[i++] = "-reconnect_streamed";
+                    argv[i++] = "1";
+                    argv[i++] = "-reconnect_delay_max";
+                    argv[i++] = "10";
+                }
                 argv[i++] = "-thread_queue_size";
             argv[i++] = AV_PREFETCH_PACKETS_AUDIO_STR; /* v2.2.0 音轨独立预取（≈18s） */
                 argv[i++] = "-ss";
@@ -697,14 +1210,23 @@ static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
                 argv[i++] = "-i";
                 argv[i++] = s->audio_input;
             }
+            /* ---- v3.0.0 视频输出：**只 demux + copy**，解码交给 gst 的 mppvideodec ----
+             * 原来这里是 `-vf scale=..,transpose=..,format=rgb32 -r <fps> -f rawvideo`：
+             * 软解 + 每帧 sws 转换 + 每帧 0.5MB memcpy 进 pipe，X6 Pro 上实测只有 1.1~1.9x
+             * 实时；改成 copy 后本进程只搬压缩包（~90KB/s），CPU 几乎归零，且**省掉整条
+             * 像素链**。旋转（transpose）与缩放（scale）都下移到 gst：前者是 mppvideodec 的
+             * rotation 属性（解码器内完成，实测等价），后者由 kmssink 的 render-rectangle
+             * 交给 KMS/RGA 硬件做。
+             * `-bsf:v h264_mp4toannexb`：把 AVCC（长度前缀）转成 Annex-B（起始码）——
+             * 下游 h264parse 与本模块的 AU 切分都按起始码识别。`-f h264` 是裸流 muxer。 */
             argv[i++] = "-map";
             argv[i++] = "0:v:0";
-            argv[i++] = "-vf";
-            argv[i++] = vf;
-            argv[i++] = "-r";
-            argv[i++] = rbuf;
+            argv[i++] = "-c:v";
+            argv[i++] = "copy";
+            argv[i++] = "-bsf:v";
+            argv[i++] = "h264_mp4toannexb";
             argv[i++] = "-f";
-            argv[i++] = "rawvideo";
+            argv[i++] = "h264";
             argv[i++] = "pipe:3";
             /* v2.9.4：音频输出必须受 with_audio 门控 —— 拆分模式（DASH / 直播双进程）下
              * 视频进程只出视频；旧代码无条件加音频输出，会去写**未被 dup2 的 fd4**
@@ -724,9 +1246,8 @@ static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
             argv[i++] = "pipe:4";
             } /* end if (with_audio) */
             argv[i] = NULL;
-            /* 视频 ffmpeg 提优先级（v1.9.4，nice -5 与音频解码同档）：软解+滤镜链吞吐
-             * 贴实时线时，JS/UI 的周期性突发会瞬时挤占解码线程 → 掉帧积压。音画连续
-             * 优先于 UI 丝滑（UI 突发短，A53×4 下仍有余量）。root 下生效，失败无害。 */
+            /* 视频 ffmpeg 提优先级（v1.9.4，nice -5 与音频解码同档）。v3.0.0 起本进程只做
+             * demux+copy，CPU 占用极小，但保留优先级无害（解包线程仍在搬运网络数据）。 */
             setpriority(PRIO_PROCESS, 0, -5);
             execv(FFMPEG_PATH, argv);
         } else {
@@ -736,11 +1257,10 @@ static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
             argv[i++] = "-nostdin";
             argv[i++] = "-hide_banner";
             argv[i++] = "-loglevel";
-            argv[i++] = "error";
-            argv[i++] = "-threads";
-            argv[i++] = "4"; /* v1.9.5：同上（源分辨率受像素预算约束） */
-            argv[i++] = "-skip_loop_filter";
-            argv[i++] = "all"; /* v1.9.5：同上（解码降本 ~25%） */
+            argv[i++] = "info"; /* v3.0.0：同双输出分支，父进程泵线程解析帧率/落点 */
+            if (start_ms > 0) {
+                argv[i++] = "-debug_ts";
+            }
             /* 拆进程后 dash 视频走本分支 —— 探测上限必须与音频分支一致：
              * 缺失时默认 probesize(5MB) 在烂网络上 = 首帧 10s+/seek 12s 零帧（1.6.0 实测） */
             argv[i++] = "-probesize";
@@ -749,12 +1269,14 @@ static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
             argv[i++] = "5000000";
             argv[i++] = "-rw_timeout";
             argv[i++] = "15000000"; /* v2.2.5：同上（与 20s 缓冲同量级；早退会白丢缓冲） */
-            argv[i++] = "-reconnect";
-            argv[i++] = "1"; /* v1.9.3：CDN 断流协议级重连（Range 续传） */
-            argv[i++] = "-reconnect_streamed";
-            argv[i++] = "1";
-            argv[i++] = "-reconnect_delay_max";
-            argv[i++] = "10";
+            if (is_net_input(s->input)) { /* v2.2.8: 仅网络协议支持 -reconnect */
+                argv[i++] = "-reconnect";
+                argv[i++] = "1"; /* v1.9.3：CDN 断流协议级重连（Range 续传） */
+                argv[i++] = "-reconnect_streamed";
+                argv[i++] = "1";
+                argv[i++] = "-reconnect_delay_max";
+                argv[i++] = "10";
+            }
             if (s->user_agent[0]) {
                 argv[i++] = "-user_agent";
                 argv[i++] = s->user_agent;
@@ -764,8 +1286,6 @@ static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
                 argv[i++] = "-headers";
                 argv[i++] = hdr;
             }
-            argv[i++] = "-sws_flags";
-            argv[i++] = "fast_bilinear";
             argv[i++] = "-thread_queue_size";
             argv[i++] = AV_PREFETCH_PACKETS_VIDEO_STR; /* v2.2.0 输入线程预取压缩包（≈15~25s） */
             argv[i++] = "-ss";
@@ -773,12 +1293,14 @@ static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
             argv[i++] = "-i";
             argv[i++] = s->input;
             argv[i++] = "-an";
-            argv[i++] = "-vf";
-            argv[i++] = vf;
-            argv[i++] = "-r";
-            argv[i++] = rbuf;
+            argv[i++] = "-map";
+            argv[i++] = "0:v:0";
+            argv[i++] = "-c:v";
+            argv[i++] = "copy";
+            argv[i++] = "-bsf:v";
+            argv[i++] = "h264_mp4toannexb";
             argv[i++] = "-f";
-            argv[i++] = "rawvideo";
+            argv[i++] = "h264";
             argv[i++] = "pipe:3";
             argv[i] = NULL;
             setpriority(PRIO_PROCESS, 0, -5); /* 同上（v1.9.4）：DASH 视频分支 */
@@ -789,7 +1311,19 @@ static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
     /* 父进程 */
     close(vpipe[1]);
     if (apipe[1] >= 0) close(apipe[1]);
+    close(spipe[1]);
     s->ff_pid = pid;
+    /* v3.0.0：起 stderr 泵线程（抽干 + 转存 LOG_PATH + 解析帧率/落点）。
+     * 必须先 join 上一代（否则多次 seek 会累积线程），join 前 ffmpeg 已 kill → 管道 EOF。 */
+    ff_stderr_pump_stop(s);
+    s->stderr_fd = spipe[0];
+    s->fps_known = 0;
+    s->seek_pending = (start_ms > 0) ? 1 : 0;
+    if (pthread_create(&s->sth, NULL, ff_stderr_thread, s) == 0) s->sth_started = 1;
+    else {
+        close_fd(&s->stderr_fd);
+        s->seek_pending = 0;
+    }
     s->video_fd = vpipe[0];
     /* v2.1.1 修复：仅当本次进程带音频输出时才接管 audio_fd。拆分模式（with_audio=0，DASH）
      * 下音频由 spawn_audio_ffmpeg 的独立进程经自己的 pipe 供给；旧代码无条件写 apipe[0]
@@ -807,7 +1341,70 @@ static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
  *           Redmi Buds 6, trusted audio-card, playback
  *   注意 DEV 前面还有 SRV=...，所以必须匹配 "bluealsa:" 而不是 "bluealsa:DEV="，
  *   否则永远匹配不到、音频就一直在内置扬声器上（已踩过）。
- * 返回 0 表示找到了蓝牙设备。 */
+ * 返回 0 表示找到了蓝牙设备。
+ *
+ * v2.3.1（X6 Pro 真机）：bluealsa-aplay -L 在本机版本上**直接崩溃**——
+ *     $ /usr/bin/bluealsa-aplay -L
+ *     *** stack smashing detected ***: terminated
+ *     Aborted
+ *   （v3.0.0, 43344 B, Mar 18 2024；耳机已 Connected 时同样崩。）
+ *   由于 abort 前 stdout 未 flush，popen 永远读到空 ⇒ 蓝牙永远选不中。
+ *   故加 BlueZ 回退：bluetoothctl devices → 逐台 info 判 Connected/Audio Sink。 */
+#define BTCTL_PATH "/usr/bin/bluetoothctl"
+#define BT_MAX_DEVS 8
+
+/* 单台设备是否「已连接 + 有 Audio Sink」→ 1/0。一次 popen 一次 info。 */
+static int bt_dev_is_connected_sink(const char *mac) {
+    char cmd[192];
+    char line[256];
+    FILE *fp;
+    int connected = 0;
+    int sink = 0;
+    if (!mac || !mac[0]) return 0;
+    snprintf(cmd, sizeof(cmd), "%s info '%s' 2>/dev/null", BTCTL_PATH, mac);
+    fp = popen(cmd, "r");
+    if (!fp) return 0;
+    while (fgets(line, sizeof(line), fp)) {
+        if (strstr(line, "Connected: yes")) connected = 1;
+        /* A2DP Sink = 0000110b（耳机作为我们推流的接收端）。AVRCP-only 的
+         * 设备能连但放不出声，必须排除，否则会静默无声。 */
+        else if (strstr(line, "Audio Sink")) sink = 1;
+    }
+    pclose(fp);
+    return (connected && sink) ? 1 : 0;
+}
+
+/* 回退路径：扫已配对设备，挑第一台连接的 A2DP Sink。0 = 找到。 */
+static int detect_bt_pcm_bluez(char *out, int n) {
+    char macs[BT_MAX_DEVS][24];
+    int n_mac = 0;
+    int i;
+    char cmd[192];
+    char line[256];
+    FILE *fp;
+
+    snprintf(cmd, sizeof(cmd), "%s devices 2>/dev/null", BTCTL_PATH);
+    fp = popen(cmd, "r");
+    if (!fp) return -1;
+    while (fgets(line, sizeof(line), fp) && n_mac < BT_MAX_DEVS) {
+        /* "Device B0:A3:F2:AD:7E:FA Redmi Buds 6" */
+        char mac[24];
+        if (strncmp(line, "Device ", 7) != 0) continue;
+        if (sscanf(line + 7, "%23s", mac) != 1) continue;
+        if (strlen(mac) != 17 || mac[2] != ':' || mac[5] != ':') continue;
+        snprintf(macs[n_mac], sizeof(macs[n_mac]), "%s", mac);
+        n_mac++;
+    }
+    pclose(fp); /* 先关掉外层 pipe 再逐台 info，避免管道缠绕 */
+
+    for (i = 0; i < n_mac; i++) {
+        if (!bt_dev_is_connected_sink(macs[i])) continue;
+        snprintf(out, n, "bluealsa:DEV=%s,PROFILE=a2dp", macs[i]);
+        return 0;
+    }
+    return -1;
+}
+
 static int detect_bt_pcm(char *out, int n) {
     FILE *fp;
     char line[256];
@@ -829,7 +1426,92 @@ static int detect_bt_pcm(char *out, int n) {
         }
     }
     pclose(fp);
+    /* v2.3.1：bluealsa-aplay -L 在本机崩溃 ⇒ 回退 BlueZ，否则蓝牙永远选不中。 */
+    if (detect_bt_pcm_bluez(out, n) == 0) {
+        fprintf(stderr, "[PLAYER] bt via bluetoothctl: %s\n", out);
+        return 0;
+    }
     return -1;
+}
+
+/* ---------------- v2.3.0: X6 Pro audio route (Playback Path) ----------------
+ * Symptom (X6 Pro fw4.3.5, measured on device): aplay is running,
+ * /proc/asound/card1/pcm0p/sub0/status = RUNNING, Master 88%, yet the speaker is
+ * completely silent. Cause: the rk817 codec mixer control `Playback Path`
+ * (numid=45) defaults to OFF at boot, so the amp path is not connected:
+ *     amixer -c 0 sget 'Playback Path'   ->  Item0: 'OFF'
+ *     amixer -c 0 sset 'Playback Path' 'SPK'  ->  sound immediately
+ * On X5 a system audio daemon did this; on X6 Pro PulseAudio is unreachable
+ * (`amixer: Mixer attach default error: Connection refused`) so nobody does.
+ * The player therefore does it itself.
+ *
+ * Design: only write when the current value IS "OFF". If the user picked
+ * headphones (HP) or bluetooth (BT) we leave it alone, so starting playback
+ * never yanks audio back to the speaker. All failures are silent (X5 has no
+ * such control / no amixer). */
+#define AMIXER_PATH "/bin/amixer"
+#define AMIXER_CARD "0"
+#define AMIXER_CTL "Playback Path"
+#define AMIXER_CTL_SPK "SPK"     /* bluetooth still goes out via bluealsa (-D bluealsa:...), codec route stays SPK */
+
+/* Read the current enum name ("OFF"/"SPK"/"HP"/"BT"...). 0 = read ok. */
+static int mixer_get_playback_path(char *out, int n) {
+    char cmd[192];
+    FILE *fp;
+    int rc = -1;
+    if (!out || n <= 0) return -1;
+    out[0] = '\0';
+    snprintf(cmd, sizeof(cmd), "%s -c %s cget name='%s' 2>/dev/null",
+             AMIXER_PATH, AMIXER_CARD, AMIXER_CTL);
+    fp = popen(cmd, "r");
+    if (!fp) return -1;
+    {
+        char line[256];
+        while (fgets(line, sizeof(line), fp)) {
+            /* 只认枚举值那一行：`  ; Item #0 'OFF'`
+             * v2.3.2 修 bug：amixer cget 的**首行**是
+             *   numid=45,iface=MIXER,name='Playback Path'
+             * 也是单引号包着的，旧代码取「第一对单引号」会拿到控件名本身，
+             * 于是 cur="Playback Path" 永远 != "OFF" ⇒ 自愈静默失效
+             * （真机 mixtest get 实测输出 current = 'Playback Path' 即证据）。 */
+            char *item = strstr(line, "Item #");
+            char *q1;
+            char *q2;
+            if (!item) continue;
+            q1 = strchr(item, '\'');
+            if (!q1) continue;
+            q2 = strchr(q1 + 1, '\'');
+            if (q2 && q2 > q1 + 1 && (int)(q2 - q1 - 1) < n) {
+                memcpy(out, q1 + 1, (size_t)(q2 - q1 - 1));
+                out[q2 - q1 - 1] = '\0';
+                rc = 0;
+                break;
+            }
+        }
+    }
+    pclose(fp);
+    return rc;
+}
+
+static int mixer_set_playback_path(const char *value) {
+    char cmd[256];
+    int st;
+    if (!value || !value[0]) return -1;
+    snprintf(cmd, sizeof(cmd), "%s -c %s sset '%s' '%s' >/dev/null 2>&1",
+             AMIXER_PATH, AMIXER_CARD, AMIXER_CTL, value);
+    st = system(cmd);
+    return (st == 0) ? 0 : -1;
+}
+
+/* Call before spawning aplay. want_bt only affects the log line; the codec route
+ * is always SPK because bluealsa does not go through rk817 routing. */
+static void audio_route_ensure(int want_bt) {
+    char cur[64];
+    if (mixer_get_playback_path(cur, sizeof(cur)) != 0) return; /* no such control (X5 / other) */
+    if (strcmp(cur, "OFF") != 0) return;                        /* already routed -> respect it */
+    if (mixer_set_playback_path(AMIXER_CTL_SPK) == 0) {
+        fprintf(stderr, "[PLAYER] Playback Path OFF -> %s (bt=%d)\n", AMIXER_CTL_SPK, want_bt);
+    }
 }
 
 /* ---------------- v1.6.0：音频独立 ffmpeg 进程（网易云级待遇）----------------
@@ -894,12 +1576,14 @@ static int spawn_ffaudio(struct session *s) {
         argv[i++] = "5000000";
         argv[i++] = "-rw_timeout";
         argv[i++] = "15000000";
-        argv[i++] = "-reconnect";
-        argv[i++] = "1"; /* v1.9.3：音频轨断流重连（soak 末段实测过 CDN 断流杀进程） */
-        argv[i++] = "-reconnect_streamed";
-        argv[i++] = "1";
-        argv[i++] = "-reconnect_delay_max";
-        argv[i++] = "10";
+        if (is_net_input(s->audio_input)) { /* v2.2.8: 仅网络协议支持 -reconnect */
+            argv[i++] = "-reconnect";
+            argv[i++] = "1"; /* v1.9.3：音频轨断流重连（soak 末段实测过 CDN 断流杀进程） */
+            argv[i++] = "-reconnect_streamed";
+            argv[i++] = "1";
+            argv[i++] = "-reconnect_delay_max";
+            argv[i++] = "10";
+        }
         argv[i++] = "-thread_queue_size";
         argv[i++] = AV_PREFETCH_PACKETS_AUDIO_STR; /* v2.2.0 音轨独立预取（≈18s） */
         argv[i++] = "-ss";
@@ -947,6 +1631,10 @@ static int spawn_aplay(struct session *s, const char *device) {
         strncpy(s->audio_dev, use, sizeof(s->audio_dev) - 1);
         s->audio_dev[sizeof(s->audio_dev) - 1] = '\0';
     }
+
+    /* v2.3.0: power up the codec route (OFF -> SPK) before aplay starts writing,
+     * otherwise the first chunk of audio is produced into a dead amp path. */
+    audio_route_ensure(s->audio_is_bt);
 
     if (pipe(ppipe) != 0) return -1;
     pid = fork();
@@ -1032,7 +1720,16 @@ static int spawn_aplay(struct session *s, const char *device) {
  * 因此线程能安全地写完最后状态并退出。 */
 
 /* ---- v1.8.0 音画对齐参数 ---- */
-#define AV_SKIP_MS 100     /* 帧落后音频钟超过此值 → 平滑快进（≈3-4 帧 @24fps；漂移有界的关键） */
+/* 帧落后音频钟超过此值 → 平滑快进。
+ * v3.0.1：100 → 200（2026-10-30 真机钉死「约一秒一次卡顿」的根因）。
+ *   稳态 drift 天然就停在 ~100ms —— 它不是真的音画不同步，而是 audio_anchor_ms() 里
+ *   「pipe 残留 + ALSA 缓冲」估算的固有偏差（实测 audioBufMs 恒 871ms，误差量级 100ms）。
+ *   旧的 100ms 阈值让**每一帧**都判定为"滞后"，于是永久走快进分支：以 PACE_CATCHUP_MAX
+ *   (1.25x = 37.5fps @30fps) 出帧，读前视缓冲被抽干 → 空转等网络 → 节奏诊断实测
+ *   maxgap=126ms 每秒一次，与用户「大概一秒一次的卡顿」完全对应。
+ *   放宽到 200ms 后稳态落回「按音频钟匀速等待」分支，上屏节拍恢复 33ms 均匀；
+ *   真正超过 200ms 的滞后仍然会被快进追回，观感无损。 */
+#define AV_SKIP_MS 200
 /* v2.9.3：墙钟节拍下落后时的**最大追赶倍率**（1.25 = 略快一点追上，不出现"突然快放"） */
 #define PACE_CATCHUP_MAX 1.25
 #define AV_WAIT_CAP_MS 200 /* durl 单进程模式每帧等待上限（video pipe 满互锁死锁的解扣） */
@@ -1142,6 +1839,96 @@ static void probe_alsa_buffer(struct session *s) {
     }
 }
 
+/* ---- v3.0.0 Annex-B 访问单元（AU）切分 ----
+ * 硬解链路下 video pipe 里是**变长压缩字节流**（ffmpeg -c:v copy -f h264），不再有"定长像素帧"。
+ * 但上层语义没变：frames 必须是"已送显的帧数"，position_ms = frames/fps，节拍/漂移/重同步
+ * 全部按它算。所以必须把字节流重新切回一帧一帧（AU）再喂给 gst。
+ *
+ * 切分规则（H.264 Annex-B，够用且不需要 Exp-Golomb 解析）：
+ *   顺序扫 NAL 起始码（00 00 01，4 字节起始码 00 00 00 01 会被识别为其后 3 字节）。
+ *   当前 AU 内**已经出现过 VCL NAL（type 1..5）**，此时再遇到
+ *     · 另一个 VCL NAL（下一帧的第一个 slice），或
+ *     · AUD(9) / SPS(7) / PPS(8) / SEI(6)（它们只会出现在新 AU 的开头）
+ *   就说明 AU 到此为止。
+ * bilibili 的流是「一帧一 slice」，因此 1 AU == 1 帧，frames 与真实帧数一一对应。
+ *
+ * 返回第一个完整 AU 的字节数；0 = 数据还不够（调用方继续读 pipe）。
+ * 流损坏/无起始码时不会无限累积：au_len 超过 AU_FLUSH_CAP 就整块当一帧吐出去。 */
+#define AU_FLUSH_CAP (4u * 1024u * 1024u)
+
+/* v3.0.1 读前视目标：把压缩流尽量读进 au_buf，让节拍等待期间缓冲里始终有后续帧。
+ * 为什么需要（2026-10-30 真机钉死「约一秒一次卡顿」的根因）：
+ *   旧循环是「读 1 个 AU → 等音频钟 → 写出 → 消费」的串行结构，**等待期间完全不读**。
+ *   于是 CDN 一旦出现 ~127ms 的交付空档，缓冲里就没有下一帧 → 上屏出现 127ms 空洞
+ *   （节奏诊断 maxgap=127 每秒一次，与用户观感完全一致）。
+ * 192KB 的压缩流按 60~600kbps 算 = 2.5~25s 的前视，足以吸收任何网络分块抖动；
+ * 内存代价 192KB（设备 352MB，可忽略），且 gst 侧不需要改。 */
+#define AU_READ_AHEAD (192u * 1024u)
+
+static void au_consume(struct session *s, size_t n);
+
+static size_t au_first_len(struct session *s) {
+    size_t i = 0;
+    size_t au_start = 0;
+    int seen_first = 0;
+    int have_vcl = 0;
+
+    if (s->au_len > AU_FLUSH_CAP) return s->au_len; /* 兜底：坏流强制放行 */
+
+    while (i + 3 <= s->au_len) {
+        if (s->au_buf[i] == 0 && s->au_buf[i + 1] == 0 && s->au_buf[i + 2] == 1) {
+            size_t hdr = i + 3;
+            int type;
+            int is_vcl;
+            if (hdr >= s->au_len) break; /* NAL 头还没到齐 */
+            type = s->au_buf[hdr] & 0x1f;
+            is_vcl = (type >= 1 && type <= 5);
+            if (!seen_first) {
+                seen_first = 1;
+                au_start = i;
+            } else if (have_vcl && (is_vcl || type == 6 || type == 7 || type == 8 || type == 9)) {
+                /* 首个起始码之前的字节是垃圾（如 4 字节起始码多出的 1 个 0），先丢掉 */
+                if (au_start > 0) au_consume(s, au_start);
+                return i - au_start; /* 新 AU 从这里开始 */
+            }
+            if (is_vcl) have_vcl = 1;
+            i = hdr;
+            continue;
+        }
+        i++;
+    }
+    /* 还没切出完整 AU：顺手丢掉首个起始码之前的垃圾，避免缓冲区无限前移 */
+    if (seen_first && au_start > 0) au_consume(s, au_start);
+    return 0;
+}
+
+/* 追加压缩字节到 AU 累积缓冲（必要时扩容） */
+static int au_append(struct session *s, const unsigned char *data, size_t n) {
+    if (n == 0) return 0;
+    if (s->au_len + n > s->au_cap) {
+        size_t cap = s->au_cap ? s->au_cap : 65536;
+        unsigned char *nb;
+        while (cap < s->au_len + n) cap *= 2;
+        nb = (unsigned char *)realloc(s->au_buf, cap);
+        if (!nb) return -1;
+        s->au_buf = nb;
+        s->au_cap = cap;
+    }
+    memcpy(s->au_buf + s->au_len, data, n);
+    s->au_len += n;
+    return 0;
+}
+
+/* 消费掉前 n 字节（把余下的前移） */
+static void au_consume(struct session *s, size_t n) {
+    if (n >= s->au_len) {
+        s->au_len = 0;
+        return;
+    }
+    memmove(s->au_buf, s->au_buf + n, s->au_len - n);
+    s->au_len -= n;
+}
+
 /* ---- v2.1.0 视频流重启（强制重同步 / 断流重连共用）---- */
 
 /* 把**视频流**重启到指定内容位置：杀旧视频 ffmpeg → 以 -ss target 重开（音频进程/aplay 不动）。
@@ -1158,6 +1945,10 @@ static int respawn_video_at(struct session *s, long long target_ms) {
     kill_child(&s->ff_pid);
     s->video_base_ms = (long)target_ms;
     s->frames = 0;
+    /* v3.0.0：重启视频流 = 全新 Annex-B 序列（新 SPS/PPS + 新 IDR），累积缓冲必须丢弃，
+     * 否则上一段流的半截 AU 会与新流首帧粘在一起 → gst 解码花屏/丢帧。 */
+    s->au_len = 0;
+    s->video_eof = 0;
     s->position_ms = (long)target_ms;
     s->video_first_frame = 1;        /* 起播门已过：重启不再等门 */
     s->last_blit_at = now_seconds(); /* 巡检基线重置，防恢复期被误判停帧 */
@@ -1201,24 +1992,88 @@ static int restart_video_synced(struct session *s) {
 
 static void *video_thread(void *arg) {
     struct session *s = (struct session *)arg;
-    size_t fsz = (size_t)s->out_w * (size_t)s->out_h * 4u;
-    unsigned char *buf = s->frame;
+    unsigned char rd[65536];
+    size_t au_n = 0;
+    int au_ready = 0;
     int failed = 0;
+    int eof_done = 0;
+    /* v3.0.0 节奏诊断（排查「约一秒一次卡顿」）：每秒一行，回答"帧是匀速产出还是成串爆发"。
+     *   n      = 本秒送出 AU（帧）数
+     *   wait   = 本秒在音频钟上等帧的累计毫秒 / maxwait = 单帧最长等待
+     *   maxgap = 相邻两次写 FIFO 的最大间隔（= 上屏节拍的最大空档，卡顿的直接证据）
+     *   fifo   = 写 FIFO 的累计耗时 / maxfifo = 单次最长（>1 帧时间即为写侧阻塞）
+     * 上限 300 行（5 分钟）后停止，避免长播把 /tmp 写满。 */
+    double d_t0 = now_seconds();
+    long d_n = 0, d_lines = 0;
+    double d_wait = 0, d_maxwait = 0, d_maxgap = 0, d_last_au = 0;
+    double d_fifo = 0, d_maxfifo = 0;
+    double d_last_rd = 0, d_maxrdgap = 0, d_lastau2 = 0, d_maxaugap = 0;
 
     while (!s->stop_flag) {
         struct pollfd pfd;
         int pr;
         int do_blit = 1;
-        pfd.fd = s->video_fd;
-        pfd.events = POLLIN;
-        pfd.revents = 0;
-        pr = poll(&pfd, 1, 200);
-        if (pr < 0) {
-            if (errno == EINTR) continue;
-            failed = 1;
-            break;
+        ssize_t got;
+
+        /* ---- v3.0.1 读前视：先把 pipe 里已有的压缩字节尽量吸进 au_buf ----
+         * 非阻塞（poll timeout 0）：有多少拿多少，拿不到就去走下面的等待/节拍逻辑。
+         * 这一步是「上屏不出现网络空档」的关键——见 AU_READ_AHEAD 的注释。 */
+        if (s->au_len < AU_READ_AHEAD) {
+            for (;;) {
+                struct pollfd pf2;
+                int pr2;
+                ssize_t g2;
+                if (s->au_len >= AU_READ_AHEAD) break;
+                pf2.fd = s->video_fd;
+                pf2.events = POLLIN;
+                pf2.revents = 0;
+                pr2 = poll(&pf2, 1, 0);
+                if (pr2 <= 0) break; /* 没数据了 / 出错（出错交给下面的主 poll 报） */
+                g2 = read(s->video_fd, rd, sizeof(rd));
+                if (g2 < 0 && errno == EINTR) continue;
+                if (g2 < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
+                if (g2 < 0) { failed = 1; break; }
+                if (g2 == 0) { s->video_eof = 1; break; }
+                if (au_append(s, rd, (size_t)g2) != 0) { failed = 1; break; }
+                {
+                    double rn = now_seconds();
+                    if (d_last_rd > 0) {
+                        double g = (rn - d_last_rd) * 1000.0;
+                        if (g > d_maxrdgap) d_maxrdgap = g;
+                    }
+                    d_last_rd = rn;
+                }
+            }
+            if (failed) break;
         }
-        if (pr == 0) {
+
+        /* ---- v3.0.0：再看累积缓冲里是否已切出完整 AU；有就立刻走下面的节拍逻辑 ---- */
+        if (!au_ready && s->au_len > 0) {
+            au_n = au_first_len(s);
+            if (au_n > 0) {
+                au_ready = 1;
+                {
+                    double an = now_seconds();
+                    if (d_lastau2 > 0) {
+                        double g = (an - d_lastau2) * 1000.0;
+                        if (g > d_maxaugap) d_maxaugap = g;
+                    }
+                    d_lastau2 = an;
+                }
+            }
+        }
+
+        if (!au_ready) {
+            pfd.fd = s->video_fd;
+            pfd.events = POLLIN;
+            pfd.revents = 0;
+            pr = poll(&pfd, 1, 200);
+            if (pr < 0) {
+                if (errno == EINTR) continue;
+                failed = 1;
+                break;
+            }
+            if (pr == 0) {
             /* v2.1.0 空转期（200ms 无新帧）漂移巡检：纯视频停帧而音频链仍在供数时，漂移检查
              * 因"只在读到帧时才跑"而永不触发 → 画面只能冻到 JS 巡检（8s）做**双进程重启**
              * （实测连带打断音频、恢复期还要重新过起播门 3.5s）。此处直接强制重同步：只重启
@@ -1255,11 +2110,44 @@ static void *video_thread(void *arg) {
             }
             s->probe_audio_bytes = s->audio_bytes;
             continue;
+            }
         }
-        if (read_full(s->video_fd, buf, fsz) != 0) {
-            failed = 1;
-            break;
+        if (!au_ready) {
+            /* 读一段压缩字节追加到 AU 累积缓冲，再尝试切出一个完整 AU。
+             * EOF（got==0）且缓冲里还有残留 → 尾帧也吐出去，不丢。 */
+            got = read(s->video_fd, rd, sizeof(rd));
+            if (got < 0 && errno == EINTR) continue;
+            if (got < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;
+            if (got < 0) {
+                failed = 1;
+                break;
+            }
+            if (got == 0) {
+                /* pipe 关闭 = ffmpeg 结束。缓冲里可能还有最后 1~2 帧 */
+                au_n = s->au_len;
+                if (au_n == 0) {
+                    failed = 1;
+                    break;
+                }
+                au_ready = 1;
+                s->video_eof = 1;
+            } else {
+                if (au_append(s, rd, (size_t)got) != 0) {
+                    failed = 1;
+                    break;
+                }
+                {
+                    double rn = now_seconds();
+                    if (d_last_rd > 0) {
+                        double g = (rn - d_last_rd) * 1000.0;
+                        if (g > d_maxrdgap) d_maxrdgap = g;
+                    }
+                    d_last_rd = rn;
+                }
+                continue; /* 回去重新切 AU */
+            }
         }
+        /* 到这儿 au_ready=1 且 au_n>0：缓冲区前 au_n 字节就是一个完整 AU（== 一帧） */
         /* ---- 播出节拍（v1.8.0 重写，锚 = 音频时钟 = writer 写出量换算的播放位置）----
          * 帧到时（apos ≥ due）→ 立即贴屏；帧落后音频钟 → v2.1.0 分两档：轻微滞后平滑快进、
          * 过大滞后强制重同步（见下）；音频时钟死亡（audio_alive=0）→ 墙钟节拍接管（画面续播）。
@@ -1333,17 +2221,55 @@ static void *video_thread(void *arg) {
             long long apos = s->audio_base_ms + audio_anchor_ms(s);
             long long drift;
             int waited = 0;
-            /* durl（音视频同进程）等待限幅：视频线程不读帧 → video pipe 满 → ffmpeg 阻塞
-             * → 音频断供 → 锚停走 → 继续等 = 死锁。限幅后贴屏放行 pipe 解锁 ffmpeg。
-             * DASH 音频独立进程，无此耦合 → 不限幅（供给停滞时画面冻结等声）。 */
-            int wait_cap = s->audio_input[0] ? 0 : AV_WAIT_CAP_MS;
-            while (!s->stop_flag && s->audio_alive && s->frames > 0 && apos < due) {
-                usleep(2000);
-                waited += 2;
-                if (wait_cap && waited >= wait_cap) break;
-                apos = s->start_ms + audio_anchor_ms(s);
+            /* 等待限幅（v3.0.1 扩大适用面）：
+             * · durl（音视频同进程）：视频线程不读帧 → video pipe 满 → ffmpeg 阻塞 → 音频断供
+             *   → 锚停走 → 继续等 = 死锁。限幅后贴屏放行 pipe 解锁 ffmpeg。
+             * · DASH（音频独立进程）：旧注释说"无此耦合 → 不限幅"，但真机实测（2026-10-30）
+             *   发现这样会让**音频锚的阶梯更新传导到画面节拍**：audio_anchor_ms() 由
+             *   writer_bytes（每写 8192B = 46ms 跳一次）+ FIONREAD 算出，是阶梯量；
+             *   `while (apos < due)` 硬等时，连续几帧会一起卡在这个台阶上，
+             *   节奏诊断实测 maxgap=126ms 每秒一次 = 用户反馈的「大概一秒一次的卡顿」。
+             *   限幅到 2 帧时间：单帧最多等 2 帧，上屏节拍由帧率主导而不是音频锚台阶；
+             *   真正的滞后仍由下面的 drift 判据（快进 / 强制重同步）兜底，不会累积。 */
+            /* ---- v3.0.1 画面节拍器（替换「硬等音频锚」）----
+             * 旧实现：`while (apos < due) usleep(2ms)`。问题在于 apos 是**台阶量**——
+             * audio_anchor_ms() = writer_bytes（每写 8192B 才跳一次 ≈ 46ms）− pipe 残留 − ALSA
+             * 缓冲，于是连续几帧落在同一台阶上一起等，台阶一跳又一起放行。
+             * 真机节奏诊断（2026-10-30）实测：wait≈600ms/秒、wgap=110ms 每秒一次、
+             * augap=110ms，而 aulen 稳定 210~258KB（读前视缓冲满）——**数据根本不缺**，
+             * 卡顿完全由这个台阶传导造成，正是用户反馈的「大概一秒一次的卡顿」。
+             *
+             * 新实现：以「每帧固定 1000/fps ms」为基准节拍，再用 PLL 方式**慢速**把相位拉向
+             * 音频锚（每帧最多 ±3ms，时间常数 ~0.3s）。台阶被这个低通滤掉，上屏间隔均匀；
+             * 音频仍是权威时钟（长期相位由 drift 纠正锁死），真正的大滞后照旧走
+             * 快进 / 强制重同步两条既有兜底路径。 */
+            int frame_ms = (s->fps > 0) ? (int)(1000.0 / (double)s->fps) : 40;
+            if (frame_ms < 1) frame_ms = 1;
+            if (s->frames > 0 && s->audio_alive) {
+                /* PLL：drift>0 = 声音超前 → 本帧间隔缩短（加快）；<0 → 拉长（放慢）。
+                 * ±3ms/帧 @30fps = 每秒最多纠 90ms，既够压住台阶又能跟上真实漂移。 */
+                int adj = 0;
+                long long d0 = apos - due;
+                if (d0 > AV_SKIP_MS) adj = 3;
+                else if (d0 < -AV_SKIP_MS) adj = -3;
+                else if (d0 > 0) adj = 1;
+                else if (d0 < 0) adj = -1;
+                int gap = frame_ms - adj;
+                if (gap < 1) gap = 1;
+                {
+                    double since = (now_seconds() - s->last_pace_at) * 1000.0;
+                    if (since < (double)gap) {
+                        int ms = (int)((double)gap - since);
+                        usleep((useconds_t)(ms * 1000));
+                        waited = ms;
+                    }
+                }
+                s->last_pace_at = now_seconds();
             }
+            d_wait += (double)waited;
+            if ((double)waited > d_maxwait) d_maxwait = (double)waited;
             if (s->stop_flag) break;
+            apos = s->audio_base_ms + audio_anchor_ms(s);
             drift = apos - due;
             s->last_drift_ms = (long)drift;
             if (s->frames > 0 && !s->audio_alive) {
@@ -1358,11 +2284,26 @@ static void *video_thread(void *arg) {
                 s->video_skips++;
                 do_blit = 1; /* 重启失败 → 退化为平滑快进 */
             } else if (drift > AV_SKIP_MS) {
-                /* ① 轻微滞后 → 平滑快进追上（v2.1.0）：每帧都贴屏、不等钟，画面以当前解码产速
-                 * 连续快进（不再旧的 0.6s 节流 → 消除"网络波动后一段 1.6fps 顿挫"）。产速>1x
-                 * 时积压自然排空；仍不收敛则累计到 >AV_RESYNC_MS 升级为②强制重同步。 */
+                /* ① 轻微滞后 → 平滑快进追上（v2.1.0）：每帧都贴屏、不等钟。
+                 * 仍不收敛则累计到 >AV_RESYNC_MS 升级为②强制重同步。
+                 *
+                 * v3.0.1 关键修复（用户反馈「大概一秒一次的卡顿」，2026-10-30 真机钉死）：
+                 * 旧实现此分支只置 do_blit=1、**完全不限速**，于是帧以「网络分块到达」的节奏
+                 * 集中贴出——节奏诊断实测 maxgap=127ms 每秒出现一次，正是用户看到的卡顿。
+                 * 而且稳态 drift 恰好稳定在 ~100ms（= AV_SKIP_MS），意味着**每一帧**都落进这个
+                 * 分支 → 等于全程没有节拍器，画面完全跟着 CDN 分块抖动。
+                 * 修法：与上面 paced 分支同构的**有界追赶**——每帧至少间隔 1/(fps*PACE_CATCHUP_MAX)。
+                 * 127ms 的空档正好由 4 帧 × 33ms 填平，且 +100ms 的既有滞后提供了充裕余量，
+                 * 不会因为限速而让滞后越积越多。 */
                 s->video_skips++;
                 do_blit = 1;
+                if (s->fps > 0) {
+                    double min_gap = 1000.0 / ((double)s->fps * PACE_CATCHUP_MAX);
+                    double since = (now_seconds() - s->last_blit_at) * 1000.0;
+                    if (since < min_gap) {
+                        usleep((useconds_t)((min_gap - since) * 1000.0));
+                    }
+                }
             }
         }
         s->frames++;
@@ -1393,14 +2334,77 @@ static void *video_thread(void *arg) {
         /* render_paused：评论面板/系统UI覆盖时暂停 fb 输出（解码/位置/音频照常）。
          * 根因（2026-09-24 真机三现象钉死）：视频矩形像素归 blit（33ms 写两块）专属，
          * 任何 UI 覆盖都会与其交替抢帧（弹幕层/评论面板/下拉控制中心均闪；暂停后不闪=blit 停）。 */
-        if (do_blit && !s->render_paused && fb_blit(buf, s->rect_x, s->rect_y, s->rect_w, s->rect_h) != 0) {
-            set_error(s, "framebuffer 写入失败");
-            s->state = ST_ERROR;
-            return NULL;
+        if (do_blit && !s->render_paused) {
+            double f_t0 = now_seconds();
+            int wr = fb_write_stream(s->au_buf, au_n,
+                    s->rect_x, s->rect_y, s->rect_w, s->rect_h, &s->stop_flag);
+            double f_dt = (now_seconds() - f_t0) * 1000.0;
+            d_fifo += f_dt;
+            if (f_dt > d_maxfifo) d_maxfifo = f_dt;
+            if (wr != 0) {
+                /* 注意：v3.0.0 起 KMS 分支下 fb_blit 是空操作，真正的出画在 fb_write_stream。 */
+                if (s->stop_flag) break;
+                set_error(s, "视频显示链断开");
+                s->state = ST_ERROR;
+                return NULL;
+            }
+            {
+                double nowd = now_seconds();
+                if (d_last_au > 0) {
+                    double gap = (nowd - d_last_au) * 1000.0;
+                    if (gap > d_maxgap) d_maxgap = gap;
+                }
+                d_last_au = nowd;
+                d_n++;
+            }
+        }
+        /* 每秒落一行节奏诊断（上限 300 行）。默认关闭，只在
+         * `export PENBILI_VID_DIAG=1` 后启用 —— 排查「上屏卡顿」时再打开，
+         * 免得日常播放每秒一次 open/write/close。 */
+        if (d_lines < 300 && now_seconds() - d_t0 >= 1.0) {
+            int dfd = getenv("PENBILI_VID_DIAG") ? open("/tmp/vp_vid.log", O_WRONLY | O_CREAT | O_APPEND, 0644) : -1;
+            if (dfd >= 0) {
+                char dl[220];
+                int dl_n = snprintf(dl, sizeof(dl),
+                        "t=%.1f n=%ld fps=%d wait=%.0f maxwait=%.0f wgap=%.0f "
+                        "rdgap=%.0f augap=%.0f fifo=%.0f maxfifo=%.0f sk=%ld drift=%ld "
+                        "aulen=%lu st=%s\n",
+                        now_seconds() - d_t0, d_n, s->fps, d_wait, d_maxwait, d_maxgap,
+                        d_maxrdgap, d_maxaugap, d_fifo, d_maxfifo, s->video_skips,
+                        s->last_drift_ms, (unsigned long)s->au_len, state_name(s->state));
+                if (dl_n > 0) (void)!write(dfd, dl, (size_t)dl_n);
+                close(dfd);
+            }
+            d_lines++;
+            d_t0 = now_seconds();
+            d_n = 0;
+            d_wait = 0;
+            d_maxwait = 0;
+            d_maxgap = 0;
+            d_fifo = 0;
+            d_maxfifo = 0;
+            d_maxrdgap = 0;
+            d_maxaugap = 0;
+        }
+        /* 该 AU 已送出：从累积缓冲里消费掉，继续切下一帧 */
+        au_consume(s, au_n);
+        s->au_bytes += (long)au_n;
+        au_n = 0;
+        au_ready = 0;
+        if (s->video_eof && s->au_len == 0) {
+            /* 尾帧已送出且无残留 → 源正常结束（不是断流，不能走重连） */
+            eof_done = 1;
+            break;
         }
     }
 
     if (s->stop_flag) return NULL;
+
+    if (eof_done) {
+        s->state = ST_ENDED;
+        if (s->duration_ms > 0) s->position_ms = s->duration_ms;
+        return NULL;
+    }
 
     if (failed && (s->ever_played || s->resync_timeout) && s->video_retries < 5 &&
         s->audio_input[0] && s->audio_enabled && s->audio_alive && s->duration_ms > 0 &&
@@ -1680,6 +2684,10 @@ static void session_reset(struct session *s) {
     s->state = ST_IDLE;
     s->has_session = 0;
     s->frames = 0;
+    /* v3.0.0：AU 累积缓冲跨会话必须清空，否则上一段流的残字节会被当成本段首帧前缀 */
+    s->au_len = 0;
+    s->au_bytes = 0;
+    s->video_eof = 0;
     s->audio_bytes = 0;
     s->audio_dropped = 0;
     s->has_audio = 0;
@@ -1789,6 +2797,7 @@ static int session_start(struct session *s, long start_ms, int with_audio, const
     /* A/V 起播门基准：每次 open/seek 重启复位（必须早于 video_thread 创建） */
     s->video_first_frame = 0;
     s->gate_passed = 0;
+    s->last_pace_at = now_seconds();
     s->last_blit_at = now_seconds();
     s->gate_wait_ms = 0;
 
@@ -2034,7 +3043,16 @@ static JSValue js_open(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
     s->rect_w = w;
     s->rect_h = h;
     s->fps = fps;
+    g_rd.fps = fps; /* KMS caps framerate（仅影响首帧建链，不参与节拍） */
+    g_rd.rx = -1;   /* 新会话：矩形可能变了，首帧重建链 */
+    g_rd.ry = -1;
     s->transpose = (transpose == 2) ? 2 : 1;
+    /* v3.0.1 致命修复：render_start() 读的是 g_rd.transpose，而这里以前只写 s->transpose
+     * → g_rd.transpose 恒为初值 0 → rotation_for_transpose(0) 恒走默认分支 = 270，
+     * 于是「用户反馈画面上下倒置」时把映射表从 270 改 90 的动作**完全没生效**
+     * （真机 ps 可见 gst 命令行仍是 rotation=270，实证）。两处必须同步。
+     * 另外把 transpose=3（180°）也透传，别再被折叠成 1。 */
+    g_rd.transpose = (transpose == 2) ? 2 : (transpose == 3 ? 3 : 1);
     s->duration_ms = durationMs > 0 ? durationMs : 0;
     s->frame_valid = 0;
     s->state = ST_PLAYING;
@@ -2164,7 +3182,7 @@ static JSValue js_status(JSContext *ctx, JSValueConst this_val, int argc, JSValu
     mk_bool(ctx, "audioIsBt", s->audio_is_bt, res);
     mk_str(ctx, "audioDevice", s->audio_dev[0] ? s->audio_dev : NULL, res);
     mk_bool(ctx, "frameValid", s->frame_valid, res);
-    mk_int(ctx, "fbBuffers", g_fb.buffers, res);
+    mk_int(ctx, "fbBuffers", fb_buffers_reported(), res);
     mk_int(ctx, "fbCurrentBuffer", fb_current_buffer(), res);
     mk_int(ctx, "pid", (long)s->ff_pid, res);
     mk_str(ctx, "error", s->error[0] ? s->error : NULL, res);
@@ -2323,6 +3341,8 @@ static JSValue js_info(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
     mk_int(ctx, "fbVirtualWidth", vsize[0], res);
     mk_int(ctx, "fbVirtualHeight", vsize[1], res);
     mk_int(ctx, "fbMapped", g_fb.map ? 1 : 0, res);
+    mk_int(ctx, "renderBackend", g_rd.kms ? 1 : 0, res); /* 1 = KMS overlay plane */
+    mk_int(ctx, "renderPlane", g_rd.kms ? KMS_PLANE_ID : 0, res);
     mk_str(ctx, "ffmpeg", FFMPEG_PATH, res);
     mk_str(ctx, "aplay", APLAY_PATH, res);
     return res;
