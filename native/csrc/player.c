@@ -201,6 +201,12 @@ static void raise_audio_thread_prio(void); /* 定义在 RING 水位区（feeder 
 #define APLAY_LOG_PATH "/tmp/vp_aplay.log"
 #define TREND_LOG_PATH "/tmp/vp_trend.log" /* v2.9.4 直播长跑趋势落盘（约 1 行/秒；不依赖 JS/屏幕状态） */
 
+/* v3.0.1：判断「视频平面是否真的在扫帧」，给音频起播门用（修「先声后画」）。
+ * 定义放在常量区之后、render_* 之前；实现见 fb_write_stream 上方。 */
+static double now_seconds(void);
+static int kms_video_active(void);
+static int wait_kms_video(double max_ms);
+
 #define ST_IDLE 0
 #define ST_PLAYING 1
 #define ST_PAUSED 2
@@ -619,6 +625,53 @@ static int fb_open(void) {
 /* v3.0.0：把一段压缩字节写进 FIFO（建链按需、矩形变了就重建）。
  * 返回 0 = 已写出；-1 = 失败（调用方按"显示链断开"处理）；1 = stop_flag 中止。
  * 注意：这里**不再有帧尺寸概念**，w/h 只用于算 render-rectangle。 */
+/* 视频平面是否真的在扫帧（v3.0.1）。
+ * 为什么要这个：`video_first_frame` 以前在 `fb_write_stream()` **之前**就置 1，于是音频起播门
+ * 立刻放行开写；而此时首帧才刚进 FIFO，gst-launch 还在 PREROLL + 首帧解码，KMS 平面要几百毫秒
+ * 后才有画面 → 用户听到的就是「先出声、后出画」。
+ * 直接读 rockchip 的 DRM summary 判 `Esmart1-win0`（plane 76）是否 ACTIVE 且 buf[0].addr 非 0，
+ * 这是「画面真的在扫」的权威信号，比拍脑袋 sleep 一个固定时长可靠。 */
+#define KMS_SUMMARY_PATH "/sys/kernel/debug/dri/0/summary"
+#define KMS_VIDEO_WIN "Esmart1-win0"
+
+static int kms_video_active(void) {
+    char buf[8192];
+    char *p;
+    int fd;
+    ssize_t n;
+    int active = 0;
+    fd = open(KMS_SUMMARY_PATH, O_RDONLY);
+    if (fd < 0) return 1; /* 读不到就当已上屏，别把起播卡死 */
+    n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) return 1;
+    buf[n] = '\0';
+    p = strstr(buf, KMS_VIDEO_WIN);
+    if (!p) return 0;
+    /* 该窗口的块到下一个 "win_id:" 或文件尾为止 */
+    {
+        char *end = strstr(p + 1, "win_id:");
+        size_t len = end ? (size_t)(end - p) : strlen(p);
+        char blk[1024];
+        if (len >= sizeof(blk)) len = sizeof(blk) - 1;
+        memcpy(blk, p, len);
+        blk[len] = '\0';
+        if (!strstr(blk, "ACTIVE")) return 0;
+        if (!strstr(blk, "buf[0]: addr: 0x0000000000000000")) active = 1;
+    }
+    return active;
+}
+
+/* 等首帧真正落到 KMS 平面（最多 max_ms）。返回 1 = 已上屏，0 = 超时。 */
+static int wait_kms_video(double max_ms) {
+    double t0 = now_seconds();
+    while (now_seconds() - t0 < max_ms / 1000.0) {
+        if (kms_video_active()) return 1;
+        usleep(10000);
+    }
+    return kms_video_active();
+}
+
 static int fb_write_stream(const unsigned char *data, size_t n, int x, int y, int w, int h,
                            const volatile int *stop) {
     int attempt;
@@ -2311,9 +2364,6 @@ static void *video_thread(void *arg) {
         s->stall_resyncs = 0; /* v2.1.0：有新帧 = 空转期重同步成功/视频链恢复 → 计数清零 */
         s->position_ms = s->video_base_ms + (long)((double)s->frames * 1000.0 / (double)s->fps);
         s->frame_valid = 1;
-        /* 帧已产出：放行音频起播门（重启后的首帧也算产出——门只关心视频链路活着）。
-         * v2.1.0 起滞后帧也逐帧贴屏（平滑快进），故 last_blit_at 每帧刷新、不会误报停帧。 */
-        s->video_first_frame = 1;
         if (s->resyncing) {
             /* 重启后首帧（v2.1.2）：用**残余漂移**反馈修正 lead —— 这才是正确观测量。
              * 重启耗时 Δ 本身不可预知，且落点误差 = Δ − lead_used；直接测 Δ 赋值会残留
@@ -2357,6 +2407,10 @@ static void *video_thread(void *arg) {
                 d_last_au = nowd;
                 d_n++;
             }
+            /* v3.0.1：**首帧真正写进 FIFO 之后**才放行音频起播门。以前这句在写之前，
+             * 音频立刻开写、而 gst-launch 还要 PREROLL + 解码首帧，用户听到「先声后画」。
+             * v2.1.0 起滞后帧也逐帧贴屏（平滑快进），故 last_blit_at 每帧刷新、不会误报停帧。 */
+            s->video_first_frame = 1;
         }
         /* 每秒落一行节奏诊断（上限 300 行）。默认关闭，只在
          * `export PENBILI_VID_DIAG=1` 后启用 —— 排查「上屏卡顿」时再打开，
@@ -2598,6 +2652,11 @@ static void *audio_writer_thread(void *arg) {
         while (!s->stop_flag && !s->video_first_frame && now_seconds() - gate_t0 < 15.0) {
             usleep(20000);
         }
+        /* v3.0.1：首帧写进 FIFO ≠ 画面已经上屏。gst-launch 还要 PREROLL + 解首帧 +
+         * kmssink 拿到 buffer，实测有几百毫秒空档，音频若此刻开写就是「先声后画」。
+         * 这里再等 KMS 平面真的 ACTIVE 且有 buffer（最多 1.2s，超时照样放行——
+         * 不能让读不到 debugfs 的设备永远没声音）。 */
+        if (s->video_first_frame && !s->stop_flag) wait_kms_video(1200.0);
         s->gate_wait_ms = (now_seconds() - gate_t0) * 1000.0;
         if (!s->video_first_frame) s->last_blit_at = now_seconds();
         s->gate_passed = 1; /* 门结束（放行即判据切换）：巡检从此刻起才有裁决权 */

@@ -256,11 +256,11 @@
             <div
               v-for="f in favFolders"
               :key="'f' + f.id"
-              :class="f.has ? 'favrow favrow-on' : 'favrow'"
+              :class="f.has ? 'favrow-sel' : 'favrow'"
               @click="onFavPick(f)"
             >
-              <text :class="f.has ? 'favrow-name favrow-name-on' : 'favrow-name'">{{ f.title }}</text>
-              <text :class="f.has ? 'favrow-count favrow-count-on' : 'favrow-count'">{{ f.count }}</text>
+              <text :class="f.has ? 'favrow-name-sel' : 'favrow-name'">{{ f.title }}</text>
+              <text :class="f.has ? 'favrow-count-sel' : 'favrow-count'">{{ f.count }}</text>
             </div>
             <text v-if="favStatus" class="side-status">{{ favStatus }}</text>
           </scroller>
@@ -1586,16 +1586,26 @@ export default {
         logWarn('[bili] fav deal fail stage=' + r.stage + ' code=' + r.code);
         return;
       }
-      // 用户要求 m09254：点击后该收藏夹行**变粉**（favrow-on）+ **数量 +1**，作为添加成功的反馈。
-      // f.has 决定 class（模板已绑 favrow/favrow-on），f.count 是行尾数字，两者都要动。
-      // 用 $set 确保 Vue 2 能侦测到变化。
+      // 用户要求 m09254：点击后该收藏夹行**变粉**（favrow-sel）+ **数量 +1**，作为添加成功的反馈。
+      // 真机踩坑：falcon 的 QuickJS 运行时里 `this.$set(obj, k, v)` **不会触发重渲染**
+      // （实测点了 4 次，日志 n 每次都 +1，但屏幕上的数字和背景色一直不动；
+      //  只有退出再进覆盖层、重新 fetch 整个列表后数字才变）。
+      // 所以这里改成**替换整个数组**（不可变更新）——引用变了，v-for 必然重渲染。
       const on = !f.has;
-      this.$set(f, 'has', on);
-      this.$set(f, 'count', Math.max(0, (Number(f.count) || 0) + (on ? 1 : -1)));
+      this.favFolders = this.favFolders.map((x) => {
+        if (x.id !== f.id) return x;
+        return {
+          id: x.id,
+          title: x.title,
+          count: Math.max(0, (Number(x.count) || 0) + (on ? 1 : -1)),
+          isDefault: x.isDefault,
+          has: on
+        };
+      });
       this.act.fav = this.favFolders.some((x) => x.has);
       this.act.favCount = Math.max(0, (this.act.favCount || 0) + (on ? 1 : -1));
       this.favStatus = (on ? '已加入「' : '已移出「') + f.title + '」';
-      logWarn('[bili] fav ' + (on ? 'add' : 'del') + ' id=' + f.id + ' n=' + f.count);
+      logWarn('[bili] fav ' + (on ? 'add' : 'del') + ' id=' + f.id);
     },
 
     /* ---------- 可拖动进度条 ---------- */

@@ -651,7 +651,13 @@
   height: 232px;
 }
 
-/* 收藏夹列表行 */
+/* 收藏夹列表行。
+ * 真机踩坑两条（都很反直觉，别改回去）：
+ * 1) **不能用逗号选择器**。`.favrow, .favrow-on { ... }` 编译后 favrow-on 的属性块是**空的**
+ *    （falcon 的 styler 只认单选择器），表现为「类挂上了但样式没生效」。
+ * 2) **不能让一个元素同时命中 .favrow 与 .favrow-on**（`'favrow favrow-on'` 的写法）。
+ *    同特异性下 falcon 取**先定义**的那条，背景色永远是 .favrow 的。
+ * 所以这里两条规则各自完整、类名互斥，模板里二选一挂（选中态用 .favrow-sel）。 */
 .favrow {
   width: 432px;
   height: 42px;
@@ -668,12 +674,28 @@
   background-color: rgba(255, 255, 255, 0.08);
 }
 
+/* 已加入该收藏夹：整行变品牌粉（用户要求 m09254 的「点击后变粉」反馈） */
+.favrow-sel {
+  width: 432px;
+  height: 42px;
+  margin-left: 8px;
+  margin-top: 8px;
+  flex-direction: row;
+  align-items: center;
+  padding-left: 12px;
+  padding-right: 12px;
+  border-radius: 8px;
+  border-width: 1px;
+  border-color: @accent;
+  background-color: @accent;
+}
+
 .favrow:active {
   opacity: 0.7;
 }
 
-.favrow-on {
-  background-color: @accent;
+.favrow-sel:active {
+  opacity: 0.7;
 }
 
 .favrow-name {
@@ -686,8 +708,14 @@
   text-overflow: ellipsis;
 }
 
-.favrow-name-on {
+.favrow-name-sel {
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0px;
+  font-size: 13px;
   color: #ffffff;
+  lines: 1;
+  text-overflow: ellipsis;
 }
 
 .favrow-count {
@@ -695,7 +723,8 @@
   color: @text-color-dim;
 }
 
-.favrow-count-on {
+.favrow-count-sel {
+  font-size: 11px;
   color: #ffffff;
 }
 
