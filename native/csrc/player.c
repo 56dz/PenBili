@@ -721,17 +721,21 @@ static int render_start(int x, int y, int w, int h) {
          *
          * 排查开关：/tmp/vp_nosync.on → sync=false（回退对照）。 */
         {
-            /* gst-launch 把所有 argv 用空格拼成一条管线，所以属性可以整段塞进一个
-             * argv；但 video-sink 的值本身带空格，必须用双引号包住才不会被拆成多个
-             * 元素。 */
-            char sp[320];
-            snprintf(sp, sizeof(sp),
-                    "plane-id=" KMS_ID_STR " driver-name=rockchip %s max-lateness=-1 qos=false "
-                    "force-aspect-ratio=false %s",
-                    access("/tmp/vp_nosync.on", F_OK) == 0 ? "sync=false" : "sync=true", rect);
+            /* ⚠️ 坑（真机踩过，代价是整屏没画面）：gst-launch 会把**含空格的 argv
+             * 元素整段加引号**。曾把 `plane-id=76 driver-name=rockchip sync=true ...`
+             * 拼成一个 argv 传进去，结果 gst 报
+             *   could not set property "plane-id" ... to "76 driver-name=rockchip ..."
+             * 即所有属性被当成 plane-id 的值 → 管线构建失败 → 只剩音频在响。
+             * 所以：**普通属性必须一个 argv 一个**；只有 video-sink 这种"值本身带
+             * 空格"的属性才故意拼成带引号的单段（那是 gst 语法要求）。 */
+            char sync[24];
+            snprintf(sync, sizeof(sync), "sync=%s",
+                    access("/tmp/vp_nosync.on", F_OK) == 0 ? "false" : "true");
             if (access("/tmp/vp_fps.on", F_OK) == 0) {
                 char vs[400];
-                snprintf(vs, sizeof(vs), "video-sink=\"kmssink %s\"", sp);
+                snprintf(vs, sizeof(vs),
+                        "video-sink=\"kmssink plane-id=" KMS_ID_STR " driver-name=rockchip %s "
+                        "max-lateness=-1 qos=false force-aspect-ratio=false %s\"", sync, rect);
                 argv[i++] = (char *)"fpsdisplaysink";
                 argv[i++] = (char *)"signal-fps-measurements=true";
                 argv[i++] = (char *)"fps-update-interval=1000";
@@ -739,7 +743,13 @@ static int render_start(int x, int y, int w, int h) {
                 argv[i++] = strdup(vs);
             } else {
                 argv[i++] = (char *)"kmssink";
-                argv[i++] = strdup(sp);
+                argv[i++] = (char *)"plane-id=" KMS_ID_STR;
+                argv[i++] = (char *)"driver-name=rockchip";
+                argv[i++] = strdup(sync);
+                argv[i++] = (char *)"max-lateness=-1";
+                argv[i++] = (char *)"qos=false";
+                argv[i++] = (char *)"force-aspect-ratio=false";
+                argv[i++] = rect;
             }
         }
         argv[i] = NULL;
