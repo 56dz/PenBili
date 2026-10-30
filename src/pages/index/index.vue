@@ -43,8 +43,11 @@
       </div>
     </div>
 
-    <!-- 图文态左栏：纯图标工具条（评论开关） -->
-    <div v-else class="ibar">
+    <!-- 图文态左栏：纯图标工具条（评论开关）。
+         注意这里必须写 v-else-if="mode === 'article'"，**不能写 v-else**：
+         上面的兄弟节点条件是 v-if="mode === 'play'"，v-else 会接住所有非 play 的
+         情况（包括 mode === 'browse'），于是首页也会渲染出返回箭头和评论图标。 -->
+    <div v-else-if="mode === 'article'" class="ibar">
       <div class="ibtn" @click="onIbarBack">
         <image class="ibtn-icon" :src="ic.back" :width="26" :height="26"></image>
       </div>
