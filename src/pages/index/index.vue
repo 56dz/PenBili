@@ -173,29 +173,21 @@
           <text class="mine-sec">视频调节</text>
         </div>
         <div class="mine-row" @click="onCycleVideoQuality">
-          <text class="mine-label">分辨率</text>
+          <text class="mine-label">画质</text>
           <text class="mine-value">{{ vqText() }} ›</text>
-        </div>
-        <div class="mine-row" @click="onCycleVideoFps">
-          <text class="mine-label">帧率</text>
-          <text class="mine-value">{{ vfText() }} ›</text>
         </div>
         <div class="mine-secrow">
           <text class="mine-sec">直播</text>
         </div>
         <div class="mine-row" @click="onCycleLiveQuality">
-          <text class="mine-label">分辨率</text>
+          <text class="mine-label">画质</text>
           <text class="mine-value">{{ lqText() }} ›</text>
-        </div>
-        <div class="mine-row" @click="onCycleLiveFps">
-          <text class="mine-label">刷新率</text>
-          <text class="mine-value">{{ lfText() }} ›</text>
         </div>
         <div class="mine-row">
           <text class="mine-label">取流方式</text>
           <text class="mine-value">本地直连 · 芯片硬解</text>
         </div>
-        <text class="mine-notice">点分辨率/帧率可逐项切换。直播由本机 MPP 硬解，不经云端转码；未登录时服务端最高只给 480p。</text>
+        <text class="mine-notice">点画质行可逐项切换（分辨率与帧率合一，不会出现服务端不存在的组合）。直播由本机 MPP 硬解，不经云端转码；未登录时服务端最高只给 480p。</text>
         <div class="mine-secrow">
           <text class="mine-sec">播放历史（{{ history.length }}）</text>
         </div>
@@ -213,7 +205,7 @@
         </div>
         <div class="mine-row">
           <text class="mine-label">PenBili</text>
-          <text class="mine-value">v3.2.0 · {{ profile ? '已登录' : '匿名' }}</text>
+          <text class="mine-value">v3.3.0 · {{ profile ? '已登录' : '匿名' }}</text>
         </div>
       </scroller>
 
@@ -482,16 +474,12 @@ import * as player from '../../services/player.js';
 import {
   DEFAULT_VIDEO_SETTINGS,
   VIDEO_QUALITY_OPTIONS,
-  VIDEO_FPS_OPTIONS,
   LIVE_QUALITY_OPTIONS,
-  LIVE_FPS_OPTIONS,
   loadVideoSettings,
   saveVideoSettings,
   nextOptionId,
   videoQualityLabel,
-  videoFpsLabel,
-  liveQualityLabel,
-  liveFpsLabel
+  liveQualityLabel
 } from '../../services/video_settings.js';
 
 const TABS = [
@@ -623,7 +611,9 @@ export default {
       // 点输入框唤起系统输入法回填文本，点右侧「发送」按钮才真正提交）
       cinText: '',
       /* 「我的 → 视频调节 / 直播」设置（services/video_settings.js）。
-       * 注意 falcon 没有原生 <select>，用「点击轮转下一个选项」交互（nextOptionId）。 */
+       * 注意 falcon 没有原生 <select>，用「点击轮转下一个选项」交互（nextOptionId）。
+       * v3.3.0 起分辨率与帧率合并为单一画质档（如 '1080p 60fps'），
+       * 因为 B 站的 qn 编码本身就把两者绑在一起，360p/480p 根本没有 60fps 档。 */
       videoSettings: DEFAULT_VIDEO_SETTINGS
     };
   },
@@ -2151,13 +2141,6 @@ export default {
       await saveVideoSettings(this.videoSettings);
       logWarn('[bili] videoQuality → ' + this.videoSettings.videoQuality);
     },
-    async onCycleVideoFps() {
-      this.videoSettings = Object.assign({}, this.videoSettings, {
-        videoFps: nextOptionId(VIDEO_FPS_OPTIONS, this.videoSettings.videoFps)
-      });
-      await saveVideoSettings(this.videoSettings);
-      logWarn('[bili] videoFps → ' + this.videoSettings.videoFps);
-    },
     async onCycleLiveQuality() {
       this.videoSettings = Object.assign({}, this.videoSettings, {
         liveQuality: nextOptionId(LIVE_QUALITY_OPTIONS, this.videoSettings.liveQuality)
@@ -2165,27 +2148,14 @@ export default {
       await saveVideoSettings(this.videoSettings);
       logWarn('[bili] liveQuality → ' + this.videoSettings.liveQuality);
     },
-    async onCycleLiveFps() {
-      this.videoSettings = Object.assign({}, this.videoSettings, {
-        liveFps: nextOptionId(LIVE_FPS_OPTIONS, this.videoSettings.liveFps)
-      });
-      await saveVideoSettings(this.videoSettings);
-      logWarn('[bili] liveFps → ' + this.videoSettings.liveFps);
-    },
-    // 模板不能直接调模块函数 → 方法转发（四个 label）
+    // 模板不能直接调模块函数 → 方法转发（两个 label）
     // 名字刻意与导入的 videoQualityLabel 等不同：方法内直接调同名导入虽然也能解析到
     // 模块作用域，但读代码时极易误以为递归，改名规避歧义。
     vqText() {
       return videoQualityLabel(this.videoSettings);
     },
-    vfText() {
-      return videoFpsLabel(this.videoSettings);
-    },
     lqText() {
       return liveQualityLabel(this.videoSettings);
-    },
-    lfText() {
-      return liveFpsLabel(this.videoSettings);
     },
 
     /* ---------- 生命周期：后台/卸载与手动返回共用同一停止路径 ---------- */

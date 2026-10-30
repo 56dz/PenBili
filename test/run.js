@@ -114,18 +114,41 @@ async function main() {
   test('video_settings: 默认值与脏数据归一', () => {
     const d = vsMod.DEFAULT_VIDEO_SETTINGS;
     assert.strictEqual(d.videoQuality, 'auto');
-    assert.strictEqual(d.videoFps, 'auto');
-    assert.strictEqual(d.liveQuality, '480p');
-    assert.strictEqual(d.liveFps, 'auto');
+    assert.strictEqual(d.liveQuality, '480p30');
+    assert.strictEqual(d.version, 2);
+    // v3.3.0 起分辨率与帧率合并为单一画质档，旧的两个字段必须已不存在
+    assert.strictEqual(d.videoFps, undefined);
+    assert.strictEqual(d.liveFps, undefined);
     // 脏数据一律退回默认，绝不让一条坏记录把播放搞挂
     assert.deepStrictEqual(vsMod.normalizeVideoSettings(null), d);
     assert.deepStrictEqual(vsMod.normalizeVideoSettings('x'), d);
-    assert.deepStrictEqual(vsMod.normalizeVideoSettings({ videoQuality: '4k' }).videoQuality, 'auto');
-    assert.deepStrictEqual(vsMod.normalizeVideoSettings({ videoFps: '120' }).videoFps, 'auto');
-    assert.deepStrictEqual(vsMod.normalizeVideoSettings({ liveQuality: '1080p' }).liveQuality, '480p');
+    assert.deepStrictEqual(vsMod.normalizeVideoSettings({ version: 2, videoQuality: '4k' }).videoQuality, 'auto');
+    assert.deepStrictEqual(vsMod.normalizeVideoSettings({ version: 2, liveQuality: '1080p' }).liveQuality, '480p30');
     // 合法值保留
-    const ok = vsMod.normalizeVideoSettings({ videoQuality: '720p', videoFps: '30', liveQuality: '720p', liveFps: '30' });
-    assert.deepStrictEqual([ok.videoQuality, ok.videoFps, ok.liveQuality, ok.liveFps], ['720p', '30', '720p', '30']);
+    const ok = vsMod.normalizeVideoSettings({ version: 2, videoQuality: '720p30', liveQuality: '720p60' });
+    assert.deepStrictEqual([ok.videoQuality, ok.liveQuality], ['720p30', '720p60']);
+  });
+  test('video_settings: 每个画质档都自带 fpsCap，不存在「360p + 60fps」这种服务端没有的组合', () => {
+    for (const q of vsMod.VIDEO_QUALITY_OPTIONS) {
+      assert.strictEqual(typeof q.fpsCap, 'number', q.id + ' 缺 fpsCap');
+      assert.ok(q.maxPixels > 0, q.id + ' 缺 maxPixels');
+      assert.ok(Array.isArray(q.ladder) && q.ladder.length > 0, q.id + ' 缺 ladder');
+      // label 必须同时写明分辨率与帧率（用户要求「写为 1080p 60fps 这样的」），
+      // 只有 auto 档允许只写「自动（最高可用）」
+      assert.ok(q.id === 'auto' || /p\s*\d+fps/.test(q.label), q.id + ' 的 label 没写清分辨率+帧率：' + q.label);
+    }
+    for (const q of vsMod.LIVE_QUALITY_OPTIONS) {
+      assert.strictEqual(typeof q.fpsCap, 'number', q.id + ' 缺 fpsCap');
+      assert.ok(q.qn > 0, q.id + ' 缺 qn');
+      assert.ok(/p\s*\d+fps|自动/.test(q.label), q.id + ' 的 label 不明确：' + q.label);
+    }
+    // 480p/360p 只有 30fps 变体：必须锁 30，且阶梯里不能出现 60fps 专档（116/74）
+    const low = vsMod.VIDEO_QUALITY_OPTIONS.filter((q) => q.id === '480p30' || q.id === '360p30');
+    assert.strictEqual(low.length, 2);
+    for (const q of low) {
+      assert.strictEqual(q.fpsCap, 30, q.id + ' 必须锁 30fps');
+      assert.ok(q.ladder.indexOf(116) < 0 && q.ladder.indexOf(74) < 0, q.id + ' 阶梯里混进了 60fps 专档');
+    }
   });
   test('video_settings: nextOptionId 轮转（首尾闭合，未知 id 从头开始）', () => {
     const list = vsMod.VIDEO_QUALITY_OPTIONS;
@@ -135,40 +158,69 @@ async function main() {
     assert.strictEqual(vsMod.nextOptionId([], 'x'), 'x');
     assert.strictEqual(vsMod.nextOptionId(null, 'x'), 'x');
   });
-  test('video_settings: dashLadderFor —— auto 与旧行为一致，30fps 把 60fps 专档挪到末尾', () => {
-    // 默认（auto 分辨率 + auto 帧率）必须与硬解上线时的阶梯完全一致，否则是回归
-    assert.deepStrictEqual(vsMod.dashLadderFor(vsMod.DEFAULT_VIDEO_SETTINGS), [116, 80, 74, 32, 16]);
-    // 30fps：116/74 是 60fps 专档 → 排到末尾保底，30fps 档优先
-    assert.deepStrictEqual(
-      vsMod.dashLadderFor({ videoQuality: 'auto', videoFps: '30' }),
-      [80, 32, 16, 116, 74]
-    );
+  test('video_settings: dashLadderFor 直接取画质档自带阶梯（60fps 档已把 30fps 变体排前）', () => {
+    // 默认 auto：尽量高，60fps 专档在前
+    assert.deepStrictEqual(vsMod.dashLadderFor(vsMod.DEFAULT_VIDEO_SETTINGS), [116, 80, 74, 64, 32, 16]);
+    // 1080p30：30fps 变体 80 优先，116/74 留作保底（有些稿件只有 60fps 档）
+    assert.deepStrictEqual(vsMod.dashLadderFor({ version: 2, videoQuality: '1080p30' }), [80, 116, 74, 64, 32, 16]);
+    assert.deepStrictEqual(vsMod.dashLadderFor({ version: 2, videoQuality: '720p30' }), [64, 74, 32, 16]);
     // 分辨率档位收窄阶梯（360p 只留 16，保证不会偷偷拉高分辨率）
-    assert.deepStrictEqual(vsMod.dashLadderFor({ videoQuality: '360p' }), [16]);
-    assert.deepStrictEqual(vsMod.dashLadderFor({ videoQuality: '480p' }), [32, 16]);
-    assert.deepStrictEqual(vsMod.dashLadderFor({ videoQuality: '720p' }), [74, 64, 32, 16]);
+    assert.deepStrictEqual(vsMod.dashLadderFor({ version: 2, videoQuality: '360p30' }), [16]);
+    assert.deepStrictEqual(vsMod.dashLadderFor({ version: 2, videoQuality: '480p30' }), [32, 16]);
   });
   test('video_settings: fpsCap / pixelBudget / liveQn 与选项表一致', () => {
-    assert.strictEqual(vsMod.videoFpsCapFor({ videoFps: 'auto' }), 0);
-    assert.strictEqual(vsMod.videoFpsCapFor({ videoFps: '60' }), 0);
-    assert.strictEqual(vsMod.videoFpsCapFor({ videoFps: '30' }), 30);
-    assert.strictEqual(vsMod.pixelBudgetFor({ videoQuality: 'auto' }), 1920 * 1080);
-    assert.strictEqual(vsMod.pixelBudgetFor({ videoQuality: '720p' }), 1280 * 720);
-    assert.strictEqual(vsMod.pixelBudgetFor({ videoQuality: '360p' }), 640 * 360);
-    assert.strictEqual(vsMod.liveQnFor({ liveQuality: '480p' }), 150);
-    assert.strictEqual(vsMod.liveQnFor({ liveQuality: '720p' }), 250);
-    assert.strictEqual(vsMod.liveQnFor({ liveQuality: 'auto' }), 10000);
-    assert.strictEqual(vsMod.liveFpsCapFor({ liveFps: 'auto' }), 0);
-    assert.strictEqual(vsMod.liveFpsCapFor({ liveFps: '30' }), 30);
-    assert.strictEqual(vsMod.liveFpsCapFor({ liveFps: '60' }), 60);
+    assert.strictEqual(vsMod.videoFpsCapFor({ version: 2, videoQuality: 'auto' }), 0);
+    assert.strictEqual(vsMod.videoFpsCapFor({ version: 2, videoQuality: '1080p60' }), 0);
+    assert.strictEqual(vsMod.videoFpsCapFor({ version: 2, videoQuality: '1080p30' }), 30);
+    assert.strictEqual(vsMod.videoFpsCapFor({ version: 2, videoQuality: '720p30' }), 30);
+    assert.strictEqual(vsMod.pixelBudgetFor({ version: 2, videoQuality: 'auto' }), 1920 * 1080);
+    assert.strictEqual(vsMod.pixelBudgetFor({ version: 2, videoQuality: '720p60' }), 1280 * 720);
+    assert.strictEqual(vsMod.pixelBudgetFor({ version: 2, videoQuality: '360p30' }), 640 * 360);
+    assert.strictEqual(vsMod.liveQnFor({ version: 2, liveQuality: '480p30' }), 150);
+    assert.strictEqual(vsMod.liveQnFor({ version: 2, liveQuality: '720p30' }), 250);
+    assert.strictEqual(vsMod.liveQnFor({ version: 2, liveQuality: 'auto' }), 10000);
+    assert.strictEqual(vsMod.liveFpsCapFor({ version: 2, liveQuality: '480p30' }), 30);
+    assert.strictEqual(vsMod.liveFpsCapFor({ version: 2, liveQuality: '720p60' }), 0);
+    assert.strictEqual(vsMod.liveFpsCapFor({ version: 2, liveQuality: 'auto' }), 0);
   });
   test('video_settings: label 转发与选项表一致（菜单直接展示）', () => {
-    assert.strictEqual(vsMod.videoQualityLabel({ videoQuality: '720p' }), '720p');
-    assert.strictEqual(vsMod.videoFpsLabel({ videoFps: '30' }), '30fps');
-    assert.strictEqual(vsMod.liveQualityLabel({ liveQuality: '480p' }), '480p（省流）');
-    assert.strictEqual(vsMod.liveFpsLabel({ liveFps: '60' }), '60fps');
+    assert.strictEqual(vsMod.videoQualityLabel({ version: 2, videoQuality: '720p60' }), '720p 60fps');
+    assert.strictEqual(vsMod.videoQualityLabel({ version: 2, videoQuality: '1080p30' }), '1080p 30fps');
+    assert.strictEqual(vsMod.liveQualityLabel({ version: 2, liveQuality: '480p30' }), '480p 30fps（省流）');
     // 脏值退回第一项的 label，不抛
-    assert.strictEqual(vsMod.videoQualityLabel({ videoQuality: 'zzz' }), vsMod.VIDEO_QUALITY_OPTIONS[0].label);
+    assert.strictEqual(vsMod.videoQualityLabel({ version: 2, videoQuality: 'zzz' }), vsMod.VIDEO_QUALITY_OPTIONS[0].label);
+  });
+  test('video_settings: v1 老记录（分辨率+帧率两字段）迁移到合并画质档', () => {
+    const mig = (vq, vf, lq, lf) => vsMod.normalizeVideoSettings({ version: 1, videoQuality: vq, videoFps: vf, liveQuality: lq, liveFps: lf });
+    // 常见组合逐个映射，且迁移后不再保留旧字段
+    const cases = [
+      [['auto', 'auto'], 'auto', '480p30'],
+      [['auto', '60'], '1080p60', '480p30'],
+      [['auto', '30'], '1080p30', '480p30'],
+      [['1080p', '60'], '1080p60', '480p30'],
+      [['1080p', '30'], '1080p30', '480p30'],
+      [['720p', 'auto'], '720p60', '480p30'],
+      [['720p', '30'], '720p30', '480p30'],
+      [['480p', 'auto'], '480p30', '480p30'],
+      // 老记录里能选出「360p + 60fps」这种服务端不存在的组合 → 必须收成 360p30
+      [['360p', '60'], '360p30', '480p30'],
+      [['360p', '30'], '360p30', '480p30']
+    ];
+    for (const [args, vq, lq] of cases) {
+      const r = mig(args[0], args[1]);
+      assert.strictEqual(r.videoQuality, vq, '迁移 ' + args.join('/') + ' → ' + r.videoQuality);
+      assert.strictEqual(r.liveQuality, lq, '迁移 ' + args.join('/') + ' live → ' + r.liveQuality);
+      assert.strictEqual(r.videoFps, undefined, '迁移后不该再有 videoFps');
+      assert.strictEqual(r.liveFps, undefined, '迁移后不该再有 liveFps');
+      assert.strictEqual(r.version, 2);
+    }
+    // 直播侧：老「720p + 60fps」迁移到 720p60，老「480p + 60fps」没有对应档 → 退 720p60
+    assert.strictEqual(mig('auto', 'auto', '720p', '60').liveQuality, '720p60');
+    assert.strictEqual(mig('auto', 'auto', '480p', '60').liveQuality, '720p60');
+    assert.strictEqual(mig('auto', 'auto', '720p', '30').liveQuality, '720p30');
+    assert.strictEqual(mig('auto', 'auto', 'auto', 'auto').liveQuality, 'auto');
+    // 认不出来的老组合一律落 auto，不能因为一条旧记录起不来
+    assert.strictEqual(vsMod.normalizeVideoSettings({ version: 1, videoQuality: '4k', videoFps: '144' }).videoQuality, 'auto');
   });
 
   const feedMod = await import('../src/services/feed.js');
