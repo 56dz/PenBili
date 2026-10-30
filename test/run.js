@@ -425,12 +425,15 @@ async function main() {
     assert.strictEqual(p.high_quality, 1);
     assert.strictEqual(p.fourk, 0);
     assert.ok(QN_LADDER.every((q) => q < 64));
-    // v2.6.1：durl 也只走 16——qn32 durl 实测 852×480(409K px) 超解码预算(310K)，再次压垮软解
+    // v2.6.1：durl 回退仍只走 16（单文件路径没有独立的硬解收益，保底即可）
     assert.deepStrictEqual(QN_LADDER, [16]);
-    // 发布阶梯仅保留已验证的 DASH id16(360p)，避免服务端不提供 240p 时额外多发一轮请求。
-    // 不提供 id32(480p)：弱设备上解码吞吐低于实时。
-    assert.deepStrictEqual(DASH_QN_LADDER, [16]);
-    assert.ok(DASH_QN_LADDER.every((q) => q < 32), '不得含 480p/720p');
+    // v3.1.3：DASH 阶梯改为高画质优先 + 显式请求 60fps 档。
+    // 硬解实测 1080p60+旋转实时仍 56.20fps/dropped 0，面板 59.88Hz 能吃下；
+    // 而 360p 在 240x427 物理窗口上糊得用户以为掉帧。
+    assert.deepStrictEqual(DASH_QN_LADDER, [116, 80, 74, 32, 16]);
+    assert.strictEqual(DASH_QN_LADDER[0], 116, '首选 1080P60');
+    assert.ok(DASH_QN_LADDER.indexOf(74) > 0, '阶梯含 720P60');
+    assert.strictEqual(DASH_QN_LADDER[DASH_QN_LADDER.length - 1], 16, '末档保底 360p');
     // DASH 参数集：fnval=16 且**不带 platform=html5**（服务端见 html5 强制降级 durl，真机回退日志坐实）
     const dp = buildPlayurlParams({ bvid: 'BV1ZCeb6NEyM', cid: 42, qn: 16, fnval: 16 });
     assert.strictEqual(dp.fnval, 16);
@@ -501,21 +504,26 @@ async function main() {
     assert.strictEqual(parseDashResponse({ ok: false, stage: 'transport', message: 'x' }).stage, 'transport');
     assert.strictEqual(parseDashResponse(null, 16).ok, false);
   });
-  test('playurl: DASH qn16 保持 360p 并优先 AVC', () => {
+  test('playurl: DASH 选流取预算内最高分辨率并优先 AVC', () => {
     const mk = (video) => ({ ok: true, code: 0, data: { timelength: 1000, dash: { video: video, audio: [{ id: 30216, bandwidth: 65000, baseUrl: 'https://a.bilivideo.com/a.m4s' }] } } });
     const v360 = { id: 16, width: 640, height: 360, bandwidth: 230000, codecs: 'avc1.64001E', baseUrl: 'https://a.bilivideo.com/v16.m4s' };
     const hevc360 = { id: 16, width: 640, height: 360, bandwidth: 90000, codecs: 'hvc1.1.6.L120.90', baseUrl: 'https://a.bilivideo.com/h16.m4s' };
     const v480 = { id: 32, width: 852, height: 480, bandwidth: 400000, codecs: 'avc1.64001F', baseUrl: 'https://a.bilivideo.com/v32.m4s' };
-    assert.deepStrictEqual(DASH_QN_LADDER, [16]);
-    const p = parseDashResponse(mk([v480, hevc360, v360]), 16, false);
+    const hevc480 = { id: 32, width: 852, height: 480, bandwidth: 200000, codecs: 'hvc1.1.6.L120.90', baseUrl: 'https://a.bilivideo.com/h32.m4s' };
+    // 同池有 480p 时**不能**退回 360p（软解时代的「取最小」策略已被硬解推翻）
+    const p = parseDashResponse(mk([v480, hevc480, hevc360, v360]), 80, false);
     assert.strictEqual(p.ok, true, p.message);
-    assert.strictEqual(p.qn, 16);
-    assert.strictEqual(p.width, 640);
-    assert.strictEqual(p.height, 360);
-    assert.strictEqual(p.codecs.indexOf('avc1'), 0);
-    assert.ok(p.avail.indexOf('16:640x360') >= 0, '诊断应包含实际 360p 档位');
-    assert.ok(p.avail.indexOf('32:852x480') >= 0, '诊断应包含服务端提供的高档位');
-    const onlyHevc = parseDashResponse(mk([hevc360]), 16, true);
+    assert.strictEqual(p.width, 852, '应选服务端给的最高分辨率');
+    assert.strictEqual(p.height, 480);
+    assert.strictEqual(p.codecs.indexOf('avc1'), 0, '同分辨率优先 avc1');
+    assert.ok(p.avail.indexOf('16:640x360') >= 0, '诊断应包含 360p 档位');
+    assert.ok(p.avail.indexOf('32:852x480') >= 0, '诊断应包含 480p 档位');
+    // 只有 360p 时仍能播（阶梯退到底也不至于失败）
+    const only360 = parseDashResponse(mk([hevc360, v360]), 80, false);
+    assert.strictEqual(only360.ok, true);
+    assert.strictEqual(only360.width, 640);
+    // requireAvc=1 且该池只有 HEVC → codec 错误，交调用方试下一档
+    const onlyHevc = parseDashResponse(mk([hevc360]), 80, true);
     assert.strictEqual(onlyHevc.ok, false);
     assert.strictEqual(onlyHevc.stage, 'codec');
   });
@@ -1634,7 +1642,10 @@ async function main() {
     w.client.fetchPlayurl = async () => ({ ok: true, code: 0, data: dashFx.data });
     const r = await openVideo(w, probeItem);
     assert.strictEqual(r.ok, true, r.message);
-    assert.strictEqual(r.session.qn, 16, 'DASH 阶梯首档 qn=16（640x360）即成功');
+    // v3.1.3：阶梯首档请求 qn=80，服务端（fixture）只给到 480p → 取预算内最高 852x480。
+    // 旧断言是 qn=16（软解时代死锁 360p），硬解落地后那属于画质损失。
+    // 注意 session.width/height 是**稿件显示尺寸**（view.dimension），不是流的解码尺寸。
+    assert.strictEqual(r.session.qn, 32, '应取服务端给的最高档 480p');
     assert.strictEqual(r.session.durationMs, 280128);
     const o = w.calls.open[0];
     assert.ok(o.input2 && o.input2.indexOf('https://') === 0, 'input2=' + o.input2);

@@ -13,9 +13,21 @@ import { buildSignedQuery } from './wbi.js';
 //   v2.6.1：durl 阶梯同样只走 16——qn32 durl 实测 852×480(409K px) 超解码预算(310K)，
 //   会把软解再次压到 1x 以下；qn16 durl = 640×360 真标清，稳。
 export const QN_LADDER = [16];
-/* 发布基线保持 DASH id16（360p）：本轮真机样本未提供 id6(240p)，不额外发起一轮取流请求。
- * 解析器仍优先选 avc1，并记录服务端实际档位；解码预算超限时继续走 durl 保底。 */
-export const DASH_QN_LADDER = [16];
+/* DASH 阶梯（v3.1.3 起改为**高画质优先**，并显式请求 60fps 档）。
+ *
+ * 历史包袱：v2.6.0~v3.1.2 这里是 [16]，理由是「软解 480p/720p 吞吐低于实时」。
+ * v3.0.0 换成 ffmpeg copy + mppvideodec 硬解后该理由失效，真机实测（2026-10-30，
+ * 同一段 8s 素材、fakesink、rotation=270）：
+ *   720p@60  实时 sync=true → 渲染 57.95fps dropped 0
+ *   1080p@60 实时 sync=true → 渲染 56.20fps dropped 0
+ * ⇒ 硬解余量充足，连 1080p60 带旋转都能跑满。面板本身是 480x960@59.88Hz，
+ * 所以 60fps 内容能真正呈现，不是白费。
+ *
+ * qn 编码（B站）：
+ *   116 = 1080P60（**60fps 档**）、80 = 1080P、74 = 720P60、64 = 720P、32 = 480P、16 = 360P
+ * 先请求 60fps 的高档，服务端不给就自动降级（未登录/无大会员时只给到 480P30）。
+ * 真正的档位上限由 MAX_DECODE_PIXELS 在解析层把关。 */
+export const DASH_QN_LADDER = [116, 80, 74, 32, 16];
 
 // 播放节拍帧率。html5 时代实测源 30fps；v2.5.1 降为 24：带弹幕（drawtext×4 逐帧渲染文字）
 // 的视频在 4×A53 上软解吞吐只有 ~88% 实时（2026-10-01 soak 实测 drift +107ms/s），
@@ -190,27 +202,34 @@ export function parseDashResponse(res, wantQn, requireAvc) {
   }
   const vids = dash.video || [];
   if (!vids.length) return { ok: false, stage: 'parse', hasDurl: false, message: 'dash.video 为空' };
-  /* 把服务端给的全部档位拼成诊断信息（id/宽x高/码率/编码），便于确认最终选流。 */
+  /* 把服务端给的全部档位拼成诊断信息（id/宽x高/码率/编码@帧率），便于确认最终选流。
+   * 帧率必须记：同一稿件的 360p 档常是 30fps，而 720p/1080p 档才是 60fps
+   * （源为 60fps 时低档会被服务端抽成 30fps）→ 用户观感「帧率低」其实是选档问题。 */
   const avail = vids
-    .map((x) => x.id + ':' + (x.width || '?') + 'x' + (x.height || '?') + '/' + Math.round((Number(x.bandwidth) || 0) / 1000) + 'k/' + String(x.codecs || '?').slice(0, 4))
+    .map((x) => x.id + ':' + (x.width || '?') + 'x' + (x.height || '?') + '/' + Math.round((Number(x.bandwidth) || 0) / 1000) + 'k/' + String(x.codecs || '?').slice(0, 4) + '@' + (x.frame_rate || '?'))
     .join(' ');
   const qn = Number(wantQn) || 0;
   let pool = qn ? vids.filter((x) => Number(x.id) === qn) : [];
   if (!pool.length) pool = vids.slice();
   const byBw = (a, b) => (Number(a.bandwidth) || 0) - (Number(b.bandwidth) || 0);
-  /* v2.6.0 关键修复：按**像素量**选 rendition（升序），码率只作同分辨率 tiebreak。
-   * 真机实证（2026-10-01 soak）：部分稿件 qn16/回退 rendition 实为 720p/1080p
-   * （High@L5.1），低动态场景码率可低于 360p 高动态 → 旧"按码率选"会选到 1080p，
-   * 4×A53 软解 CPU 100% 吞吐仅 93% → 音画线性漂移。像素量才是解码成本的决定项。 */
+  /* 选 rendition：**像素量降序**（大画面优先）→ 同分辨率**帧率高优先** → 再按码率升序。
+   *
+   * v2.6.0 曾反过来按像素升序取最小，那是软解时代的保命策略（1080p 在 4×A53 上只有
+   * 93% 实时吞吐）。硬解落地后它变成纯粹的画质损失：服务端在匿名态只给到 480p，而
+   * 「取最小」会连 480p 都不要、死锁在 360p，在 240x427 的物理窗口上糊得用户以为掉帧。
+   * 帧率必须参与排序：同一稿件可能同时给 1080P30(id=80) 与 1080P60(id=116)，而请求
+   * 阶梯里 116 失败后落到 80 时，池内还可能有 60fps 条目 —— 不按帧率排就会白白丢掉。
+   * 真正的上限由调用方按 MAX_DECODE_PIXELS 校验（超预算就试下一档阶梯）。 */
   const pxOf = (x) => (Number(x.width) || 0) * (Number(x.height) || 0);
-  const byPx = (a, b) => pxOf(a) - pxOf(b) || byBw(a, b);
+  const fpsOf = (x) => parseFloat(x.frame_rate) || 0;
+  const byPxDesc = (a, b) => pxOf(b) - pxOf(a) || fpsOf(b) - fpsOf(a) || byBw(a, b);
   const avc = pool.filter((x) => String(x.codecs || '').indexOf('avc1') === 0);
   /* 多档取流时，requireAvc=1 的中间档若没有 avc1 就返回 codec 错误，交由调用方试下一档；
-   * 最后一档可允许其他编码兜底，以保留可播放性。当前发布阶梯只有 id16。 */
+   * 最后一档可允许其他编码兜底，以保留可播放性。 */
   if (!avc.length && requireAvc) {
     return { ok: false, stage: 'codec', message: 'qn' + qn + ' 无 avc1 流', avail: avail };
   }
-  const pick = (avc.length ? avc : pool).slice().sort(byPx)[0];
+  const pick = (avc.length ? avc : pool).slice().sort(byPxDesc)[0];
   const videoUrl = pickStreamUrl(pick);
   if (!videoUrl) return { ok: false, stage: 'parse', hasDurl: false, message: 'dash.video 无可用 URL', avail: avail };
   const auds = (dash.audio || []).slice().sort(byBw);

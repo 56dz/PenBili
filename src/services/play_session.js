@@ -16,8 +16,16 @@ import { playVideoRects } from './screen.js';
 
 export const SEEK_STEP_MS = 20000;
 
-/* 软解时代的解码预算，仅保留给「硬解不可用时的降级」判断参考；硬解路径不看这个值。 */
-export const MAX_DECODE_PIXELS = 310000;
+/* 解码像素预算。**硬解时代已放到 1080p 全尺寸**。
+ *
+ * 历史：v2.6.0 设 310000（≈ 852x480 以下）是因为 4×A53 软解 720p/1080p 只有 93% 实时吞吐。
+ * v3.0.0 换成 ffmpeg 只 copy + gst mppvideodec 硬解后，这个限制就没有依据了。真机实测
+ * （2026-10-30，同一段 8s 素材、fakesink、rotation=270）：
+ *   480p@60  解码 3168ms → 渲染 58.12fps dropped 0
+ *   720p@60  解码 5271ms → 渲染 57.71fps dropped 0
+ *   1080p@60 解码 10347ms → 渲染 55.54fps dropped 0
+ * 即便 1080p60 带旋转也远超实时（且播放时 ffmpeg 不解码，只搬压缩包）。 */
+export const MAX_DECODE_PIXELS = 1920 * 1080;
 
 /* 直播：→ {ok, live:true, url, audioUrl:url, qn, cid, roomid, aid:0, durationMs:0,
  *          title, width, height, host, fps} | {ok:false, stage, code?, message}
