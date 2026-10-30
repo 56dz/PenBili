@@ -106,11 +106,13 @@ function call(fnName, args) {
 }
 
 // opts → native open() 位置参数（纯函数，单测覆盖顺序与钳制）
-// opts: { input, input2, startMs, durationMs, fps, audio, transpose, rect, audioDevice, userAgent, referer }
+// opts: { input, input2, startMs, durationMs, fps, audio, transpose, rect, audioDevice, userAgent, referer, fpsCap }
 // input2 = DASH 音频轨第二输入 URL（''/缺省 = 单文件）
+// fpsCap = 渲染帧率上限（0/缺省 = 不限；「我的 → 视频调节 / 直播」的帧率设置）
 export function buildOpenArgs(opts) {
   const o = opts || {};
   const rect = o.rect || { x: 0, y: 0, width: 0, height: 0 };
+  const cap = Math.round(Number(o.fpsCap) || 0);
   return [
     o.input,
     Math.max(0, Math.round(o.startMs || 0)),
@@ -125,11 +127,12 @@ export function buildOpenArgs(opts) {
     typeof o.audioDevice === 'string' ? o.audioDevice : '',
     typeof o.userAgent === 'string' ? o.userAgent : '',
     typeof o.referer === 'string' ? o.referer : '',
-    typeof o.input2 === 'string' ? o.input2 : ''
+    typeof o.input2 === 'string' ? o.input2 : '',
+    cap > 0 ? cap : 0
   ];
 }
 
-// opts: { input, input2, startMs, durationMs, fps, audio, transpose, rect, audioDevice, userAgent, referer }
+// opts: { input, input2, startMs, durationMs, fps, audio, transpose, rect, audioDevice, userAgent, referer, fpsCap }
 export async function openSession(opts) {
   const m = await getPlayerModule();
   if (!m) return fail('PLAYER_NATIVE_MISSING', '播放器模块不可用（未随包安装 libjsapi_player.so）');

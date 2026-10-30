@@ -7,16 +7,17 @@
 // 控制：toggle / seekBy(±20s) / readStatus / closeSession，全部幂等、结构化错误。
 //
 // 硬解（v3.0.0 / X6 Pro）：native 侧已从「ffmpeg 软解成 RGB 帧」改为「ffmpeg 只搬压缩包 +
-// gst mppvideodec 硬解上屏」。因此下面 MAX_DECODE_PIXELS 这类**软解时代的像素预算不再适用**
-// ——RK3562 的 MPP 硬解 720p 实测 33x 实时，1280×720 直播/高码率稿件都不再有压力。
-import { DASH_QN_LADDER, QN_LADDER, HTML5_FPS, buildPlayurlQuery, parseHtml5Response, parseDashResponse, validateStreamUrl } from './bili/playurl.js';
+// gst mppvideodec 硬解上屏」。软解时代的像素预算已由 pixelBudgetFor（用户设置）取代。
+import { QN_LADDER, HTML5_FPS, buildPlayurlQuery, parseHtml5Response, parseDashResponse, validateStreamUrl } from './bili/playurl.js';
 import { fetchLivePlayUrl, LIVE_FPS } from './bili/live.js';
 import { deriveMixinKey } from './bili/wbi.js';
 import { playVideoRects } from './screen.js';
+import { dashLadderFor, videoFpsCapFor, liveFpsCapFor, liveQnFor, pixelBudgetFor } from './video_settings.js';
 
 export const SEEK_STEP_MS = 20000;
 
-/* 解码像素预算。**硬解时代已放到 1080p 全尺寸**。
+/* 解码像素预算的历史默认值（= 1080p 全尺寸），保留导出供测试/诊断引用。
+ * 真正生效的预算现在来自「我的 → 视频调节 → 分辨率」（pixelBudgetFor）。
  *
  * 历史：v2.6.0 设 310000（≈ 852x480 以下）是因为 4×A53 软解 720p/1080p 只有 93% 实时吞吐。
  * v3.0.0 换成 ffmpeg 只 copy + gst mppvideodec 硬解后，这个限制就没有依据了。真机实测
@@ -38,7 +39,10 @@ export const MAX_DECODE_PIXELS = 1920 * 1080;
 export async function resolveLiveUrl(ctx, item) {
   const roomid = Number(item && item.roomid) || 0;
   if (!(roomid > 0)) return { ok: false, stage: 'param', message: '直播间号无效' };
-  const r = await fetchLivePlayUrl(ctx.client, roomid, { log: ctx.log });
+  const r = await fetchLivePlayUrl(ctx.client, roomid, {
+    log: ctx.log,
+    qn: liveQnFor(ctx.videoSettings)
+  });
   if (cancelled(ctx)) return { ok: false, stage: 'cancel', message: '已取消' };
   if (!r.ok) return r;
   return {
@@ -128,11 +132,13 @@ export async function resolveVideoUrl(ctx, item) {
   //   贴顶拖垮（音频卡顿根因，白噪对照实验已证链路清白）；视频选 avc1 避开 HEVC 软解。
   let last = null;
   let stop = false;
-  // DASH 阶梯 [6,16]：先试 240p（解码像素减半，254px 屏上只需 6% 上采样），没有则 360p。
-  // 最后一档允许非 avc1 兜底（保住"能播"）；前面的档位要求 avc1，避免退到 HEVC（软解解不动）。
-  const lastIdx = DASH_QN_LADDER.length - 1;
-  for (let i = 0; i < DASH_QN_LADDER.length; i++) {
-    const qn = DASH_QN_LADDER[i];
+  /* v3.2.0：qn 阶梯改由「我的 → 视频调节 → 分辨率/帧率」决定（见 services/video_settings.js）。
+   * 默认（auto + 自动帧率）与旧行为完全一致 [116,80,74,32,16]；用户选了 30fps 时
+   * 30fps 档会被提到前面（116/74 是 60fps 专档，先试它们等于白拉双倍码率）。 */
+  const ladder = dashLadderFor(ctx.videoSettings);
+  const lastIdx = ladder.length - 1;
+  for (let i = 0; i < ladder.length; i++) {
+    const qn = ladder[i];
     const built = buildPlayurlQuery({ bvid: item.bvid, cid: cid, qn: qn, fnval: 16 }, mixin, nowSec());
     if (!built.ok) return { ok: false, stage: 'param', message: built.message };
     const res = await ctx.client.fetchPlayurl(built.query);
@@ -155,15 +161,17 @@ export async function resolveVideoUrl(ctx, item) {
       if (ctx.log) ctx.log('[bili] dash 尝试失败 qn' + qn + ': URL ' + vv.reason);
       continue;
     }
-    // 解码预算硬校验（v2.6.0）：实测 230K 像素(360p) 软解吞吐 1.1~1.9x；部分稿件 rendition
-    // 实为 720p/1080p（High@L5.1，真机 CPU 100% 吞吐仅 93% 实证）→ 按实际像素拒载，
-    // 落到 durl 真 360p 单文件路径（DASH_QN_LADDER 走完后自然回退）。
+    // 解码预算硬校验：硬解时代上限已是 1080p 全尺寸，但用户可在「我的 → 视频调节」
+    // 里选更低的分辨率（省流/弱网），此时按所选档的上限拒载更高档，让阶梯继续降级。
+    // 注意 parseDashResponse 在池内按像素降序取最大，而 qn 池为空时会退回全量池 ——
+    // 所以这里必须再按实际宽高卡一次，否则「选 480p」仍可能拿到 1080p。
     const px = (parsed.width || 0) * (parsed.height || 0);
-    if (px > MAX_DECODE_PIXELS) {
+    const budget = pixelBudgetFor(ctx.videoSettings);
+    if (px > budget) {
       last = { stage: 'playurl', message: 'DASH 分辨率超解码预算' };
       if (ctx.log) {
         ctx.log('[bili] dash qn' + parsed.qn + ' ' + parsed.width + 'x' + parsed.height +
-          ' (' + px + 'px > ' + MAX_DECODE_PIXELS + ') 超解码预算 → 回退 durl 360p');
+          ' (' + px + 'px > ' + budget + ') 超解码预算 → 回退 durl 360p');
       }
       continue;
     }
@@ -246,19 +254,24 @@ export async function openVideo(ctx, item) {
   if (cancelled(ctx)) return { ok: false, stage: 'cancel', message: '已取消' };
   // 矩形按**稿件真实显示宽高**做信箱适配（竖屏 → 物理竖柱，不再被拉伸成横屏）
   const rects = playVideoRects(rs.width, rs.height);
+  /* 帧率上限（0 = 不限）：native 侧在 mppvideodec 之后插 videorate max-rate=N。
+   * 为什么必须有这道闸：部分稿件服务端**只给 60fps 档**（例如 1080P60），
+   * 光靠「请求 30fps 档」会直接落空；videorate 只做上限不插帧，低帧率内容直通。 */
+  const fpsCap = rs.live ? liveFpsCapFor(ctx.videoSettings) : videoFpsCapFor(ctx.videoSettings);
   const openRes = await ctx.player.openSession({
     input: rs.url,
     input2: rs.audioUrl || '', // DASH 音频轨第二输入（空 = durl 回退 / 直播单流路径）
     startMs: 0,
     durationMs: rs.durationMs, // 直播 = 0（时长未知）
-    fps: rs.fps || HTML5_FPS, // 直播 = 30（服务端 HLS 输出帧率）
+    fps: fpsCap > 0 ? Math.min(rs.fps || HTML5_FPS, fpsCap) : (rs.fps || HTML5_FPS),
     audio: true,
     transpose: 2,
     rect: rects.physical,
     /* '' = 自动：已连蓝牙耳机走 bluealsa，否则内置扬声器（player.c 的 detect_bt_pcm） */
     audioDevice: '',
     userAgent: ctx.mediaUa,
-    referer: ctx.mediaReferer
+    referer: ctx.mediaReferer,
+    fpsCap: fpsCap
   });
   if (!openRes || openRes.ok !== true) {
     return {

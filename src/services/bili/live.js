@@ -27,18 +27,21 @@ export const LIVE_PLAYINFO_URL =
 export const LIVE_FPS = 30;
 
 /* 取流参数。protocol=0,1 → http_stream + http_hls；format=0,1,2 → flv + ts + fmp4；
- * codec=0,1 → avc + hevc；ptype=8 → 网页端播放器形态（缺它会返回精简 playurl）。 */
-export function buildPlayInfoQuery(roomid) {
+ * codec=0,1 → avc + hevc；ptype=8 → 网页端播放器形态（缺它会返回精简 playurl）。
+ *
+ * qn 由「我的 → 直播 → 分辨率」决定（见 services/video_settings.js），默认 150（480p）。
+ * 为什么默认不是原画：笔端视频区只有 469x240，原画 1080p60 是纯浪费；更关键的是
+ * mppvideodec 的 rotation 让 1080p60 解码慢 2.89x（14.7MB 从 35s 变 101s），
+ * 直接卡成「一秒一卡」。480p 带旋转仍有约 13x 实时余量。
+ * 注意 qn 对**未登录**基本无效：实测 150/250/400/10000 四个值，服务端一律回 480p。 */
+export function buildPlayInfoQuery(roomid, qn) {
   const room = Math.floor(Number(roomid) || 0);
   if (!(room > 0)) return '';
+  const q = Math.floor(Number(qn) || 0);
+  const want = q > 0 ? q : 150;
   return (
     'room_id=' + room +
-    /* qn=150（480p）：笔端屏幕只有 480x960、视频区 432x240，原画是纯浪费。
-     * 真机实测（2026-10-30，已登录设备）：qn=10000 时服务端给 1920x1080@60 原画，
-     * 而 `mppvideodec rotation=270` 解 1080p60 比不带 rotation 慢 2.89x
-     * （14.7MB 从 35s 变 101s）→ 完全达不到实时 → 用户看到「一秒一卡」。
-     * 480p 即使带旋转也有约 13x 实时余量（640x360 实测 608ms / 8s 素材）。 */
-    '&protocol=0,1&format=0,1,2&codec=0,1&qn=150&platform=web&ptype=8'
+    '&protocol=0,1&format=0,1,2&codec=0,1&qn=' + want + '&platform=web&ptype=8'
   );
 }
 
@@ -161,9 +164,9 @@ export function parsePlayInfo(res) {
 /* 取直播直链。每次播放都要重新取：URL 带 expires（实测有效期约 1~2 小时），
  * 过期后 CDN 直接 403 —— 旧实现把地址缓存进 storage 是转码时代的做法，现已无意义。 */
 export async function fetchLivePlayUrl(client, roomid, opts) {
-  const q = buildPlayInfoQuery(roomid);
-  if (!q) return { ok: false, stage: 'param', message: '直播间号无效' };
   const o = opts || {};
+  const q = buildPlayInfoQuery(roomid, o.qn);
+  if (!q) return { ok: false, stage: 'param', message: '直播间号无效' };
   const res = await client.request(LIVE_PLAYINFO_URL, q, { timeout: o.timeout || 12000 });
   if (o.log && res && res.ok && res.data) {
     const n = (res.data.playurl_info && res.data.playurl_info.playurl &&

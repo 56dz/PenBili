@@ -168,6 +168,34 @@
           <text class="mine-label">刷新登录态</text>
           <text class="mine-value">{{ profileStatus }}</text>
         </div>
+        <!-- 视频调节：点整行轮转选项（falcon 无原生下拉，见 onCycleVideoQuality 注释） -->
+        <div class="mine-secrow">
+          <text class="mine-sec">视频调节</text>
+        </div>
+        <div class="mine-row" @click="onCycleVideoQuality">
+          <text class="mine-label">分辨率</text>
+          <text class="mine-value">{{ vqText() }} ›</text>
+        </div>
+        <div class="mine-row" @click="onCycleVideoFps">
+          <text class="mine-label">帧率</text>
+          <text class="mine-value">{{ vfText() }} ›</text>
+        </div>
+        <div class="mine-secrow">
+          <text class="mine-sec">直播</text>
+        </div>
+        <div class="mine-row" @click="onCycleLiveQuality">
+          <text class="mine-label">分辨率</text>
+          <text class="mine-value">{{ lqText() }} ›</text>
+        </div>
+        <div class="mine-row" @click="onCycleLiveFps">
+          <text class="mine-label">刷新率</text>
+          <text class="mine-value">{{ lfText() }} ›</text>
+        </div>
+        <div class="mine-row">
+          <text class="mine-label">取流方式</text>
+          <text class="mine-value">本地直连 · 芯片硬解</text>
+        </div>
+        <text class="mine-notice">点分辨率/帧率可逐项切换。直播由本机 MPP 硬解，不经云端转码；未登录时服务端最高只给 480p。</text>
         <div class="mine-secrow">
           <text class="mine-sec">播放历史（{{ history.length }}）</text>
         </div>
@@ -183,21 +211,9 @@
         <div v-if="!history.length" class="mine-row">
           <text class="mine-label">还没有播放记录</text>
         </div>
-        <div class="mine-secrow">
-          <text class="mine-sec">直播</text>
-        </div>
-        <div class="mine-row">
-          <text class="mine-label">取流方式</text>
-          <text class="mine-value">本地直连 · 芯片硬解</text>
-        </div>
-        <div class="mine-row">
-          <text class="mine-label">清晰度</text>
-          <text class="mine-value">720p（未登录上限）</text>
-        </div>
-        <text class="mine-notice">直播由本机 MPP 硬解，不再经云端转码；搜索「直播」栏即可开播。</text>
         <div class="mine-row">
           <text class="mine-label">PenBili</text>
-          <text class="mine-value">v3.0.0 · {{ profile ? '已登录' : '匿名' }}</text>
+          <text class="mine-value">v3.2.0 · {{ profile ? '已登录' : '匿名' }}</text>
         </div>
       </scroller>
 
@@ -463,6 +479,20 @@ import {
   SEEK_STEP_MS
 } from '../../services/play_session.js';
 import * as player from '../../services/player.js';
+import {
+  DEFAULT_VIDEO_SETTINGS,
+  VIDEO_QUALITY_OPTIONS,
+  VIDEO_FPS_OPTIONS,
+  LIVE_QUALITY_OPTIONS,
+  LIVE_FPS_OPTIONS,
+  loadVideoSettings,
+  saveVideoSettings,
+  nextOptionId,
+  videoQualityLabel,
+  videoFpsLabel,
+  liveQualityLabel,
+  liveFpsLabel
+} from '../../services/video_settings.js';
 
 const TABS = [
   { id: 'rcmd', label: '推荐' },
@@ -591,7 +621,10 @@ export default {
       seekDragMs: null,
       // 播放页右下输入框里的待发送评论（用户手绘稿 m11950：
       // 点输入框唤起系统输入法回填文本，点右侧「发送」按钮才真正提交）
-      cinText: ''
+      cinText: '',
+      /* 「我的 → 视频调节 / 直播」设置（services/video_settings.js）。
+       * 注意 falcon 没有原生 <select>，用「点击轮转下一个选项」交互（nextOptionId）。 */
+      videoSettings: DEFAULT_VIDEO_SETTINGS
     };
   },
   computed: {
@@ -736,6 +769,8 @@ export default {
         player: player,
         mediaUa: DEFAULT_UA,
         mediaReferer: REFERER,
+        /* 「我的 → 视频调节 / 直播」的选择，play_session 用它算 qn 阶梯、像素预算、帧率上限 */
+        videoSettings: this.videoSettings,
         nowSec: () => Math.floor(Date.now() / 1000),
         log: logWarn,
         cancelled: () => this.gen !== myGen
@@ -760,6 +795,7 @@ export default {
     async loadLocal() {
       const h = await loadHistory();
       this.history = h.items;
+      this.videoSettings = await loadVideoSettings();
       const sess = await loadSession();
       this.session = sess;
       if (sess.buvid3) {
@@ -2101,6 +2137,55 @@ export default {
         if (prof.stage === 'unauthorized') this.profile = this.profile; // 保留展示，由用户决定退出
         logWarn('[bili] profile refresh fail: ' + prof.stage);
       }
+    },
+
+    /* ---------- 「我的 → 视频调节 / 直播」设置 ----------
+     * falcon 没有原生下拉，四行设置全部是「点击轮转到下一个选项」。
+     * 为什么不用弹层选择：播放页右栏已经被收藏夹覆盖层占过一次，再叠一层交互
+     * 状态机会让「我的」页的分支爆炸；轮转零状态、零弹层，且当前值永远可见。
+     * 每次改动立刻落盘（setStorage 才真正写），重启后仍然生效。 */
+    async onCycleVideoQuality() {
+      this.videoSettings = Object.assign({}, this.videoSettings, {
+        videoQuality: nextOptionId(VIDEO_QUALITY_OPTIONS, this.videoSettings.videoQuality)
+      });
+      await saveVideoSettings(this.videoSettings);
+      logWarn('[bili] videoQuality → ' + this.videoSettings.videoQuality);
+    },
+    async onCycleVideoFps() {
+      this.videoSettings = Object.assign({}, this.videoSettings, {
+        videoFps: nextOptionId(VIDEO_FPS_OPTIONS, this.videoSettings.videoFps)
+      });
+      await saveVideoSettings(this.videoSettings);
+      logWarn('[bili] videoFps → ' + this.videoSettings.videoFps);
+    },
+    async onCycleLiveQuality() {
+      this.videoSettings = Object.assign({}, this.videoSettings, {
+        liveQuality: nextOptionId(LIVE_QUALITY_OPTIONS, this.videoSettings.liveQuality)
+      });
+      await saveVideoSettings(this.videoSettings);
+      logWarn('[bili] liveQuality → ' + this.videoSettings.liveQuality);
+    },
+    async onCycleLiveFps() {
+      this.videoSettings = Object.assign({}, this.videoSettings, {
+        liveFps: nextOptionId(LIVE_FPS_OPTIONS, this.videoSettings.liveFps)
+      });
+      await saveVideoSettings(this.videoSettings);
+      logWarn('[bili] liveFps → ' + this.videoSettings.liveFps);
+    },
+    // 模板不能直接调模块函数 → 方法转发（四个 label）
+    // 名字刻意与导入的 videoQualityLabel 等不同：方法内直接调同名导入虽然也能解析到
+    // 模块作用域，但读代码时极易误以为递归，改名规避歧义。
+    vqText() {
+      return videoQualityLabel(this.videoSettings);
+    },
+    vfText() {
+      return videoFpsLabel(this.videoSettings);
+    },
+    lqText() {
+      return liveQualityLabel(this.videoSettings);
+    },
+    lfText() {
+      return liveFpsLabel(this.videoSettings);
     },
 
     /* ---------- 生命周期：后台/卸载与手动返回共用同一停止路径 ---------- */

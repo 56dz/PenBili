@@ -108,6 +108,69 @@ async function main() {
     LIVE_FPS: LIVE_FPS_MOD,
     LIVE_PLAYINFO_URL
   } = await import('../src/services/bili/live.js');
+  // ---------------- 视频/直播设置（「我的」菜单） ----------------
+  // 「我的 → 视频调节 / 直播」设置层（纯函数，无 IO 的部分全覆盖）
+  const vsMod = await import('../src/services/video_settings.js');
+  test('video_settings: 默认值与脏数据归一', () => {
+    const d = vsMod.DEFAULT_VIDEO_SETTINGS;
+    assert.strictEqual(d.videoQuality, 'auto');
+    assert.strictEqual(d.videoFps, 'auto');
+    assert.strictEqual(d.liveQuality, '480p');
+    assert.strictEqual(d.liveFps, 'auto');
+    // 脏数据一律退回默认，绝不让一条坏记录把播放搞挂
+    assert.deepStrictEqual(vsMod.normalizeVideoSettings(null), d);
+    assert.deepStrictEqual(vsMod.normalizeVideoSettings('x'), d);
+    assert.deepStrictEqual(vsMod.normalizeVideoSettings({ videoQuality: '4k' }).videoQuality, 'auto');
+    assert.deepStrictEqual(vsMod.normalizeVideoSettings({ videoFps: '120' }).videoFps, 'auto');
+    assert.deepStrictEqual(vsMod.normalizeVideoSettings({ liveQuality: '1080p' }).liveQuality, '480p');
+    // 合法值保留
+    const ok = vsMod.normalizeVideoSettings({ videoQuality: '720p', videoFps: '30', liveQuality: '720p', liveFps: '30' });
+    assert.deepStrictEqual([ok.videoQuality, ok.videoFps, ok.liveQuality, ok.liveFps], ['720p', '30', '720p', '30']);
+  });
+  test('video_settings: nextOptionId 轮转（首尾闭合，未知 id 从头开始）', () => {
+    const list = vsMod.VIDEO_QUALITY_OPTIONS;
+    assert.strictEqual(vsMod.nextOptionId(list, 'auto'), list[1].id);
+    assert.strictEqual(vsMod.nextOptionId(list, list[list.length - 1].id), list[0].id);
+    assert.strictEqual(vsMod.nextOptionId(list, '不存在'), list[0].id);
+    assert.strictEqual(vsMod.nextOptionId([], 'x'), 'x');
+    assert.strictEqual(vsMod.nextOptionId(null, 'x'), 'x');
+  });
+  test('video_settings: dashLadderFor —— auto 与旧行为一致，30fps 把 60fps 专档挪到末尾', () => {
+    // 默认（auto 分辨率 + auto 帧率）必须与硬解上线时的阶梯完全一致，否则是回归
+    assert.deepStrictEqual(vsMod.dashLadderFor(vsMod.DEFAULT_VIDEO_SETTINGS), [116, 80, 74, 32, 16]);
+    // 30fps：116/74 是 60fps 专档 → 排到末尾保底，30fps 档优先
+    assert.deepStrictEqual(
+      vsMod.dashLadderFor({ videoQuality: 'auto', videoFps: '30' }),
+      [80, 32, 16, 116, 74]
+    );
+    // 分辨率档位收窄阶梯（360p 只留 16，保证不会偷偷拉高分辨率）
+    assert.deepStrictEqual(vsMod.dashLadderFor({ videoQuality: '360p' }), [16]);
+    assert.deepStrictEqual(vsMod.dashLadderFor({ videoQuality: '480p' }), [32, 16]);
+    assert.deepStrictEqual(vsMod.dashLadderFor({ videoQuality: '720p' }), [74, 64, 32, 16]);
+  });
+  test('video_settings: fpsCap / pixelBudget / liveQn 与选项表一致', () => {
+    assert.strictEqual(vsMod.videoFpsCapFor({ videoFps: 'auto' }), 0);
+    assert.strictEqual(vsMod.videoFpsCapFor({ videoFps: '60' }), 0);
+    assert.strictEqual(vsMod.videoFpsCapFor({ videoFps: '30' }), 30);
+    assert.strictEqual(vsMod.pixelBudgetFor({ videoQuality: 'auto' }), 1920 * 1080);
+    assert.strictEqual(vsMod.pixelBudgetFor({ videoQuality: '720p' }), 1280 * 720);
+    assert.strictEqual(vsMod.pixelBudgetFor({ videoQuality: '360p' }), 640 * 360);
+    assert.strictEqual(vsMod.liveQnFor({ liveQuality: '480p' }), 150);
+    assert.strictEqual(vsMod.liveQnFor({ liveQuality: '720p' }), 250);
+    assert.strictEqual(vsMod.liveQnFor({ liveQuality: 'auto' }), 10000);
+    assert.strictEqual(vsMod.liveFpsCapFor({ liveFps: 'auto' }), 0);
+    assert.strictEqual(vsMod.liveFpsCapFor({ liveFps: '30' }), 30);
+    assert.strictEqual(vsMod.liveFpsCapFor({ liveFps: '60' }), 60);
+  });
+  test('video_settings: label 转发与选项表一致（菜单直接展示）', () => {
+    assert.strictEqual(vsMod.videoQualityLabel({ videoQuality: '720p' }), '720p');
+    assert.strictEqual(vsMod.videoFpsLabel({ videoFps: '30' }), '30fps');
+    assert.strictEqual(vsMod.liveQualityLabel({ liveQuality: '480p' }), '480p（省流）');
+    assert.strictEqual(vsMod.liveFpsLabel({ liveFps: '60' }), '60fps');
+    // 脏值退回第一项的 label，不抛
+    assert.strictEqual(vsMod.videoQualityLabel({ videoQuality: 'zzz' }), vsMod.VIDEO_QUALITY_OPTIONS[0].label);
+  });
+
   const feedMod = await import('../src/services/feed.js');
   const {
     normalizeVideo,
@@ -547,7 +610,7 @@ async function main() {
   });
 
   // ---------------- player adapter ----------------
-  test('player: buildOpenArgs 顺序与钳制（14 个位置参数，含 DASH 第二输入）', () => {
+  test('player: buildOpenArgs 顺序与钳制（15 个位置参数，含 DASH 第二输入与 fpsCap）', () => {
     const args = buildOpenArgs({
       input: 'https://x/v.mp4',
       input2: 'https://x/a.m4s',
@@ -559,16 +622,22 @@ async function main() {
       rect: { x: 0.4, y: 174, width: 254, height: 452 },
       audioDevice: '',
       userAgent: 'UA',
-      referer: 'https://r/'
+      referer: 'https://r/',
+      fpsCap: 30
     });
     assert.deepStrictEqual(args, [
       // fps=0 → 回落 24（与 native 侧 `fps<1||fps>60 → 24` 一致）
-      'https://x/v.mp4', 0, 1235, 24, 0, 1, 0, 174, 254, 452, '', 'UA', 'https://r/', 'https://x/a.m4s'
+      'https://x/v.mp4', 0, 1235, 24, 0, 1, 0, 174, 254, 452, '', 'UA', 'https://r/', 'https://x/a.m4s', 30
     ]);
-    // input2 缺省 → 末位空串（native 据此走单文件 0:a:0）
+    // input2 缺省 → 第 14 位空串（native 据此走单文件 0:a:0）；fpsCap 缺省 → 末位 0（不限帧率）
     const solo = buildOpenArgs({ input: 'https://x/v.mp4', startMs: 0, durationMs: 0, fps: 30, rect: { x: 0, y: 0, width: 1, height: 1 } });
-    assert.strictEqual(solo.length, 14);
+    assert.strictEqual(solo.length, 15);
     assert.strictEqual(solo[13], '');
+    assert.strictEqual(solo[14], 0);
+    // fpsCap 非法（负数/NaN）一律归 0，绝不给 native 传负的 max-rate
+    assert.strictEqual(buildOpenArgs({ input: 'a', fpsCap: -3 })[14], 0);
+    assert.strictEqual(buildOpenArgs({ input: 'a', fpsCap: 'x' })[14], 0);
+    assert.strictEqual(buildOpenArgs({ input: 'a', fpsCap: 29.6 })[14], 30);
   });
   test('player: isSafeInput 拒绝空白/../超长/非 http(s)', () => {
     assert.strictEqual(isSafeInput('https://x/v.mp4'), true);
@@ -1262,6 +1331,12 @@ async function main() {
     assert.ok(q.indexOf('qn=10000') < 0, q);
     // 小数房间号取整
     assert.ok(buildPlayInfoQuery(88.9).indexOf('room_id=88') === 0);
+    // 「我的 → 直播 → 分辨率」可覆盖 qn；非法值（0/负/NaN）回落到 150
+    assert.ok(buildPlayInfoQuery(22908869, 250).indexOf('qn=250') > 0);
+    assert.ok(buildPlayInfoQuery(22908869, 10000).indexOf('qn=10000') > 0);
+    assert.ok(buildPlayInfoQuery(22908869, 0).indexOf('qn=150') > 0);
+    assert.ok(buildPlayInfoQuery(22908869, -5).indexOf('qn=150') > 0);
+    assert.ok(buildPlayInfoQuery(22908869, 'x').indexOf('qn=150') > 0);
   });
   test('live: unescapeExtra 反转 \\u0026（不反转则 CDN 403）', () => {
     assert.strictEqual(unescapeExtra('a=1\\u0026b=2'), 'a=1&b=2');

@@ -2,7 +2,7 @@
   "name": "bili-app-x5",
   "appName": "PenBili",
   "appid": "8002026091900004",
-  "version": "3.0.0",
+  "version": "3.2.0",
   "icon": "app_icon.png",
   "description": "PenBili（有道 X5 / X6 Pro）：推荐/热门 + 视频/图文/直播三栏搜索 + DASH 播放与直播间直连（X6 Pro 走 MPP 硬解）+ 图文阅读 + 点赞投币收藏 + 评论区 + 扫码登录",
   "quickjs": {

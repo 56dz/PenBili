@@ -26,7 +26,9 @@ export const QN_LADDER = [16];
  * qn 编码（B站）：
  *   116 = 1080P60（**60fps 档**）、80 = 1080P、74 = 720P60、64 = 720P、32 = 480P、16 = 360P
  * 先请求 60fps 的高档，服务端不给就自动降级（未登录/无大会员时只给到 480P30）。
- * 真正的档位上限由 MAX_DECODE_PIXELS 在解析层把关。 */
+ * 注意：DASH_QN_LADDER 只是**默认阶梯**，实际播放用 video_settings.dashLadderFor()
+ * 按「我的 → 视频调节」的偏好生成（30fps 偏好会把 116/74 挪到末尾）。
+ * 真正的档位上限由调用方按 pixelBudgetFor（= 用户所选分辨率档）校验。 */
 export const DASH_QN_LADDER = [116, 80, 74, 32, 16];
 
 // 播放节拍帧率。html5 时代实测源 30fps；v2.5.1 降为 24：带弹幕（drawtext×4 逐帧渲染文字）
@@ -219,7 +221,7 @@ export function parseDashResponse(res, wantQn, requireAvc) {
    * 「取最小」会连 480p 都不要、死锁在 360p，在 240x427 的物理窗口上糊得用户以为掉帧。
    * 帧率必须参与排序：同一稿件可能同时给 1080P30(id=80) 与 1080P60(id=116)，而请求
    * 阶梯里 116 失败后落到 80 时，池内还可能有 60fps 条目 —— 不按帧率排就会白白丢掉。
-   * 真正的上限由调用方按 MAX_DECODE_PIXELS 校验（超预算就试下一档阶梯）。 */
+   * 真正的上限由调用方按 pixelBudgetFor（用户所选分辨率档）校验（超预算就试下一档阶梯）。 */
   const pxOf = (x) => (Number(x.width) || 0) * (Number(x.height) || 0);
   const fpsOf = (x) => parseFloat(x.frame_rate) || 0;
   const byPxDesc = (a, b) => pxOf(b) - pxOf(a) || fpsOf(b) - fpsOf(a) || byBw(a, b);

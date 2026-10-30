@@ -22,7 +22,12 @@
  * JS 用法：
  *   import { open, pause, resume, seek, status, stop, redraw, release } from 'player'
  *   open(input, startMs, durationMs, fps, audio, transpose, x, y, w, h
- *        [, audioDevice[, userAgent, referer]]) -> { ok, state, ... }
+ *        [, audioDevice[, userAgent, referer[, audioInput[, fpsCap]]]]) -> { ok, state, ... }
+ *
+ * 第 15 个位置参数 fpsCap（v3.2.0）＝ 渲染帧率上限，0/缺省 = 不限。>0 时在
+ * mppvideodec 之后插 `videorate max-rate=<fpsCap>`，并把节拍器的 s->fps 夹到同一上限
+ * （否则节拍器按源帧率排程，videorate 降帧后每帧都要空等）。为什么限帧不能只靠
+ * 选流档位：有些内容服务端只给 60fps 档，请求 30fps 会直接落空。见 render_start()。
  *
  * 尾部两个可选参数（v1.1.0，bilibili_x5 项目加入）：
  *   userAgent — 传给 ffmpeg -user_agent（B 站 CDN 对默认 Lavf UA 返回 403，见 profile）
@@ -369,11 +374,12 @@ struct render_info {
     int rx, ry;   /* 已建链的物理矩形 */
     int fps;      /* 保留（诊断用；v3.0.0 起不再进 caps） */
     int transpose;/* 1=顺时针 90° / 2=逆时针 90°（ffmpeg 语义）→ 映射到 mppvideodec rotation */
+    int fps_cap;  /* v3.2.0：渲染帧率上限（0 = 不限）；>0 时在解码器后插 videorate max-rate */
     int dump_fd;  /* 诊断用：PENBILI_DUMP_FIFO 落盘 fd，-1 = 未启用 */
     char path[64];
 };
 
-static struct render_info g_rd = { 0, 0, -1, 0, 0, 0, 0, 0, 30, 1, -1, "" };
+static struct render_info g_rd = { 0, 0, -1, 0, 0, 0, 0, 0, 30, 1, 0, -1, "" };
 
 /* 非阻塞轮询打开 FIFO 写端：gst 起不来时不要永久阻塞视频线程。
  * v3.0.0：打开后**保留 O_NONBLOCK** —— 压缩包转发是长写（一路写到播完），必须能在
@@ -673,6 +679,28 @@ static int render_start(int x, int y, int w, int h) {
         argv[i++] = (char *)"mppvideodec";
         argv[i++] = rotation;
         argv[i++] = (char *)"!";
+        /* ---- v3.2.0 帧率上限（「我的 → 视频调节 / 直播」的帧率设置）----
+         *
+         * 为什么限帧要放在**解码器之后**而不是靠选流档位：
+         *   有些稿件/直播间服务端**只提供 60fps 档**，没有 30fps 变体。
+         *   只靠「请求 30fps 档」在那种内容上会直接落空（要么播 60fps，
+         *   要么干脆没得播）；只靠 videorate 又会白拉两倍码率再丢一半。
+         *   所以 JS 侧两件事都做：优先请求 30fps 档，同时把上限传进来兜底。
+         *
+         * 真机实测（2026-10-30，fdsrc fd=3 → h264parse → mppvideodec rotation=270
+         * → videorate max-rate=30 → fpsdisplaysink → kmssink，源 /tmp/t720_60.h264
+         * 即 1280x720@60）：
+         *   不加 videorate → current 57.39fps / dropped 0
+         *   加 max-rate=30  → current 29.73fps / dropped 0，帧间隔均匀
+         * 30fps 源上加 max-rate=30 是直通（实测 24fps 源 + max-rate=48 仍是 23.91fps，
+         * videorate 不做插帧，只做上限）——所以低帧率内容不会被这个开关伤到。 */
+        if (g_rd.fps_cap > 0) {
+            char cap[32];
+            snprintf(cap, sizeof(cap), "max-rate=%d", g_rd.fps_cap);
+            argv[i++] = (char *)"videorate";
+            argv[i++] = strdup(cap);
+            argv[i++] = (char *)"!";
+        }
         if (extra) {
             argv[i++] = (char *)extra;
             argv[i++] = (char *)"!";
@@ -1310,6 +1338,10 @@ static void *ff_stderr_thread(void *arg) {
                     int f;
                     double land;
                     if (!s->fps_known && (f = parse_fps_line(line)) > 0) {
+                        /* v3.2.0：用户设了帧率上限时，节拍器必须按**出帧**帧率走，
+                         * 不能按源帧率 —— videorate 把 60fps 源降到 30fps 后，
+                         * 节拍器若仍按 60fps 排程（16ms/帧）就会每帧都等不到新画面。 */
+                        if (g_rd.fps_cap > 0 && f > g_rd.fps_cap) f = g_rd.fps_cap;
                         s->fps = f;
                         g_rd.fps = f;
                         s->fps_known = 1;
@@ -3272,6 +3304,7 @@ static JSValue js_open(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
     const char *audioDevice = NULL;
     const char *userAgent = NULL;
     const char *referer = NULL;
+    int fpsCap = 0;
     struct session *s = &g_s;
     JSValue res;
     int started;
@@ -3294,6 +3327,12 @@ static JSValue js_open(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
     if (argc > 10 && !JS_IsUndefined(argv[10]) && !JS_IsNull(argv[10])) audioDevice = JS_ToCString(ctx, argv[10]);
     if (argc > 11 && !JS_IsUndefined(argv[11]) && !JS_IsNull(argv[11])) userAgent = JS_ToCString(ctx, argv[11]);
     if (argc > 12 && !JS_IsUndefined(argv[12]) && !JS_IsNull(argv[12])) referer = JS_ToCString(ctx, argv[12]);
+    /* 第 15 个位置参数（下标 14）：渲染帧率上限。0/缺省 = 不限；超出 [1,120] 一律当不限，
+     * 不让脏值把管线搞成"零帧"（videorate max-rate=0 会让所有帧被丢弃）。 */
+    if (argc > 14 && !JS_IsUndefined(argv[14]) && !JS_IsNull(argv[14])) {
+        JS_ToInt32(ctx, &fpsCap, argv[14]);
+    }
+    if (fpsCap < 1 || fpsCap > 120) fpsCap = 0;
 
     if (!input[0] || strlen(input) >= sizeof(s->input) || strstr(input, "..")) {
         JS_FreeCString(ctx, input);
@@ -3400,6 +3439,12 @@ static JSValue js_open(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
     s->rect_h = h;
     s->fps = fps;
     g_rd.fps = fps; /* KMS caps framerate（仅影响首帧建链，不参与节拍） */
+    /* v3.2.0：帧率上限进 g_rd（render_start 读它决定插不插 videorate），
+     * 同时把 s->fps 夹到上限 —— 否则节拍器仍按 60fps 排程（每帧 16ms），
+     * 而 videorate 已把出帧降到 30fps，画面会被节拍器拖着走成"每两帧空等一次"。
+     * 注意要在 parse_fps_line 覆盖 s->fps 的地方也夹一次（见 ff_stderr_thread）。 */
+    g_rd.fps_cap = fpsCap;
+    if (fpsCap > 0 && s->fps > fpsCap) s->fps = fpsCap;
     g_rd.rx = -1;   /* 新会话：矩形可能变了，首帧重建链 */
     g_rd.ry = -1;
     s->transpose = (transpose == 2) ? 2 : 1;
@@ -3708,7 +3753,7 @@ static JSValue js_info(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
 
 static int player_module_init(JSContext *ctx, JSModuleDef *m) {
     JSValue def = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, def, "open", JS_NewCFunction(ctx, js_open, "open", 13));
+    JS_SetPropertyStr(ctx, def, "open", JS_NewCFunction(ctx, js_open, "open", 15));
     JS_SetPropertyStr(ctx, def, "pauseRender", JS_NewCFunction(ctx, js_pauseRender, "pauseRender", 0));
     JS_SetPropertyStr(ctx, def, "resumeRender", JS_NewCFunction(ctx, js_resumeRender, "resumeRender", 0));
     JS_SetPropertyStr(ctx, def, "pause", JS_NewCFunction(ctx, js_pause, "pause", 0));
@@ -3720,7 +3765,7 @@ static int player_module_init(JSContext *ctx, JSModuleDef *m) {
     JS_SetPropertyStr(ctx, def, "release", JS_NewCFunction(ctx, js_release, "release", 0));
     JS_SetPropertyStr(ctx, def, "info", JS_NewCFunction(ctx, js_info, "info", 0));
     JS_SetModuleExport(ctx, m, "default", def);
-    JS_SetModuleExport(ctx, m, "open", JS_NewCFunction(ctx, js_open, "open", 13));
+    JS_SetModuleExport(ctx, m, "open", JS_NewCFunction(ctx, js_open, "open", 15));
     JS_SetModuleExport(ctx, m, "pause", JS_NewCFunction(ctx, js_pause, "pause", 0));
     JS_SetModuleExport(ctx, m, "resume", JS_NewCFunction(ctx, js_resume, "resume", 0));
     JS_SetModuleExport(ctx, m, "seek", JS_NewCFunction(ctx, js_seek, "seek", 1));
