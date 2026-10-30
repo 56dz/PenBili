@@ -509,38 +509,158 @@
   font-weight: 600;
 }
 
-/* ---------- 播放：中列（视频区 + 进度条）---------- */
-/* 用户要求 m06919-4：增大左图标栏与视频区的间距 → margin-left 16，视频区 448→432。
-   总宽 64 + 16 + 432 + 448 = 960。 */
-/* 图标栏与视频区之间的 16px 间距占位块（m06919-4）。
- * 必须不透明：播放态根容器是透明的，此处若空着会透出 fb 残留像素。 */
-.ibar-gap {
-  width: 16px;
+/* ---------- 播放态三列（用户手绘稿 m11950）----------
+ *   左 2 : 中 4.4 : 右 2.6  ⇒  213 + 469 + 278 = 960
+ *   左列上 192 = 标题/简介；左列下 74 = 点赞/投币/收藏
+ *   中列上 240 = 视频；中列下 26 = 可拖动进度条
+ *   右列上 240 = 评论区；右列下 26 = 输入框 + 发送
+ *
+ * 雾化玻璃材质（用户追加 m11952）：falcon 没有 backdrop-filter，用
+ * 「半透明白 + 圆角 + 细边框」叠在深底上模拟毛玻璃的雾面观感。
+ * 视频区不能用玻璃底（会盖掉 KMS 平面），所以只有信息卡/按钮/评论卡/输入框用。 */
+.pleft {
+  width: 213px;
   height: 266px;
-  background-color: @background-color;
+  flex-direction: column;
+  background-color: @nav-background;
 }
 
-/* 64(图标栏) + 16(间距占位) + 432(视频) + 448(右栏) = 960；
- * 间距已由 .ibar-gap 占位，这里不再用 margin-left。 */
-.stage {
-  width: 432px;
+/* 左列上：返回 + 标题 + UP 主 + 简介 */
+.pleft-info {
+  width: 213px;
+  height: 192px;
+  flex-direction: column;
+  padding-left: 10px;
+  padding-right: 10px;
+  padding-top: 8px;
+}
+
+.pback {
+  width: 30px;
+  height: 26px;
+  border-radius: 8px;
+  border-width: 1px;
+  border-color: rgba(255, 255, 255, 0.14);
+  background-color: rgba(255, 255, 255, 0.08);
+  justify-content: center;
+  align-items: center;
+}
+
+.pback:active {
+  opacity: 0.6;
+}
+
+.pback-icon {
+  width: 22px;
+  height: 22px;
+}
+
+.ptitle {
+  margin-top: 6px;
+  width: 193px;
+  height: 34px;
+  font-size: 13px;
+  font-weight: 600;
+  color: @text-color;
+  lines: 2;
+  text-overflow: ellipsis;
+}
+
+.pup {
+  margin-top: 4px;
+  width: 193px;
+  height: 14px;
+  font-size: 10px;
+  color: @accent-blue;
+  lines: 1;
+  text-overflow: ellipsis;
+}
+
+/* 简介：可滚动区（手绘稿左列上方「视频标题和简介」） */
+.pdesc {
+  margin-top: 6px;
+  width: 193px;
+  height: 96px;
+  font-size: 10px;
+  color: @text-color-dim;
+  lines: 7;
+  text-overflow: ellipsis;
+}
+
+/* 左列下：点赞 / 投币 / 收藏（横向三枚，图标在上、计数在下） */
+.pleft-btns {
+  width: 213px;
+  height: 74px;
+  flex-direction: row;
+  align-items: center;
+  padding-left: 6px;
+  padding-right: 6px;
+}
+
+.pbtn {
+  width: 65px;
+  height: 62px;
+  margin-left: 2px;
+  margin-right: 2px;
+  border-radius: 10px;
+  border-width: 1px;
+  border-color: rgba(255, 255, 255, 0.12);
+  background-color: rgba(255, 255, 255, 0.07);
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+}
+
+.pbtn:active {
+  opacity: 0.6;
+}
+
+.pbtn-icon {
+  width: 26px;
+  height: 26px;
+}
+
+.pbtn-count {
+  margin-top: 2px;
+  width: 60px;
+  height: 12px;
+  font-size: 9px;
+  color: @text-color-dim;
+  text-align: center;
+  lines: 1;
+}
+
+.pbtn-count-on {
+  margin-top: 2px;
+  width: 60px;
+  height: 12px;
+  font-size: 9px;
+  font-weight: 600;
+  color: @accent;
+  text-align: center;
+  lines: 1;
+}
+
+/* 中列：视频 + 进度条 */
+.pmid {
+  width: 469px;
   height: 266px;
   flex-direction: column;
 }
 
-.video-box {
-  width: 432px;
+.pvideo {
+  width: 469px;
   height: 240px;
 }
 
 .video-hole {
-  width: 432px;
+  width: 469px;
   height: 240px;
   background-color: rgba(0, 0, 0, 0);
 }
 
 .play-idle {
-  width: 432px;
+  width: 469px;
   height: 240px;
   justify-content: center;
   align-items: center;
@@ -553,10 +673,10 @@
   lines: 2;
 }
 
-/* 可拖动进度条：432x26 横条，轨道 416x10（左右各留 8），
+/* 可拖动进度条：469x26 横条，轨道 453x10（左右各留 8），
  * 填充与圆点同一行排布（falcon 上 position:absolute 不可靠，用 flex 自然排列）。 */
 .seek {
-  width: 432px;
+  width: 469px;
   height: 26px;
   flex-direction: row;
   align-items: center;
@@ -565,7 +685,7 @@
 }
 
 .seek-track {
-  width: 416px;
+  width: 453px;
   height: 10px;
   flex-direction: row;
   align-items: center;
@@ -586,12 +706,103 @@
   background-color: #ffffff;
 }
 
+/* 右列：评论 + 输入框 */
+.pright {
+  width: 278px;
+  height: 266px;
+  flex-direction: column;
+  background-color: @nav-background;
+}
+
+.pright-body {
+  width: 278px;
+  height: 240px;
+}
+
+/* 右下输入框（雾化玻璃）：输入区 + 发送按钮 */
+.pinput {
+  width: 278px;
+  height: 26px;
+  flex-direction: row;
+  align-items: center;
+  padding-left: 8px;
+  padding-right: 8px;
+}
+
+.pinput-box {
+  width: 196px;
+  height: 24px;
+  border-radius: 8px;
+  border-width: 1px;
+  border-color: rgba(255, 255, 255, 0.16);
+  background-color: rgba(255, 255, 255, 0.08);
+  justify-content: center;
+  padding-left: 8px;
+  padding-right: 6px;
+}
+
+.pinput-box:active {
+  opacity: 0.7;
+}
+
+.pinput-ph {
+  width: 180px;
+  font-size: 10px;
+  color: @text-color-dim;
+  lines: 1;
+  text-overflow: ellipsis;
+}
+
+.pinput-text {
+  width: 180px;
+  font-size: 10px;
+  color: @text-color;
+  lines: 1;
+  text-overflow: ellipsis;
+}
+
+.pinput-send {
+  width: 58px;
+  height: 24px;
+  margin-left: 8px;
+  border-radius: 8px;
+  border-width: 1px;
+  border-color: rgba(255, 255, 255, 0.14);
+  background-color: rgba(255, 255, 255, 0.08);
+  justify-content: center;
+  align-items: center;
+}
+
+.pinput-send-on {
+  width: 58px;
+  height: 24px;
+  margin-left: 8px;
+  border-radius: 8px;
+  background-color: @accent;
+  justify-content: center;
+  align-items: center;
+}
+
+.pinput-send:active,
+.pinput-send-on:active {
+  opacity: 0.7;
+}
+
+.pinput-send-text {
+  font-size: 11px;
+  font-weight: 600;
+  color: @text-color;
+  text-align: center;
+  lines: 1;
+}
+
 /* ---------- 播放：右栏（默认评论区 + 收藏夹覆盖层）---------- */
 /* 用户要求 m06919-5：右栏默认只有评论区，不要选项栏；点收藏 → 整栏被收藏夹覆盖，
    顶部出现退出按钮，退出恢复评论区。所以旧的 .side-tabs/.side-tab/.side-grid/.srow
-   系列（三态标签 + 推荐卡）全部删除。 */
+   系列（三态标签 + 推荐卡）全部删除。
+   v4 手绘布局（m11950）：右列收窄到 278（原 448），下面的子块宽度一并改。 */
 .side {
-  width: 448px;
+  width: 278px;
   height: 266px;
   flex-direction: column;
   background-color: @nav-background;
@@ -601,7 +812,7 @@
    磨砂玻璃（用户要求 m06919-6）：半透明白 + 圆角 + 细边框。
    falcon 没有 backdrop-filter，用 rgba 白叠在深底上模拟毛玻璃的「雾面」观感。 */
 .fav-head {
-  width: 432px;
+  width: 262px;
   height: 40px;
   margin-left: 8px;
   margin-top: 6px;
@@ -650,13 +861,13 @@
 }
 
 .side-body {
-  width: 448px;
+  width: 278px;
   height: 220px;
 }
 
 /* 无标签栏时的满高正文（评论区默认态：266 - 底部 feedback 行 24 ≈ 232） */
 .side-body-full {
-  width: 448px;
+  width: 278px;
   height: 232px;
 }
 
@@ -668,7 +879,7 @@
  *    同特异性下 falcon 取**先定义**的那条，背景色永远是 .favrow 的。
  * 所以这里两条规则各自完整、类名互斥，模板里二选一挂（选中态用 .favrow-sel）。 */
 .favrow {
-  width: 432px;
+  width: 262px;
   height: 42px;
   margin-left: 8px;
   margin-top: 8px;
@@ -685,7 +896,7 @@
 
 /* 已加入该收藏夹：整行变品牌粉（用户要求 m09254 的「点击后变粉」反馈） */
 .favrow-sel {
-  width: 432px;
+  width: 262px;
   height: 42px;
   margin-left: 8px;
   margin-top: 8px;
@@ -738,7 +949,7 @@
 }
 
 .side-status {
-  width: 432px;
+  width: 262px;
   margin-left: 8px;
   margin-top: 10px;
   margin-bottom: 8px;
@@ -751,7 +962,7 @@
 /* 右栏滚动容器（评论区 / 收藏夹共用）：高度由父容器 flex 撑满，
    因为两态父高不同（收藏夹 220 = 266 − 顶部 46；评论区 232） */
 .side-scroll {
-  width: 448px;
+  width: 278px;
   flex-grow: 1;
   flex-shrink: 1;
   flex-basis: 0px;
@@ -759,7 +970,7 @@
 
 /* 右栏写评论行（比全屏面板窄：448 - 左右 8） */
 .sc-writeline {
-  width: 432px;
+  width: 262px;
   margin-left: 8px;
   margin-top: 4px;
   flex-direction: row;
@@ -777,14 +988,15 @@
   text-overflow: ellipsis;
 }
 
-/* 右栏底部一行反馈（点赞/投币/收藏结果、播放提示） */
+/* 右列底部一行反馈（点赞/投币/收藏结果、播放提示）。
+   v4 手绘布局：右列 266 = 评论 226 + 反馈 14 + 输入框 26。 */
 .side-foot {
-  width: 432px;
+  width: 262px;
+  height: 14px;
   margin-left: 8px;
-  margin-bottom: 6px;
-  font-size: 10px;
+  font-size: 9px;
   color: @text-color-dim;
-  lines: 2;
+  lines: 1;
   text-overflow: ellipsis;
 }
 
@@ -949,7 +1161,7 @@
 
 /* 448 右栏专用：给左右各 8 的留白 */
 .reply-block-n {
-  width: 432px;
+  width: 262px;
   margin-left: 8px;
   flex-direction: column;
 }

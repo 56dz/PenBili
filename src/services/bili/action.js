@@ -58,7 +58,10 @@ export function parseViewState(res, mine) {
     coinCount: Number(stat.coin) || 0,
     favCount: Number(stat.favorite) || 0,
     viewCount: Number(stat.view) || 0,
-    share: Number(stat.share) || 0
+    share: Number(stat.share) || 0,
+    // 简介：用户手绘稿 m11950 要求播放页左列上方显示「视频标题和简介」。
+    // /x/web-interface/view 的 data.desc 就是稿件简介（未登录也能拿）。
+    desc: typeof d.desc === 'string' ? d.desc : ''
   };
 }
 

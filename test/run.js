@@ -90,7 +90,9 @@ async function main() {
     VIDEO_AREA,
     PHYSICAL,
     PANEL_X_OFFSET,
-    BAR_WIDTH
+    BAR_WIDTH,
+    GRID_COLS,
+    trimToGridRows
   } = await import('../src/services/screen.js');
   const { runProbe, STEPS } = await import('../src/services/bili/probe.js');
   const { normalizeStoredValue, normalizeSession, normalizeSettings, DEFAULT_TARGET } = await import(
@@ -599,8 +601,8 @@ async function main() {
   // ---------------- screen ----------------
   test('screen: 360p 视频区矩形（X6 Pro 逻辑 960x266 / 物理 266x960）', () => {
     const r = probeVideoRects(640, 360);
-    assert.deepStrictEqual(r.logical, { x: 83, y: 0, width: 427, height: 240 });
-    assert.deepStrictEqual(r.physical, { x: 0, y: 450, width: 240, height: 427 });
+    assert.deepStrictEqual(r.logical, { x: 234, y: 0, width: 427, height: 240 });
+    assert.deepStrictEqual(r.physical, { x: 0, y: 299, width: 240, height: 427 });
     assert.strictEqual(isRectInsidePanel(r.physical), true);
   });
   test('screen: fitLogicalRect 信箱适配', () => {
@@ -1616,7 +1618,7 @@ async function main() {
     assert.strictEqual(r.session.qn, 16);
     assert.strictEqual(r.session.durationMs, 206000);
     const o = w.calls.open[0];
-    assert.deepStrictEqual(o.rect, { x: 0, y: 450, width: 240, height: 427 });
+    assert.deepStrictEqual(o.rect, { x: 0, y: 299, width: 240, height: 427 });
     assert.strictEqual(o.userAgent, DEFAULT_UA);
     assert.strictEqual(o.referer, REFERER);
     assert.strictEqual(o.fps, HTML5_FPS); // 不锁死数值：锚定 openVideo 传递配置常量（v2.5.1 起 24）
@@ -1654,7 +1656,7 @@ async function main() {
     assert.strictEqual(r.session.durationMs, 60000);
     assert.strictEqual(r.session.title, 'feed标题', 'item 标题优先');
     // 16:9 横屏 → 视频区(448x240)内居中的横矩形
-    assert.deepStrictEqual(w.calls.open[0].rect, { x: 0, y: 450, width: 240, height: 427 });
+    assert.deepStrictEqual(w.calls.open[0].rect, { x: 0, y: 299, width: 240, height: 427 });
   });
   test('play_session: 竖屏稿件(1080x1920) → 物理竖柱 rect（不拉伸成横屏）', async () => {
     const w = fakePlayDeps();
@@ -1662,8 +1664,8 @@ async function main() {
     const r = await openVideo(w, { kind: 'video', bvid: 'BV1ZCeb6NEyM', cid: 1, durationSec: 1, title: '' });
     assert.strictEqual(r.ok, true, r.message);
     const rect = w.calls.open[0].rect;
-    // 信箱适配：逻辑 {229,0,135,240} → 物理 {0,596,240,135}（宽高互换的竖柱，比例=9:16 不变形）
-    assert.deepStrictEqual(rect, { x: 0, y: 596, width: 240, height: 135 });
+    // 信箱适配：逻辑 {380,0,135,240} → 物理 {0,445,240,135}（宽高互换的竖柱，比例=9:16 不变形）
+    assert.deepStrictEqual(rect, { x: 0, y: 445, width: 240, height: 135 });
     assert.ok(rect.height < rect.width, '竖屏输出应为竖长方形');
     // 输出比例 ≈ 源比例（不拉伸）：物理 h/w = 135/240 ≈ 1080/1920
     const outRatio = rect.height / rect.width;
@@ -1986,25 +1988,42 @@ async function main() {
     assert.strictEqual((await actMod.dealFav(fake, 1, [1], [], '')).stage, 'param');
   });
 
-  // ---------------- 播放几何（64 + 16 + 432 + 448 = 960）----------------
-  test('screen: playVideoRects 16:9 居中，物理 {0,450,240,427}（真·旋转变换）', () => {
+  // ---------------- 主页网格：加载更多后必须整行（用户要求 m11950-3）----------------
+  test('screen: trimToGridRows 尾部裁到列数整数倍', () => {
+    assert.strictEqual(GRID_COLS, 5);
+    // 12 → 10（裁 2）；15 不变；0/1/4 全裁掉
+    assert.deepStrictEqual(trimToGridRows([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], GRID_COLS), {
+      items: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+      trimmed: 2
+    });
+    const full = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+    assert.deepStrictEqual(trimToGridRows(full, GRID_COLS), { items: full, trimmed: 0 });
+    assert.deepStrictEqual(trimToGridRows([1, 2, 3, 4], GRID_COLS), { items: [], trimmed: 4 });
+    assert.deepStrictEqual(trimToGridRows([], GRID_COLS), { items: [], trimmed: 0 });
+    // 非数组 / 非法列数都不抛
+    assert.deepStrictEqual(trimToGridRows(null, GRID_COLS), { items: [], trimmed: 0 });
+    assert.deepStrictEqual(trimToGridRows([1, 2, 3, 4, 5, 6], 0).items.length, 5);
+  });
+
+  // ---------------- 播放几何（213 + 469 + 278 = 960，用户手绘稿 m11950）----------------
+  test('screen: playVideoRects 16:9 居中，物理 {0,299,240,427}（真·旋转变换）', () => {
     const r = playVideoRects(640, 360);
-    assert.deepStrictEqual(r.logical, { x: 83, y: 0, width: 427, height: 240 });
-    assert.deepStrictEqual(r.physical, { x: 0, y: 450, width: 240, height: 427 });
+    assert.deepStrictEqual(r.logical, { x: 234, y: 0, width: 427, height: 240 });
+    assert.deepStrictEqual(r.physical, { x: 0, y: 299, width: 240, height: 427 });
     assert.strictEqual(BAR_WIDTH, 76);
     assert.strictEqual(BAR_WIDTH + r.logical.width + BAR_WIDTH, 579); // 16:9 只占 427
   });
   test('screen: 竖屏 playVideoRects → 物理竖柱（9:16 不变形）', () => {
     const r = playVideoRects(360, 640);
-    assert.deepStrictEqual(r.logical, { x: 229, y: 0, width: 135, height: 240 });
-    assert.deepStrictEqual(r.physical, { x: 0, y: 596, width: 240, height: 135 });
+    assert.deepStrictEqual(r.logical, { x: 380, y: 0, width: 135, height: 240 });
+    assert.deepStrictEqual(r.physical, { x: 0, y: 445, width: 240, height: 135 });
     // 比例守恒：物理 {w:240,h:135} 是逻辑 {w:135,h:240} 的转置 → h/w = 135/240 ≈ 1080/1920
     const src = 1080 / 1920;
     const out = r.physical.height / r.physical.width;
     assert.ok(Math.abs(out - src) < 0.02, 'src=' + src + ' out=' + out);
     assert.ok(isRectInsidePanel(r.physical));
   });
-  test('screen: 宽比例视频必须信箱进视频区 448x240（越区溢出回归防护）', () => {
+  test('screen: 宽比例视频必须信箱进视频区 469x240（越区溢出回归防护）', () => {
     // 历史 bug（X5 800x254）：fit box=全屏 → 比 16:9 更宽的视频按高适配得 w>列宽 →
     // 画面溢出到左栏按钮与右栏评论区（真机实测）。
     // X6 Pro 视频区逻辑 {x:64,y:0,w:448,h:240}，下方 y∈[240,266) 是进度条（26px）。

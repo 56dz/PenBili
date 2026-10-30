@@ -278,6 +278,7 @@ export async function openVideo(ctx, item) {
       cid: rs.cid,
       title: rs.title || item.title || '',
       up: item.up || '',
+      desc: item.desc || '', /* 简介（用户手绘稿 m11950：左列上方要显示标题和简介） */
       cover: item.cover || '',
       qn: rs.qn,
       aid: rs.aid || 0, /* 评论 oid（直播 = 0 → 评论不可用） */

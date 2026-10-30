@@ -547,9 +547,9 @@ static int render_start(int x, int y, int w, int h) {
     char rect[80];
     char location[96];
     char rotation[24];
-    char blocksize[32];
     char *argv[40];
     const char *extra = NULL;
+    int use_fdsrc;
     pid_t pid;
     int px = PANEL_X_OFFSET + x;
     int i = 0;
@@ -565,13 +565,41 @@ static int render_start(int x, int y, int w, int h) {
     if (mkfifo(g_rd.path, 0666) != 0) return -1;
 
     snprintf(location, sizeof(location), "location=%s", g_rd.path);
-    /* blocksize 只是 filesrc 的 read() 粒度：pipe 上的 read 会返回**已有字节**（不凑满），
-     * 所以它不影响帧延迟，只影响 syscall 密度。65536 是长期验证过的取值。
-     * （2026-10-30 曾怀疑「攒满 64KB 才推一批 → 每秒卡顿」，实测推翻，已回退。） */
-    snprintf(blocksize, sizeof(blocksize), "blocksize=%d", 65536);
+    /* v3.1.2【「约一秒卡一次」的真正根因与修法】
+     *
+     * 症状：点播/直播都能播、音频完全正常，但画面每 0.5~1s 顿一下。
+     * 早期误判过三条路（都已排除）：
+     *   · 网络抖动 —— 用本地 h264 文件跑同一条链路，卡顿一模一样；
+     *   · 解码慢 —— mppvideodec 解 60s 720p 只要 1.5s（~40x 实时），余量充足；
+     *   · Falcon UI 每秒重绘抢平面 —— 彻底不写响应式状态后大空档从 36 降到 30，
+     *     只是噪声级差异；debugfs 里 ui_changes 恒为 0。
+     *
+     * 真正原因：**filesrc 会攒满 blocksize 才把数据推给下游**。
+     *   app 每 33ms 往 FIFO 写一个 ~3KB 的 AU，而 filesrc blocksize=65536，
+     *   等于要攒 ~20 帧（≈0.66s）才下推一批 → h264parse/解码器一次收到一大簇
+     *   → 瞬间解完几帧连画、然后干等下一簇 ⇒ 用户看到的就是「冲一段、停一下」。
+     *   这也解释了为什么「平均帧率是对的（24fps）、但帧间隔直方图是双峰的」。
+     *   （曾经在注释里写过「pipe 上的 read 会返回已有字节、不会凑满」——那是错的，
+     *     filesrc 用的是 gst_base_src 的填充语义，会一直读到 blocksize 满足为止。）
+     *
+     * 修法：filesrc → **fdsrc**。fdsrc 专为管道设计，有数据就推，不等凑满块。
+     *   真机 A/B（16s、本地 24fps、无网络、其余参数完全相同）：
+     *     filesrc + sync=false ：vid_fps=22.88，>80ms 大空档 **78 次**（成簇）
+     *     filesrc + sync=true  ：vid_fps=23.44，大空档 3 次（sync 靠丢帧摊平）
+     *     fdsrc   + sync=false ：vid_fps=22.88，大空档 78 次（不解决根因）
+     *     fdsrc   + sync=true  ：**vid_fps=24.00、大空档 0 次、帧间隔全在 30-45ms** ← 采用
+     *   fdsrc 必须配 sync=true：fdsrc 逐帧推送后，sink 仍需按 PTS 对齐 vblank 才能
+     *   匀速出帧（否则跟着上游写的瞬时节奏走）。
+     *
+     * 实现要点：fdsrc 从 **fd 3** 读。子进程在 exec 前把 FIFO 读端 open 成 fd 3；
+     *   必须带 O_NONBLOCK——否则 open(O_RDONLY) 会阻塞等写端，而父进程的
+     *   open(O_WRONLY|O_NONBLOCK) 又会因"没有读者"返回 ENXIO，两边互等死锁。
+     *   fdsrc 自己会把 fd 设成非阻塞并用 poll 等待，所以传进去时非阻塞是安全的。
+     * 排查开关：/tmp/vp_filesrc.on → 退回 filesrc（老行为），便于对照。 */
     snprintf(rotation, sizeof(rotation), "rotation=%d", rot);
     snprintf(rect, sizeof(rect), "render-rectangle=<%d,%d,%d,%d>", px, y, w, h);
     if (getenv("PENBILI_GST_CONVERT")) extra = "videoconvert";
+    use_fdsrc = (access("/tmp/vp_filesrc.on", F_OK) != 0);
 
     pid = fork();
     if (pid < 0) {
@@ -600,13 +628,45 @@ static int render_start(int x, int y, int w, int h) {
             setenv("GST_DEBUG", (gdbg && gdbg[0]) ? gdbg : "*:3", 1);
             setenv("GST_DEBUG_NO_COLOR", "1", 1);
         }
+        /* v3.1.2：fdsrc 方案 —— 在 exec 前把 FIFO 读端 open 成 fd 3。
+         * 必须 O_NONBLOCK：阻塞式 open(O_RDONLY) 会等写端，而父进程的
+         * open(O_WRONLY|O_NONBLOCK) 在没有读者时返回 ENXIO，两边互等死锁。
+         * fdsrc 自己会设非阻塞 + poll，所以传进去时非阻塞是安全的。 */
+        if (use_fdsrc) {
+            int rfd = open(g_rd.path, O_RDONLY | O_NONBLOCK);
+            if (rfd < 0) {
+                int efd = open("/tmp/vp_gst_exit.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+                if (efd >= 0) {
+                    const char *m = "CHILD open fifo rd FAILED\n";
+                    (void)!write(efd, m, strlen(m));
+                    close(efd);
+                }
+                _exit(126);
+            }
+            if (rfd != 3) {
+                dup2(rfd, 3);
+                close(rfd);
+            }
+        }
         argv[i++] = (char *)GST_LAUNCH_PATH;
         /* PENBILI_GST_NOQ=1 → 去掉 -q，把 EOS/协商等全量消息打进日志（排查专用）。 */
         /* 排查期：默认不加 -q（看到 EOS/协商消息）；设 PENBILI_GST_QUIET=1 恢复安静模式。 */
         if (getenv("PENBILI_GST_QUIET")) argv[i++] = (char *)"-q";
-        argv[i++] = (char *)"filesrc";
-        argv[i++] = location;
-        argv[i++] = blocksize;
+        /* fpsdisplaysink 的 `rendered: N, dropped: M` 是 **element 的 last-message**，
+         * 只有 `-v` 才会被 gst-launch 打到日志；不加 -v 它一行都不输出（实测踩过）。
+         * 该开关只在取证期打开，正常播放不加，避免日志膨胀。 */
+        if (access("/tmp/vp_fps.on", F_OK) == 0) argv[i++] = (char *)"-v";
+        if (use_fdsrc) {
+            argv[i++] = (char *)"fdsrc";
+            argv[i++] = (char *)"fd=3";
+            /* 3000 ≈ 一个 640x360 帧的 AU 大小。fdsrc 有数据就推，这个值只影响
+             * 单次 read 上限，不再有「攒满才下推」的问题。 */
+            argv[i++] = (char *)"blocksize=3000";
+        } else {
+            argv[i++] = (char *)"filesrc";
+            argv[i++] = location;
+            argv[i++] = (char *)"blocksize=65536";
+        }
         argv[i++] = (char *)"!";
         argv[i++] = (char *)"h264parse";
         argv[i++] = (char *)"!";
@@ -617,12 +677,71 @@ static int render_start(int x, int y, int w, int h) {
             argv[i++] = (char *)extra;
             argv[i++] = (char *)"!";
         }
-        argv[i++] = (char *)"kmssink";
-        argv[i++] = (char *)"plane-id=" KMS_ID_STR;
-        argv[i++] = (char *)"driver-name=rockchip";
-        argv[i++] = (char *)"sync=false";
-        argv[i++] = (char *)"force-aspect-ratio=false";
-        argv[i++] = rect;
+        /* v3.1.2：queue 默认**去掉**。
+         *
+         * v3.1.1 曾为了救 sync=true 的掉帧在解码器后插 60 帧 queue，那是基于 filesrc
+         * 块读聚合的前提。改成 fdsrc 后数据是逐帧均匀推送的，queue 只会增加起播延迟
+         * 和内存占用，实测 fdsrc + sync=true 不带 queue 就是 24.00fps / 大空档 0。
+         * 保留为排查开关：/tmp/vp_queue.on → 插回 queue（对照旧行为）。
+         * /tmp/vp_noqueue.on 已无意义（默认就没有 queue），保留兼容。 */
+        if (access("/tmp/vp_queue.on", F_OK) == 0) {
+            argv[i++] = (char *)"queue";
+            argv[i++] = (char *)"max-size-buffers=60";
+            argv[i++] = (char *)"max-size-bytes=0";
+            argv[i++] = (char *)"max-size-time=0";
+            argv[i++] = (char *)"!";
+        }
+        /* v3.1.4 取证开关：/tmp/vp_fps.on 存在时，在 sink 外面套一层 fpsdisplaysink，
+         * 让它每秒往日志打一行 `rendered: N, dropped: M, current: X, average: Y`。
+         * 这是**唯一可信的渲染帧率判据** —— debugfs 采样器（dev/x6plane2）读数自相矛盾
+         * （同一份库连测两轮，一轮 58fps/0 大空档、一轮 27fps/86 次），因为它自己每秒
+         * 读 150 次 summary，本身就在干扰 page-flip。fpsdisplaysink 直接在 sink 的
+         * chain 里计数，不受采样开销影响。
+         *
+         * gst-launch 把 argv 用空格拼成管线，属性值里带空格必须**整段塞进一个 argv**
+         * 并用双引号包住（video-sink="kmssink ..."），否则会被当成多个元素。 */
+        /* ---- v3.1.3 sink 参数定案：sync=true + max-lateness=-1 + qos=false ----
+         *
+         * 这是「约一秒卡一次」的最终修复。三条参数必须**成组**使用，缺一条就退化：
+         *
+         *   sync=true      让 sink 按 PTS 对齐 vblank 做 page-flip，把网络抖动的
+         *                  ±100ms 到达抖动挡在显示层之外。缺它 → 出帧跟着上游写的
+         *                  瞬时节奏走，帧间隔忽快忽慢（真机 74 次大空档/20s）。
+         *   qos=false      从源头关掉 QoS 事件上报。
+         *   max-lateness=-1 让 sink 永不因"迟到"丢帧（-1 = unlimited）。
+         *
+         * 为什么后两条是必需的：kmssink 默认 `qos=true` 且 max-lateness 默认 20ms，
+         * 而 mppvideodec 在本机的 PTS 是坏的（/tmp/vp_gst.log 里明确写着
+         * `mppdec gstmppdec.c:562 MPP is not able to generate pts`）。于是每一帧
+         * 都被判"迟到" → sink 回 QoS 事件 → videodecoder 主动丢帧 →
+         * 真机实测只剩 **0.90fps**，日志里 18872 条 `Dropping frame due to QoS`。
+         * 一度误判成"sync 有问题"而改成 sync=false（28.8fps 但大空档 74 次），
+         * 加上后两条再测 sync=true 才得到 29.95fps / 大空档 1 次 —— 坏的不是 sync，
+         * 是"迟到就丢"这条默认策略。
+         *
+         * 排查开关：/tmp/vp_nosync.on → sync=false（回退对照）。 */
+        {
+            /* gst-launch 把所有 argv 用空格拼成一条管线，所以属性可以整段塞进一个
+             * argv；但 video-sink 的值本身带空格，必须用双引号包住才不会被拆成多个
+             * 元素。 */
+            char sp[320];
+            snprintf(sp, sizeof(sp),
+                    "plane-id=" KMS_ID_STR " driver-name=rockchip %s max-lateness=-1 qos=false "
+                    "force-aspect-ratio=false %s",
+                    access("/tmp/vp_nosync.on", F_OK) == 0 ? "sync=false" : "sync=true", rect);
+            if (access("/tmp/vp_fps.on", F_OK) == 0) {
+                char vs[400];
+                snprintf(vs, sizeof(vs), "video-sink=\"kmssink %s\"", sp);
+                argv[i++] = (char *)"fpsdisplaysink";
+                argv[i++] = (char *)"signal-fps-measurements=true";
+                argv[i++] = (char *)"fps-update-interval=1000";
+                argv[i++] = (char *)"silent=false";
+                argv[i++] = strdup(vs);
+            } else {
+                argv[i++] = (char *)"kmssink";
+                argv[i++] = strdup(sp);
+            }
+        }
         argv[i] = NULL;
         {
             /* 取证：子进程确实走到 execv（真机出现「gst exit=0 但日志 0 字节」时，
@@ -2578,11 +2697,13 @@ static void *video_thread(void *arg) {
              * v2.1.0 起滞后帧也逐帧贴屏（平滑快进），故 last_blit_at 每帧刷新、不会误报停帧。 */
             s->video_first_frame = 1;
         }
-        /* 每秒落一行节奏诊断（上限 300 行）。默认关闭，只在
-         * `export PENBILI_VID_DIAG=1` 后启用 —— 排查「上屏卡顿」时再打开，
-         * 免得日常播放每秒一次 open/write/close。 */
+        /* 每秒落一行节奏诊断（上限 300 行）。默认关闭 —— 排查「上屏卡顿」时再打开，
+         * 免得日常播放每秒一次 open/write/close。
+         * 开关用**文件存在性**而不是环境变量：`miniapp_cli start` 不会把 adb shell 里
+         * export 的变量传给被启动的 miniapp 进程（实测 PENBILI_VID_DIAG=1 完全无效，
+         * /tmp/vp_vid.log 一直是空文件），而 `touch /tmp/vp_diag.on` 随时生效。 */
         if (d_lines < 300 && now_seconds() - d_t0 >= 1.0) {
-            int dfd = getenv("PENBILI_VID_DIAG") ? open("/tmp/vp_vid.log", O_WRONLY | O_CREAT | O_APPEND, 0644) : -1;
+            int dfd = (access("/tmp/vp_diag.on", F_OK) == 0) ? open("/tmp/vp_vid.log", O_WRONLY | O_CREAT | O_APPEND, 0644) : -1;
             if (dfd >= 0) {
                 char dl[220];
                 int dl_n = snprintf(dl, sizeof(dl),

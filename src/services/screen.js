@@ -6,14 +6,14 @@
 //   触控     : direction=270, tp_xoffset=113
 //
 // 本项目布局（v3 定稿）：左栏 76 + 内容 884 = 960（主页）；
-// 播放/图文态：左图标栏 64 + 间隙 16 + 视频区 432x240 + 右栏 448 = 960，
-// 视频下方 y∈[240,266) 的 26px 留给进度条。
+// 播放态 v4 布局（用户手绘稿，m11950）：左 2 : 中 4.4 : 右 2.6 ⇒ 213 : 469 : 278 = 960。
+//   左列上 1.8 高（192）= 视频标题 + 简介；左列下 0.7 高（74）= 点赞/投币/收藏 三个按钮；
+//   中列 469x240 = 视频，其下 26px = 可拖动进度条；
+//   右列上 2.25 高（240）= 评论区；右列下 0.25 高（26）= 输入框 + 发送按钮。
+//   高度基准：1.8 + 0.7 = 2.25 + 0.25 = 2.5 单位 ⇒ 1 单位 = 266/2.5 = 106.4px。
 //
 // 为什么视频区高度是 240 而不是 266：X6 Pro 的视频走 KMS overlay 平面，
 // **盖在 Falcon UI 之上**，UI 画不上去。所以进度条必须落在视频矩形之外。
-//
-// 为什么中间有 16px 间隙：用户要求「增大左侧栏和视频的间距」（m06919-4）。
-// 间隙吃掉的是视频区宽度（448→432），右栏 448 不动，总宽仍是 960。
 
 export const LOGICAL = { width: 960, height: 266 };
 export const PHYSICAL = { width: 266, height: 960 };
@@ -27,14 +27,43 @@ export const PANEL_X_OFFSET = 107;
 // 主页左栏宽度（76 + 884 = 960）
 export const BAR_WIDTH = 76;
 
-// 播放/图文态的左图标栏宽度
-export const ICON_BAR_WIDTH = 64;
+// 主页视频网格列数：.grid 870 宽 / .vrow 174（166 + margin-right 8）⇒ 5 列。
+// 用户要求 m11950-3：加载更多后条目数必须能被列数整除，否则最后一行填不满。
+export const GRID_COLS = 5;
 
-// 左图标栏与视频区之间的间隙（用户要求 m06919-4 增大间距）
-export const ICON_BAR_GAP = 16;
+// 把条目列表裁到列数的整数倍（尾部余数丢掉），并报告是否发生了裁剪。
+// 只裁尾部、不重排，保证已有卡片位置不变。
+export function trimToGridRows(items, cols) {
+  const list = Array.isArray(items) ? items : [];
+  const n = Math.max(1, Math.round(Number(cols) || GRID_COLS));
+  const rem = list.length % n;
+  if (rem === 0) return { items: list, trimmed: 0 };
+  return { items: list.slice(0, list.length - rem), trimmed: rem };
+}
 
-// 播放态视频区（逻辑面坐标）：底部 26px 留给进度条
-export const VIDEO_AREA = { x: ICON_BAR_WIDTH + ICON_BAR_GAP, y: 0, width: 432, height: 240 };
+// 播放态三列宽度（用户手绘稿 m11950：左 2 : 中 4.4 : 右 2.6）
+//   213 + 469 + 278 = 960
+export const LEFT_COL_WIDTH = 213;
+export const MID_COL_WIDTH = 469;
+export const RIGHT_COL_WIDTH = 278;
+
+// 左列上下两块高度（1.8 : 0.7 单位，1 单位 = 106.4px）
+export const LEFT_INFO_H = 192;
+export const LEFT_BTN_H = 74;
+
+// 右列上下两块高度（2.25 : 0.25 单位）
+export const RIGHT_BODY_H = 240;
+export const RIGHT_INPUT_H = 26;
+
+// 视频下方进度条高度
+export const SEEK_H = 26;
+
+// 播放态视频区（逻辑面坐标）：x 紧接左列，底部 26px 留给进度条
+export const VIDEO_AREA = { x: LEFT_COL_WIDTH, y: 0, width: MID_COL_WIDTH, height: 240 };
+
+// 旧名兼容（图文态仍用「图标栏」这个概念时不再需要，保留导出避免既有 import 报错）
+export const ICON_BAR_WIDTH = LEFT_COL_WIDTH;
+export const ICON_BAR_GAP = 0;
 
 // 视频列逻辑宽度（= VIDEO_AREA.width，保留旧名给既有调用方）
 export const VIDEO_COL_WIDTH = VIDEO_AREA.width;

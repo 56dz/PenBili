@@ -17,36 +17,40 @@
       <text class="bar-status">{{ statusText }}</text>
     </div>
 
-    <!-- 播放/图文态左栏：纯图标工具条（参考 iPad 版 B站 播放页）
-         点赞/投币/收藏在图标右侧带全站计数，激活后整体变粉（用户要求 m07040）。 -->
+    <!-- 播放态左列（用户手绘稿 m11950）：上=视频标题/简介(192)，下=点赞/投币/收藏(74) -->
+    <div v-if="mode === 'play'" class="pleft">
+      <div class="pleft-info">
+        <div class="pback" @click="onIbarBack">
+          <image class="pback-icon" :src="ic.back" :width="22" :height="22"></image>
+        </div>
+        <text class="ptitle">{{ infoTitle }}</text>
+        <text class="pup">{{ infoUp }}</text>
+        <text class="pdesc">{{ playDesc }}</text>
+      </div>
+      <div class="pleft-btns">
+        <div class="pbtn" @click="onToggleLike">
+          <image class="pbtn-icon" :src="act.like ? ic.likeOn : ic.like" :width="26" :height="26"></image>
+          <text :class="act.like ? 'pbtn-count-on' : 'pbtn-count'">{{ formatCount(act.likeCount) }}</text>
+        </div>
+        <div class="pbtn" @click="onAddCoin">
+          <image class="pbtn-icon" :src="act.coin ? ic.coinOn : ic.coin" :width="26" :height="26"></image>
+          <text :class="act.coin ? 'pbtn-count-on' : 'pbtn-count'">{{ formatCount(act.coinCount) }}</text>
+        </div>
+        <div class="pbtn" @click="openFavOverlay">
+          <image class="pbtn-icon" :src="act.fav ? ic.starOn : ic.star" :width="26" :height="26"></image>
+          <text :class="act.fav ? 'pbtn-count-on' : 'pbtn-count'">{{ formatCount(act.favCount) }}</text>
+        </div>
+      </div>
+    </div>
+
+    <!-- 图文态左栏：纯图标工具条（评论开关） -->
     <div v-else class="ibar">
       <div class="ibtn" @click="onIbarBack">
         <image class="ibtn-icon" :src="ic.back" :width="26" :height="26"></image>
       </div>
-      <template v-if="mode === 'play'">
-        <!-- 用户要求 m09254：点赞/投币/收藏**放大**、数量移到**图标下方**；
-             左栏不再保留评论区按钮（评论区已是右栏默认态）。 -->
-        <div class="ibtn ibtn-big" @click="onToggleLike">
-          <image class="ibtn-icon ibtn-icon-big" :src="act.like ? ic.likeOn : ic.like" :width="32" :height="32"></image>
-          <text :class="act.like ? 'ibtn-count ibtn-count-on' : 'ibtn-count'">{{ formatCount(act.likeCount) }}</text>
-        </div>
-        <div class="ibtn ibtn-big" @click="onAddCoin">
-          <image class="ibtn-icon ibtn-icon-big" :src="act.coin ? ic.coinOn : ic.coin" :width="32" :height="32"></image>
-          <text :class="act.coin ? 'ibtn-count ibtn-count-on' : 'ibtn-count'">{{ formatCount(act.coinCount) }}</text>
-        </div>
-        <div class="ibtn ibtn-big" @click="openFavOverlay">
-          <image class="ibtn-icon ibtn-icon-big" :src="act.fav ? ic.starOn : ic.star" :width="32" :height="32"></image>
-          <text :class="act.fav ? 'ibtn-count ibtn-count-on' : 'ibtn-count'">{{ formatCount(act.favCount) }}</text>
-        </div>
-        <div class="ibtn" @click="onTogglePlay">
-          <image class="ibtn-icon" :src="play.state === 'playing' ? ic.pause : ic.play" :width="26" :height="26"></image>
-        </div>
-      </template>
-      <template v-else>
-        <div class="ibtn" @click="toggleArticleComments">
-          <image class="ibtn-icon" :src="commentsOpen ? ic.commentOn : ic.comment" :width="28" :height="28"></image>
-        </div>
-      </template>
+      <div class="ibtn" @click="toggleArticleComments">
+        <image class="ibtn-icon" :src="commentsOpen ? ic.commentOn : ic.comment" :width="28" :height="28"></image>
+      </div>
       <div class="info-spacer"></div>
       <text class="ibar-time">{{ ibarTimeCur }}</text>
       <text class="ibar-time-sub">{{ ibarTimeDur }}</text>
@@ -219,17 +223,15 @@
       </div>
     </div>
 
-    <!-- 播放态：图标栏与视频区之间的 16px 间距（用户要求 m06919-4 增大间距）。
-         必须是**不透明占位块**：播放态根容器 page-live 是透明的（为了不让全页重绘盖掉
-         fb 上的视频像素），这段空隙若无元素覆盖就会把上一屏的 fb 残留像素透出来
-         —— 真机实测表现为左上角 x=64..79 一块彩色噪点。 -->
-    <div v-if="mode === 'play'" class="ibar-gap"></div>
-
-    <!-- 播放态：中列视频（KMS 覆盖平面，UI 画不上去）+ 下方可拖动进度条 -->
-    <div v-if="mode === 'play'" class="stage">
-      <div class="video-box">
-        <hole v-if="holeVisible" class="video-hole"></hole>
-        <div v-else class="play-idle">
+    <!-- 播放态中列（用户手绘稿 m11950）：上=视频(469x240)，下=可拖动进度条(26)。
+         点击视频区暂停/继续（用户要求「接下来要修改为点击视频播放区暂停」）。 -->
+    <div v-if="mode === 'play'" class="pmid">
+      <div class="pvideo" @click="onTogglePlay">
+        <!-- 点击视频区暂停/继续（用户要求 m11950-4）。
+             hole 是视频平面上的透明占位，必须**自己**也绑 click —— falcon 的点击
+             不一定从子节点冒泡到父容器，真机实测只绑父级会有一半面积点不动。 -->
+        <hole v-if="holeVisible" class="video-hole" @click="onTogglePlay"></hole>
+        <div v-else class="play-idle" @click="onTogglePlay">
           <text class="play-idle-text">{{ idleText }}</text>
         </div>
       </div>
@@ -246,9 +248,9 @@
       </div>
     </div>
 
-    <!-- 播放态右栏：默认评论区（用户要求 m07040-5：不要选项栏）；
+    <!-- 播放态右列（用户手绘稿 m11950）：上=评论区(240)，下=输入框+发送按钮(26)。
          点收藏按钮时整栏被收藏夹选择覆盖，上方有退出按钮，退出恢复评论区。 -->
-    <div v-if="mode === 'play'" class="side">
+    <div v-if="mode === 'play'" class="pright">
       <!-- 收藏夹覆盖层 -->
       <template v-if="favOverlay">
         <div class="fav-head">
@@ -274,14 +276,8 @@
       </template>
       <!-- 评论区（默认） -->
       <template v-else>
-        <div class="side-body side-body-full">
+        <div class="pright-body">
           <scroller class="side-scroll">
-            <div class="sc-writeline">
-              <div class="reply-write" @click="onWriteReply">
-                <text class="reply-write-text">写评论</text>
-              </div>
-              <text v-if="!hasLogin" class="sc-login-hint">未登录 · 只能查看</text>
-            </div>
             <text v-if="replyStatus" class="reply-status">{{ replyStatus }}</text>
             <div v-for="rp in replies" :key="'rp' + rp.rpid" class="reply-block reply-block-n">
               <div class="reply-item" @click="toggleReply(rp)">
@@ -308,8 +304,16 @@
             <text v-if="!replies.length && replyLoading" class="reply-status">评论加载中…</text>
           </scroller>
         </div>
-        <!-- 操作反馈（点赞/投币/收藏结果、进度条调试），同时兼作播放提示 -->
-        <text class="side-foot">{{ act.status || play.note }}</text>
+        <!-- 输入框 + 发送（用户要求 m11950：右下是输入框，点输入框输入文字，点右侧按钮发送）。
+             笔端没有内嵌软键盘，所以点输入框唤起系统输入法，文本回填到框里，再点发送才真正提交。 -->
+        <div class="pinput">
+          <div class="pinput-box" @click="onComposeReply">
+            <text :class="cinText ? 'pinput-text' : 'pinput-ph'">{{ cinText || (hasLogin ? '发个友善的评论…' : '未登录 · 不能评论') }}</text>
+          </div>
+          <div :class="cinText ? 'pinput-send-on' : 'pinput-send'" @click="onSendReply">
+            <text class="pinput-send-text">发送</text>
+          </div>
+        </div>
       </template>
     </div>
 
@@ -407,6 +411,8 @@ import {
   formatCount
 } from '../../services/feed.js';
 import { fetchViewState, fetchFavFolders, setLike, addCoin, dealFav } from '../../services/bili/action.js';
+// 主页网格列数 + 尾部裁剪（用户要求 m11950-3：加载更多后条目数必须能被列数整除）
+import { GRID_COLS, trimToGridRows } from '../../services/screen.js';
 // 图标：本地 PNG 走 aiot-vue-cli 的 image 插件 → 产物 images/<md5>.png（见 rollup-plugins/image.js）。
 // 不用 falcon-ui 的 icon 组件：它依赖 font-family: falcon-icons，但包内没有该字体文件（渲染为空）。
 import icHome from '../../assets/icons/home.png';
@@ -579,7 +585,10 @@ export default {
       favFolders: [],
       favStatus: '',
       // 可拖动进度条：拖动中的临时位置（null=未拖动，跟随播放）
-      seekDragMs: null
+      seekDragMs: null,
+      // 播放页右下输入框里的待发送评论（用户手绘稿 m11950：
+      // 点输入框唤起系统输入法回填文本，点右侧「发送」按钮才真正提交）
+      cinText: ''
     };
   },
   computed: {
@@ -670,14 +679,21 @@ export default {
       const s = this.play.session;
       return s ? formatDuration((s.durationMs || 0) / 1000) : '';
     },
-    // 进度条填充宽（px）：轨道 432，圆点 10，二者同排 → 填充最多 422
+    // 进度条填充宽（px）：中列 469，左右 padding 各 8 → 轨道 453；圆点 10 与填充同排 → 填充最多 443
     seekFillW() {
       const s = this.play.session;
       const dur = s ? s.durationMs || 0 : 0;
       if (!(dur > 0)) return 0;
       const ms = this.seekDragMs == null ? this.play.positionMs : this.seekDragMs;
       const r = Math.max(0, Math.min(1, ms / dur));
-      return Math.round(406 * r);
+      return Math.round(443 * r);
+    },
+    // 左列简介（用户手绘稿 m11950：左列上方显示视频标题和简介）
+    playDesc() {
+      const s = this.play.session;
+      if (!s) return '';
+      const d = s.desc || '';
+      return d || '（暂无简介）';
     }
   },
   async created() {
@@ -868,11 +884,14 @@ export default {
         logWarn('[bili] load ' + id + ' fail: ' + this.statusText);
         return;
       }
-      if (id === 'rcmd') this.rcmdItems = r.items;
-      else if (id === 'hot') this.hotItems = r.items;
-      else if (id === 'search') this.searchResults[this.searchType] = r.items;
+      // 首屏也裁到列数整数倍，保证第一屏就是整行（用户要求 m11950-3）
+      const first = trimToGridRows(r.items, GRID_COLS);
+      if (id === 'rcmd') this.rcmdItems = first.items;
+      else if (id === 'hot') this.hotItems = first.items;
+      else if (id === 'search') this.searchResults[this.searchType] = first.items;
       this.statusText = '';
-      logWarn('[bili] load ' + id + ' ok n=' + r.items.length);
+      logWarn('[bili] load ' + id + ' ok n=' + first.items.length +
+        (first.trimmed ? ' trim=' + first.trimmed : ''));
     },
     async loadMoreHot() {
       const myGen = ++this.gen;
@@ -890,11 +909,15 @@ export default {
         return;
       }
       const merged = appendDeduped(this.hotItems, r.items);
-      this.hotItems = merged.items;
+      // 用户要求 m11950-3：加载更多后条目数必须能被列数整除，否则最后一行填不满。
+      // 只裁尾部（不重排），被裁掉的条目会在下一次「加载更多」时由新页补上。
+      const cut = trimToGridRows(merged.items, GRID_COLS);
+      this.hotItems = cut.items;
       this.hotPn = this.hotPn + 1;
       this.hotNoMore = r.noMore || merged.added === 0;
       this.statusText = merged.added === 0 ? '没有更多了' : '';
-      logWarn('[bili] hot page ' + this.hotPn + ' +' + merged.added + ' total=' + merged.items.length);
+      logWarn('[bili] hot page ' + this.hotPn + ' +' + merged.added + ' total=' + this.hotItems.length +
+        (cut.trimmed ? ' trim=' + cut.trimmed : ''));
     },
 
     /* ---------- 搜索 / 刷新 / 更多 ---------- */
@@ -965,10 +988,13 @@ export default {
       }
       this.hotMorePn = this.hotMorePn + 1;
       const merged = appendDeduped(this.rcmdItems, r.items);
-      this.rcmdItems = merged.items;
+      // 同上：尾部裁到列数整数倍（用户要求 m11950-3）
+      const cut = trimToGridRows(merged.items, GRID_COLS);
+      this.rcmdItems = cut.items;
       this.moreNoMore = r.noMore || merged.added === 0;
       this.statusText = merged.added === 0 ? '没有更多了' : '';
-      logWarn('[bili] rcmd+hot 续底 +' + merged.added + ' total=' + merged.items.length + ' pn=' + this.hotMorePn);
+      logWarn('[bili] rcmd+hot 续底 +' + merged.added + ' total=' + this.rcmdItems.length + ' pn=' + this.hotMorePn +
+        (cut.trimmed ? ' trim=' + cut.trimmed : ''));
     },
     // 搜索翻页（search/type 支持 page；三分栏各自独立分页）
     async loadMoreSearch() {
@@ -1001,9 +1027,12 @@ export default {
       this.searchPages[st] = r.page;
       this.searchNoMoreMap[st] = r.noMore;
       const merged = appendDeduped(this.searchResults[st], r.items);
-      this.searchResults[st] = merged.items;
+      // 同上：尾部裁到列数整数倍（用户要求 m11950-3）
+      const cut = trimToGridRows(merged.items, GRID_COLS);
+      this.searchResults[st] = cut.items;
       this.statusText = merged.added === 0 ? '没有更多了' : '';
-      logWarn('[bili] search(' + st + ') page ' + r.page + ' +' + merged.added + ' total=' + merged.items.length);
+      logWarn('[bili] search(' + st + ') page ' + r.page + ' +' + merged.added + ' total=' + cut.items.length +
+        (cut.trimmed ? ' trim=' + cut.trimmed : ''));
     },
 
     /* ---------- 搜索三分栏切换 / 图文 / 直播 ---------- */
@@ -1114,6 +1143,7 @@ export default {
       this.favFolders = [];
       this.favStatus = '';
       this.seekDragMs = null;
+      this.cinText = '';
       this.play = {
         state: 'loading',
         session: {
@@ -1493,6 +1523,10 @@ export default {
       this.act.likeCount = r.likeCount || 0;
       this.act.coinCount = r.coinCount || 0;
       this.act.favCount = r.favCount || 0;
+      // 简介来自 /x/web-interface/view 的 data.desc（列表项里没有），拿到就补进 session
+      if (r.desc && this.play.session && !this.play.session.desc) {
+        this.play.session = Object.assign({}, this.play.session, { desc: r.desc });
+      }
     },
     async onToggleLike() {
       if (this.act.busy) return;
@@ -1617,13 +1651,12 @@ export default {
     /* ---------- 可拖动进度条 ---------- */
     // falcon 运行时只有 changedTouches[0].pageX / pageY（offsetX/clientX/touches 全为 0），
     // 没有 panstart/panmove，所以自己按逻辑坐标算比例。
-    // 轨道几何固定：.seek 逻辑 x=80 起（图标栏 64 + 间隙 16）、左右 padding 8 → 轨道左端 88、宽 416。
-    // 轨道几何：pageX 是「相对被触摸元素」的坐标，不是整页坐标——实测在 .seek
-    // 内点逻辑 x=100 得到 pageX=37（偏移恒为 -63，即 -(.seek 逻辑 x)），点 420 得 357。
-    // 所以减的是 .seek 的 8px 左 padding，不是 88（图标栏 64 + 间隙 16 + 8）。
+    // 轨道几何（v4 手绘布局 m11950）：.seek 宽 469（中列宽），左右 padding 各 8 → 轨道 453。
+    // pageX 是「相对被触摸元素」的坐标，不是整页坐标 —— 实测在 .seek 内点元素内 x=37
+    // 得到的 pageX 就是 37，所以只需减 8px 左 padding，不用再减中列的绝对 x。
     seekRatioAt(x) {
       if (!isFinite(x)) return null;
-      return Math.max(0, Math.min(1, (x - 8) / 416));
+      return Math.max(0, Math.min(1, (x - 8) / 453));
     },
     onSeekTouch(e) {
       const t = (e && e.changedTouches && e.changedTouches[0]) || null;
@@ -1729,7 +1762,13 @@ export default {
       if (add.length === 0) this.replyNoMore = true;
       logWarn('[bili] replies more +' + add.length + ' total=' + this.replies.length);
     },
-    async onWriteReply() {
+    /* ---------- 评论输入（两步式，用户手绘稿 m11950）----------
+     * 原 onWriteReply 是「弹系统输入法 → 直接发送」一步式；手绘稿要求右下方有常驻输入框，
+     * 点框输入文字、点右侧按钮发送。所以拆成两步：
+     *   onComposeReply：只负责唤起输入法并把文本回填到 cinText（不提交）
+     *   onSendReply   ：把 cinText 真正 POST 出去
+     * 两步共用 postReply(text)，保证校验/埋点/头插逻辑只有一份。 */
+    async onComposeReply() {
       const sess = await loadSession();
       const csrf = (sess.login && sess.login.bili_jct) || '';
       if (!csrf) {
@@ -1745,6 +1784,83 @@ export default {
       // 系统输入法会触发宿主 onHide —— 同 onOpenInput 用 imBusy 守卫，防 teardown 作废本次输入
       this.imBusy = true;
       try {
+        const inp = await input.open({
+          value: this.cinText || '',
+          placeholder: '友善评论，说点什么…',
+          maxlength: 1000
+        });
+        if (this.gen !== myGen) return;
+        if (inp && inp.error) {
+          this.replyStatus = '输入法不可用(' + inp.error + ')';
+          return;
+        }
+        // 取消（confirmed=false）时保留原文本，不清空用户已写的内容
+        if (inp && inp.confirmed) this.cinText = (inp.text || '').trim();
+        this.replyStatus = this.cinText ? '' : this.replyStatus;
+      } finally {
+        this.imBusy = false;
+      }
+    },
+    async onSendReply() {
+      const text = (this.cinText || '').trim();
+      if (!text) {
+        this.replyStatus = '请先输入评论内容';
+        return;
+      }
+      const ok = await this.postReply(text);
+      if (ok) this.cinText = '';
+    },
+    // 真正提交一条评论 → true 表示成功（发送失败时保留输入框内容，用户不必重打）
+    async postReply(text) {
+      const sess = await loadSession();
+      const csrf = (sess.login && sess.login.bili_jct) || '';
+      if (!csrf) {
+        this.replyStatus = '请先在「我的」扫码登录后再评论';
+        return false;
+      }
+      const ctx = this.replyCtx || { oid: 0, type: 1 };
+      if (!(ctx.oid > 0)) {
+        this.replyStatus = '当前稿件无评论上下文';
+        return false;
+      }
+      const myGen = this.gen;
+      this.replyStatus = '发送中…';
+      const r = await addReply(this.client, ctx.oid, text, csrf, ctx.type);
+      if (this.gen !== myGen) return false;
+      if (!r.ok) {
+        this.replyStatus = '发送失败：' + (r.message || '');
+        logWarn('[bili] reply add fail stage=' + r.stage + ' code=' + r.code + ' ' + r.message);
+        return false;
+      }
+      this.replyStatus = '已发布';
+      // 头插本地（服务端审核有延迟，先让用户看到自己那条）
+      this.replies.unshift({
+        rpid: r.rpid,
+        name: (sess.login && sess.login.uname) || '我',
+        message: text,
+        likes: 0,
+        ctime: Math.floor(Date.now() / 1000),
+        rcount: 0
+      });
+      logWarn('[bili] reply add ok rpid=' + r.rpid + ' len=' + text.length);
+      return true;
+    },
+    // 图文态仍用一步式（那里没有常驻输入框）
+    async onWriteReply() {
+      const sess = await loadSession();
+      const csrf = (sess.login && sess.login.bili_jct) || '';
+      if (!csrf) {
+        this.replyStatus = '请先在「我的」扫码登录后再评论';
+        return;
+      }
+      const ctx = this.replyCtx || { oid: 0, type: 1 };
+      if (!(ctx.oid > 0)) {
+        this.replyStatus = '当前稿件无评论上下文';
+        return;
+      }
+      const myGen = this.gen;
+      this.imBusy = true;
+      try {
         this.replyStatus = '输入评论…';
         const inp = await input.open({ value: '', placeholder: '友善评论，说点什么…', maxlength: 1000 });
         if (this.gen !== myGen) return;
@@ -1757,25 +1873,7 @@ export default {
           this.replyStatus = '';
           return;
         }
-        this.replyStatus = '发送中…';
-        const r = await addReply(this.client, ctx.oid, text, csrf, ctx.type);
-        if (this.gen !== myGen) return;
-        if (!r.ok) {
-          this.replyStatus = '发送失败：' + (r.message || '');
-          logWarn('[bili] reply add fail stage=' + r.stage + ' code=' + r.code + ' ' + r.message);
-          return;
-        }
-        this.replyStatus = '已发布';
-        // 头插本地（服务端审核有延迟，先让用户看到自己那条）
-        this.replies.unshift({
-          rpid: r.rpid,
-          name: (sess.login && sess.login.uname) || '我',
-          message: text,
-          likes: 0,
-          ctime: Math.floor(Date.now() / 1000),
-          rcount: 0
-        });
-        logWarn('[bili] reply add ok rpid=' + r.rpid + ' len=' + text.length);
+        await this.postReply(text);
       } finally {
         this.imBusy = false;
       }
