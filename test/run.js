@@ -2199,6 +2199,60 @@ async function main() {
       assert.ok(Math.abs(out - src) / src < 0.02, tag + ' 变形: src=' + src + ' out=' + out);
     }
   });
+
+  // ---------------- native 管线源码契约（player.c 是 C，单测只能查文本） ----------------
+  // 这几条防的都是「改了不报错、真机上画面直接没了」的静默故障。
+  const csrc = fsx.readFileSync(pathx.join(__dirname, '..', 'native', 'csrc', 'player.c'), 'utf8');
+
+  test('native: 面板率常量是 1497/25（59.88Hz），不能写成 60/1', () => {
+    // 面板实测 59.88Hz（modetest -c: #0 480x960 59.88）。写 60/1 会差 0.2%，
+    // 长跑里每 ~8s 多出一帧，表现为周期性错拍。
+    assert.ok(/PENBILI_PANEL_RATE\s+"1497\/25"/.test(csrc), 'PENBILI_PANEL_RATE 必须是 "1497/25"');
+    assert.ok(!/PENBILI_PANEL_RATE\s+"60\/1"/.test(csrc), '不能退化成 60/1');
+  });
+
+  test('native: caps 必须是一个 argv（拆开会拼出非法 caps）', () => {
+    // 历史 bug：写成 argv "video/x-raw" + "framerate=1497/25" 两个元素，
+    // gst-launch 用空格拼成 `video/x-raw framerate=1497/25`，
+    // caps 语法要求逗号 → `could not parse caps`，整条管线不建，
+    // 真机表现是「日志里 erroneous pipeline、屏幕停在上一帧」。
+    assert.ok(
+      /argv\[i\+\+\] = \(char \*\)"video\/x-raw,framerate=" PENBILI_PANEL_RATE;/.test(csrc),
+      'framerate caps 必须与 video/x-raw 拼在同一个字符串里'
+    );
+    assert.ok(
+      !/argv\[i\+\+\] = \(char \*\)"video\/x-raw";[\s\S]{0,200}argv\[i\+\+\] = \(char \*\)"framerate=/.test(
+        csrc
+      ),
+      '不允许把 video/x-raw 与 framerate= 拆成两个 argv'
+    );
+  });
+
+  test('native: kmssink 两条分支都带 skip-vsync=true', () => {
+    // 原子驱动下 kmssink 的 vsync 等待是双份的，60fps 内容只跑到 57.45fps
+    // （8s 素材耗时 8747ms；加 skip-vsync 后 8410ms / 60.19fps）。
+    // fpsdisplaysink 分支（取证用）和直连 kmssink 分支必须一致，否则
+    // 「开着诊断就流畅、关掉就卡」这种幽灵问题会回来。
+    const n = (csrc.match(/skip-vsync=true/g) || []).length;
+    assert.ok(n >= 2, 'skip-vsync=true 应出现 >= 2 次（fps 诊断分支 + 正常分支），实际 ' + n);
+  });
+
+  test('native: 归一化有排查开关，且默认开启', () => {
+    // /tmp/vp_nonorm.on 存在 → 跳过 videorate 归一（对照旧行为）。
+    // 判据取反：`access(...) != 0` 才是「默认开启」。
+    assert.ok(
+      /access\("\/tmp\/vp_nonorm\.on", F_OK\) != 0/.test(csrc),
+      '归一化开关必须是 != 0（默认开启）'
+    );
+  });
+
+  test('native: 帧率上限 videorate 仍在归一化之前（先降帧再复制）', () => {
+    // 顺序错了会先复制到 60 再丢到 30，白跑一倍像素。
+    const capAt = csrc.indexOf('max-rate=%d');
+    const normAt = csrc.indexOf('vp_nonorm.on');
+    assert.ok(capAt > 0 && normAt > 0, '两处都必须存在');
+    assert.ok(capAt < normAt, 'max-rate 的 videorate 必须排在归一化之前');
+  });
 }
 
 main().then(

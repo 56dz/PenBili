@@ -195,6 +195,9 @@ static void raise_audio_thread_prio(void); /* 定义在 RING 水位区（feeder 
 #define PANEL_X_OFFSET 107
 #define KMS_PLANE_ID 76
 #define KMS_ID_STR "76"
+/* v3.4.0：面板实际刷新率（`modetest -c` 报 #0 480x960 **59.88**，30000/1001 类时序）。
+ * 用 1497/25 精确表达 59.88，别写 60/1 —— 差 0.2% 会在长跑里周期性多出一帧。 */
+#define PENBILI_PANEL_RATE "1497/25"
 #define GST_LAUNCH_PATH "/usr/bin/gst-launch-1.0"
 #define KMS_FIFO_PATH "/tmp/vp_vid.fifo"
 #define FFMPEG_PATH "/usr/bin/ffmpeg"
@@ -701,6 +704,37 @@ static int render_start(int x, int y, int w, int h) {
             argv[i++] = strdup(cap);
             argv[i++] = (char *)"!";
         }
+        /* ---- v3.4.0 输出帧率归一到面板刷新率（消除 pulldown 抖动）----
+         *
+         * 面板实测刷新率 **59.88Hz**（`modetest -c`：#0 480x960 59.88 30000），
+         * 而 B 站实际内容绝大多数是 **30fps**（PC 侧扫 34 条热门/搜索稿件，
+         * 服务端给 >45fps 档的 **0 条**；app 日志里 qn=64 的源也全是 @30.000）。
+         * 30fps 落在 59.88Hz 上不是整 2:1 —— 每帧 1.996 个刷新周期，kmssink 按
+         * PTS 找最近 vblank 时就会在「2 个刷新」和「3 个刷新」之间来回跳，
+         * 24fps 内容更明显（2.495 周期，标准 3:2 pulldown）。这就是用户说的
+         * 「720p60fps 还是有点卡」——不是解码不够，是**帧节奏不匀**。
+         *
+         * 解法：解码后用 videorate **按面板率复制帧**（只复制不插帧，画面内容不变），
+         * 让每一个刷新周期都恰好对应一次 page-flip，帧间隔完全均匀。
+         * 真机实测（`/tmp/t_final2.sh`，全部 dropped=0）：
+         *   30fps 源 → 60.00fps ｜ 60fps 源 → 60.16fps ｜ 24fps 源 → 59.91fps
+         * CPU 代价：单核 5.7% → 6.3%（复制的是 NV12 指针，不产生像素拷贝）。
+         *
+         * 为什么用 1497/25 而不是 60/1：60/1 与面板差 0.2%，每 ~8s 会多出一帧；
+         * 1497/25 = 59.88 与面板严格相等，长跑（60s/3484 帧）无周期性错拍。
+         *
+         * 排查开关：/tmp/vp_nonorm.on → 不做归一（对照旧行为）。 */
+        if (access("/tmp/vp_nonorm.on", F_OK) != 0) {
+            argv[i++] = (char *)"videorate";
+            argv[i++] = (char *)"!";
+            /* ⚠️ caps 必须是**一个** argv：gst-launch 把 argv 用空格拼接，
+             * 拆成 "video/x-raw" + "framerate=1497/25" 会拼出
+             *   video/x-raw framerate=1497/25
+             * 而 caps 语法要求逗号分隔 → 报 `could not parse caps`，整条管线
+             * 直接不建（真机踩过：日志里 `erroneous pipeline`，画面还是旧帧）。 */
+            argv[i++] = (char *)"video/x-raw,framerate=" PENBILI_PANEL_RATE;
+            argv[i++] = (char *)"!";
+        }
         if (extra) {
             argv[i++] = (char *)extra;
             argv[i++] = (char *)"!";
@@ -763,7 +797,7 @@ static int render_start(int x, int y, int w, int h) {
                 char vs[400];
                 snprintf(vs, sizeof(vs),
                         "video-sink=\"kmssink plane-id=" KMS_ID_STR " driver-name=rockchip %s "
-                        "max-lateness=-1 qos=false force-aspect-ratio=false %s\"", sync, rect);
+                        "max-lateness=-1 qos=false force-aspect-ratio=false skip-vsync=true %s\"", sync, rect);
                 argv[i++] = (char *)"fpsdisplaysink";
                 argv[i++] = (char *)"signal-fps-measurements=true";
                 argv[i++] = (char *)"fps-update-interval=1000";
@@ -777,6 +811,12 @@ static int render_start(int x, int y, int w, int h) {
                 argv[i++] = (char *)"max-lateness=-1";
                 argv[i++] = (char *)"qos=false";
                 argv[i++] = (char *)"force-aspect-ratio=false";
+                /* v3.4.0：原子驱动下 kmssink 的 vsync 等待是**双份**的（自己等一次，
+                 * drmModeAtomicCommit 内部再等一次），60fps 内容因此只跑到 57.45fps
+                 * （8s 素材耗时 8747ms）。加 skip-vsync=true 后 8410ms / 60.19fps。
+                 * 它只跳过 flip 之后那次多余等待，**不影响按 PTS 对齐 vblank**，
+                 * 所以不会撕裂；配合上面的 videorate 归一才是完整的帧节奏方案。 */
+                argv[i++] = (char *)"skip-vsync=true";
                 argv[i++] = rect;
             }
         }

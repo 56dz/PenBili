@@ -205,7 +205,7 @@
         </div>
         <div class="mine-row">
           <text class="mine-label">PenBili</text>
-          <text class="mine-value">v3.3.0 · {{ profile ? '已登录' : '匿名' }}</text>
+          <text class="mine-value">v3.4.0 · {{ profile ? '已登录' : '匿名' }}</text>
         </div>
       </scroller>
 

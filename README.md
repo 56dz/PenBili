@@ -20,13 +20,17 @@
 > **`3.1.x` 变更**：**修掉「约一秒卡一次」** —— 根因是 `filesrc` 攒满 `blocksize` 才下推 + `kmssink` 默认 QoS 丢帧，详见下方「性能诊断记录」。同时把选流从「取最小像素」改为「取最高可用分辨率与帧率」（软解时代的保守策略在硬解后纯属画质损失），直播改选 480p 直连并显式请求低分辨率流。
 > **`3.2.0` 变更**：**画质与帧率可调** —— 「我的」菜单在「刷新登录态」下方新增「视频调节」（分辨率、帧率）与「直播」（分辨率、刷新率）四行设置，点整行轮转选项、立即落盘。帧率上限由 native 在 `mppvideodec` 之后插 `videorate max-rate=N` 实现（只封顶不插帧）。
 > **`3.3.0` 变更**：**分辨率与帧率合并为单一「画质」档**。原先两个独立选项允许选出「360p + 60fps」这种服务端根本不存在的组合（B 站 qn 编码里 60fps 只有 116/74 两个专档，480p/360p 只有 30fps 变体），选流会先按 qn 卡死再白等一轮降级。现在每个画质档自带 `(ladder, maxPixels, fpsCap)`，菜单里直接写成 `1080p 60fps` / `1080p 30fps` / `720p 60fps` / `720p 30fps` / `480p 30fps` / `360p 30fps`，不存在非法组合。老记录（v1 的 `videoQuality`+`videoFps` 两字段）按迁移表自动折算到合并档，「360p+60fps」这类组合收成 `360p30`，认不出的落 `auto`。
+> **`3.4.0` 变更**：**修掉「选了 60fps 档还是卡顿」** —— 两个叠加根因，都不在解码器上（`mppvideodec` 实测 720p60 有 3.07x 实时余量）。
+> ① **kmssink 双份 vsync 等待**：原子驱动下 `sync=true` 的等待被做了两遍，60fps 素材只跑到 **57.45fps**（8s 素材耗时 8747ms）。加 `skip-vsync=true` 后 8410ms / **60.19fps** —— 只跳过 flip 之后那次多余等待，仍按 PTS 对齐 vblank，不撕裂。
+> ② **30/24fps 内容在 59.88Hz 面板上的 3:2 抖动**：面板实测 59.88Hz（`modetest -c`），30fps 每帧 1.996 个刷新周期、24fps 2.495 个，`kmssink` 在 2 与 3 个刷新之间来回跳 —— 这才是「720p60 档仍然卡」的真实原因：服务端给该档的源**绝大多数本身就是 30fps**（实测 34 条稿件 maxfps ≤ 30.3）。
+> 修法是 `mppvideodec` 之后插 `videorate` 把帧率**归一到面板率 `1497/25`**（=59.88，严格相等；写 `60/1` 会差 0.2%，长跑每 ~8s 多一帧），再配合 `skip-vsync=true`。实测 30/60/24fps 三种源全部稳定 **59.3~60.2fps、`dropped: 0`**，CPU 单核仅 5.7%→6.3%（`videorate` 复制的是 NV12 指针，caps 协商确认全程无 `videoconvert`）。
 
 > **`2.9.4` 变更**：**修掉「连续播放 30 分钟后音频落后视频约 1.5 秒」+ 打通外网直播链路**。
 > ① **音视频分离双进程**：单进程 ffmpeg 串行写视频/音频两个输出，视频 pipe（32MB 缓冲）被填满时 ffmpeg **整体阻塞** → 音频同停 → 环/管道被抽干 → ALSA underrun（真机实测 8 次、最长 2.36s）→ **音频内容永久落后**（累计 3.17s）。改为视频进程 + 音频进程各自独立拉同一条转码地址，视频背压不再牵连音频产出。
 > ② **外网链路修复**（STUN 打洞 + Cloudflare 301 场景）：CF 的 301 规则**会丢弃 query string**（`best/live?room=...` → `xyz:端口/live`，服务端 400）；`jsapi.http` 不跟随 301，重定向解析改走 **native libcurl**（`FOLLOWLOCATION=1`）拿终点 host 回写 `resolvedAddr`，播放直连打洞地址绕过 301；降级（解析失败）不再回写缓存；探测超时 2s/5s → 8s/15s（打洞端口 TCP connect 实测可达 5s+）；直播首帧上限 15s→60s、并禁用断流重启（`-ss` seek 对 HLS 直播滑动窗口无效，会卡死循环）。
 > **30 分钟外网长测**（某在播房间，手机热点 + STUN 打洞）：帧率 **29.95fps**、位置增速 **1.00x 实时**、**underrun 0 次**（修复前 8 次累计 3.17s）、丢帧/重启 0；音画偏移 `d` 全程稳定，仅 19.7 分钟处一次外网抖动导致音频进程短暂断供 ~2s（偏移最深 -2232ms），**伺服 30s 内自愈到 -40ms，无永久落后**（修复前会永久落后 1.5s）。
 
-![version](https://img.shields.io/badge/version-3.0.0-blue)
+![version](https://img.shields.io/badge/version-3.4.0-blue)
 ![license](https://img.shields.io/badge/license-GPL--3.0-green)
 
 ## 截图
@@ -151,7 +155,34 @@ blocksize=3000`（子进程 `dup2` 到 fd 3，必须 `O_NONBLOCK` 否则与父�
 拼成一个带空格的字符串会被 gst-launch 整体当成前一个属性的取值（曾导致「只有声音没画面」）。
 
 旋转交给解码器：`mppvideodec` 自带 `rotation` 属性，直接按面板朝向（`direction=270`）出正立画面，
-不需要 `videoconvert` 之类的软件转换，也省掉了整帧旋转的 CPU 开销。
+不需要 `videoconvert` 之类的软件转换，也省掉了整帧旋转的 CPU 开销。代价是 `rotation=270` 吃掉约
+**47% 解码吞吐**（720p60 从 2607ms 升到 5133ms），但仍留有 1.56x 实时余量；平面级旋转是死路 ——
+4 个 overlay 平面（54/76/90/104）的 `rotation` 属性只声明了 `rotate-0=0x1` 与 `reflect-y=0x20`，
+没有 90/270 位，`kmssink plane-properties=rotation=8` 虽能跑起来但回读 `/sys/kernel/debug/dri/0/state`
+仍是 `rotation=1`，驱动直接忽略。
+
+**「选了 60fps 档还是卡」的两个根因（v3.4.0 定案）** 都不在解码能力上。先量清楚：720p60 素材
+`mppvideodec rotation=270` 解 480 帧只要 2607ms（3.07x 实时），1080p60 则是 9810ms（0.82x，不够实时）——
+所以问题不在算力。
+
+① **kmssink 双份 vsync 等待**。原子驱动下 `sync=true` 会做两次 vsync 等待，8s@60fps 素材耗时
+8747ms、`fpsdisplaysink` 报 57.45fps。加 `skip-vsync=true`（`kmssink` 文档写明「用于原子驱动以避免
+双重 vsync」）后 8410ms / 60.19fps，画面不撕裂 —— 它只跳过 flip 之后那次多余等待，PTS 对齐 vblank 的
+那一次保留。
+
+② **30/24fps 内容在 59.88Hz 面板上的 3:2 抖动**。面板实测 59.88Hz（`modetest -c`：`#0 480x960 59.88`），
+30fps 每帧占 1.996 个刷新周期、24fps 占 2.495 个，`kmssink` 只能在 2 与 3 个周期之间来回跳，
+观感就是「不流畅」。而「720p 60fps」档只允许 60fps 的 qn，服务端对该档的源**绝大多数本身就是 30fps**
+（批量探测 34 条稿件 maxfps ≤ 30.3），所以用户选了 60fps 档、实际播的仍是 30fps 内容 —— 卡顿感来自这里。
+
+修法是在 `mppvideodec` 之后插 `videorate` 把帧率**归一到面板率**，再配合 `skip-vsync=true`：
+`video/x-raw,framerate=1497/25`（=59.88，与面板严格相等；写 `60/1` 差 0.2%，长跑每 ~8s 多一帧，
+会造成周期性错拍）。顺序不能反 —— 先 `max-rate` 降帧再复制，否则白跑一倍像素。实测三种源
+（30fps / 60fps / 24fps）全部稳定 59.3~60.2fps、`dropped: 0`，60s 长跑无错拍；CPU 单核 5.7%→6.3%，
+因为 `videorate` 复制的是 NV12 缓冲指针而非像素，caps 协商确认 `videorate` 输出与 `kmssink` 输入
+都是 NV12，全程没有 `videoconvert` 介入。
+
+排查开关：`touch /tmp/vp_nonorm.on` 可跳过归一化（对照旧行为）。
 
 ## 构建与测试
 
@@ -163,7 +194,7 @@ X5 用的是 `arm-linux-gnueabihf.2.23`。32 位库在 X6 Pro 上会被 `dynamic
 
 ```bash
 npm ci
-npm test                    # 130 条逻辑、协议与几何回归测试（含图文正文解析、直播地址/画质档与重定向缓存、合并画质档与 v1 迁移）
+npm test                    # 135 条逻辑、协议与几何回归测试（含图文正文解析、直播地址/画质档与重定向缓存、合并画质档与 v1 迁移）
 node test/qr_login_test.js  # 21 条登录协议测试
 
 # 打包 AMR（QuickJS 生产包）
