@@ -30,7 +30,7 @@
 > ② **外网链路修复**（STUN 打洞 + Cloudflare 301 场景）：CF 的 301 规则**会丢弃 query string**（`best/live?room=...` → `xyz:端口/live`，服务端 400）；`jsapi.http` 不跟随 301，重定向解析改走 **native libcurl**（`FOLLOWLOCATION=1`）拿终点 host 回写 `resolvedAddr`，播放直连打洞地址绕过 301；降级（解析失败）不再回写缓存；探测超时 2s/5s → 8s/15s（打洞端口 TCP connect 实测可达 5s+）；直播首帧上限 15s→60s、并禁用断流重启（`-ss` seek 对 HLS 直播滑动窗口无效，会卡死循环）。
 > **30 分钟外网长测**（某在播房间，手机热点 + STUN 打洞）：帧率 **29.95fps**、位置增速 **1.00x 实时**、**underrun 0 次**（修复前 8 次累计 3.17s）、丢帧/重启 0；音画偏移 `d` 全程稳定，仅 19.7 分钟处一次外网抖动导致音频进程短暂断供 ~2s（偏移最深 -2232ms），**伺服 30s 内自愈到 -40ms，无永久落后**（修复前会永久落后 1.5s）。
 
-![version](https://img.shields.io/badge/version-3.4.0-blue)
+![version](https://img.shields.io/badge/version-3.5.1-blue)
 ![license](https://img.shields.io/badge/license-GPL--3.0-green)
 
 ## 截图
@@ -127,8 +127,45 @@
 - [x] 点视频区暂停/继续
 - [x] 雾化玻璃材质（半透明白底 + 1px 边框，Falcon 无 backdrop-filter）
 - [x] 「我的 → 视频调节 / 直播」画质设置（分辨率与帧率合并为单档，如 `1080p 60fps`）
+- [x] 帧率归一到面板率 59.88Hz（`videorate` + `kmssink skip-vsync=true`）
+- [x] 暂停同时冻结上屏进程（此前只停 ffmpeg/aplay，画面会自顾自播完缓冲）
+- [x] 起播定格门：画面先出首帧、定格等音频就绪再一起起播（音画起播差实测 0ms）
+- [x] 小数帧率解析修复（`29.97 fps` 曾被解析成 97，导致 3.2 倍速快放）
 
 ## 性能诊断记录
+
+### v3.5.1：三个真机 bug（都由用户反馈驱动）
+
+**① 暂停后画面还在放。** 视频走独立进程 `gst-launch-1.0 ... kmssink`，`js_pause` 只给
+`ff_pid` / `aplay_pid` 发 `SIGSTOP`，漏了 `g_rd.gst_pid`。kmssink 手里还压着 FIFO 里的帧，
+`sync=true` 会按 PTS 继续 page-flip 直到吐完缓冲——于是声音停了、画面还在动。
+修法：pause 时一并 `SIGSTOP`，resume 时 `SIGCONT` 配对。真机验收看进程状态：
+暂停后 `gst-launch` 必须是 `T`，恢复后回到 `S`。
+
+**② 拖动进度条 / 起播时音画不同时。** 音频 writer 线程有起播门（等视频首帧 + KMS 平面
+ACTIVE），但视频侧**没有反向的门**：首帧一上屏，节拍器就按名义帧率往下推，音频还在门里等。
+修法：加「起播定格门」——视频写出 6 帧后定格，不读新帧、不推进 position，直到音频真正
+开写（`writer_bytes > 0`）才放行。
+
+这里踩了一个自造的坑：最初阈值定 2 帧，结果 kmssink 双缓冲 + PREROLL 要 4~5 个 buffer
+才开始翻页，KMS 平面永远不 ACTIVE，音频门的 `wait_kms_video()` 只能等超时——起播总耗时
+从 3.4s 涨到 **4.6s**。改成「等视频写出 6 帧」后脱离了这个耦合，起播 3.4s，
+`audioLateVisibleMs`（声音比画面**可见**晚多少）实测 **0ms**。
+
+注意这个指标不能用「首帧写进 FIFO」当基准：gst-launch 从拿到首帧到平面 ACTIVE 要
+1.2~1.9s（spawn + 打开 mppvideodec + PREROLL + 首次 page-flip），那段时间屏幕是黑的，
+不构成音画不同步。`status.audioLateVisibleMs` 以 KMS ACTIVE 为基准，`audioLateMs`
+以首帧为基准，后者会虚高约 1.2s。
+
+**③ `29.97 fps` 被解析成 97fps → 3.2 倍速快放。** `parse_fps_line()` 从 `" fps"` 向前扫数字，
+遇到小数点就停，于是 `29.97 fps` 得到 `97`、`59.94 fps` 得到 `94`。节拍器按 97fps 排程
+（10.3ms/帧）去喂 30fps 的内容，画面快放、`drift` 一路飙到十几秒、`skip` 每秒几十次。
+修法：向前扫描时把 `.` 一起吞掉，用 `atof` 取小数再四舍五入到整数。
+**B 站大量稿件是 29.97 / 23.976 / 59.94，这个 bug 影响面很大**——历史记录里
+`BV1azJz6mEte`(29.972)、`BV1gfJ46jEsF`(29.971) 就是这类，用户反馈的「这个视频卡、
+其他不卡」正是它。
+
+### 帧率归一到面板率（v3.4.0）
 
 X6 Pro 换用芯片硬解后，视频解码不再占用 CPU。`ffmpeg` 只做 demux 与容器解包（`-c:v copy`），
 压缩后的 H.264 Annex-B 码流经 FIFO 交给 `mppvideodec`，解码结果直接由 `kmssink` 送上 KMS 覆盖平面。
@@ -198,7 +235,7 @@ X5 用的是 `arm-linux-gnueabihf.2.23`。32 位库在 X6 Pro 上会被 `dynamic
 
 ```bash
 npm ci
-npm test                    # 135 条逻辑、协议与几何回归测试（含图文正文解析、直播地址/画质档与重定向缓存、合并画质档与 v1 迁移）
+npm test                    # 138 条逻辑、协议与几何回归测试（含图文正文解析、直播地址/画质档与重定向缓存、合并画质档与 v1 迁移）
 node test/qr_login_test.js  # 21 条登录协议测试
 
 # 打包 AMR（QuickJS 生产包）

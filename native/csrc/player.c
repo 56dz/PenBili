@@ -141,7 +141,7 @@
 
 static void raise_audio_thread_prio(void); /* 定义在 RING 水位区（feeder 调用点更早） */
 
-#define PLAYER_VERSION "2.3.2"
+#define PLAYER_VERSION "2.4.1"
 
 /* ---- v2.2.0 网络预取（用户诉求："像 B 站 App 那样：起播缓冲 ~0.5s，播放中用多余带宽尽量多缓冲，
  *      缓冲池保持 ~15s 音视频；不足 15s 就缓冲到片尾"）----
@@ -1110,6 +1110,19 @@ struct session {
     volatile int gate_passed;    /* 门等待已结束（正常开/15s超时放行都置1）→ gateActive=!passed */
     double last_blit_at;        /* 最近一帧产出的墙钟秒（巡检基准 → status.videoStallMs） */
     double gate_wait_ms;        /* 起播门实际等待时长（诊断 → status.gateWaitMs） */
+    /* v3.5.1 起播时序诊断：分别记「视频首帧进 FIFO」「音频真正开写」的墙钟，
+     * 差值就是用户感知的「画面先动、声音后到」时长。 */
+    double t_video_ready;       /* 视频首帧写进 FIFO 的时刻（0=未发生） */
+    double t_audio_ready;       /* 音频 writer 第一次真正写 aplay 的时刻（0=未发生） */
+    /* v3.5.1：KMS 平面第一次真正 ACTIVE（画面**可见**）的时刻。
+     * 为什么需要它：t_video_ready 只是「首帧写进 FIFO」，之后 gst-launch 还要
+     * PREROLL + 初始化 mppvideodec，实测要 1.2s 才让平面 ACTIVE —— 这段时间屏幕
+     * 上什么都没有。拿 t_video_ready 当基准会把 gst 启动耗时误算成「音画不同步」。 */
+    double t_kms_ready;
+    /* v3.5.1：视频已经真正写进 FIFO 的帧数。音频起播门用它代替「KMS 平面 ACTIVE」，
+     * 因为后者依赖 gst 完成首次 page-flip，而 page-flip 又需要**持续**有新帧喂入 ——
+     * 定格门把画面停住之后，KMS 永远不会 ACTIVE，两边互等（真机实测 4.6s 才靠超时解开）。 */
+    long video_written_frames;
     /* v3.0.1 画面节拍器：以「固定帧间隔 + PLL 慢速纠偏」代替「硬等音频锚」。
      * 理由见 video_thread 里的注释（音频锚是 46ms 台阶量，硬等会把台阶传导成画面卡顿）。 */
     double last_pace_at;        /* 上一次节拍放行时刻（秒，单调钟） */
@@ -1314,14 +1327,22 @@ static int parse_fps_line(const char *line) {
     if (!strstr(line, "Video:")) return 0;
     while ((p = strstr(p, " fps")) != NULL) {
         const char *q = p;
-        int v = 0;
         int nd = 0;
-        while (q > line && q[-1] >= '0' && q[-1] <= '9') {
+        /* ⚠️ 必须把小数点一起吞进来（v3.5.1 致命修复）。
+         * 旧实现只向前扫数字，遇到 '.' 就停：`29.97 fps` 会解析成 **97**！
+         * 于是节拍器按 97fps 排程（10.3ms/帧）去喂 30fps 的内容 → 画面以 3.2 倍速
+         * 快放，同时 drift 一路飙到十几秒、skip 每秒几十次。
+         * 真机证据（2026-10-31）：`fps=97 n=98` 而源是 29.97fps；poll tick 显示
+         * skip=1229 / drift=13388ms。凡是 29.97 / 59.94 的稿件都会中招
+         * （历史记录里 BV1azJz6mEte=29.972、BV1gfJ46jEsF=29.971 就是这类）。
+         * 顺带：`nd <= 6` 而不是 3，给 "29.970" 留余量。 */
+        while (q > line && ((q[-1] >= '0' && q[-1] <= '9') || q[-1] == '.')) {
             q--;
             nd++;
         }
-        if (nd > 0 && nd <= 3) {
-            v = atoi(q);
+        if (nd > 0 && nd <= 6) {
+            double fv = atof(q);
+            int v = (int)(fv + 0.5); /* 29.97 → 30，59.94 → 60 */
             if (v >= 1 && v <= 120) return v;
         }
         p += 4;
@@ -2115,6 +2136,15 @@ static int spawn_aplay(struct session *s, const char *device) {
  *   放宽到 200ms 后稳态落回「按音频钟匀速等待」分支，上屏节拍恢复 33ms 均匀；
  *   真正超过 200ms 的滞后仍然会被快进追回，观感无损。 */
 #define AV_SKIP_MS 200
+/* v3.5.0 相位伺服死区：|drift| 超过它才做一次整帧修正。
+ * 取 120ms 的理由：稳态 drift 有 ~100ms 的固定正偏（audio_anchor_ms 的估算偏差，
+ * 见 AV_SKIP_MS 注释），死区必须大于它，否则会一直触发修正。 */
+/* v3.5.0：相位死区（毫秒）。当前**没有**相位对齐逻辑（见 video_thread 里的说明），
+ * 保留常量只为记录「多大的偏差算可忽略」这一结论。 */
+#define PENBILI_PHASE_DEADBAND_MS 120
+/* v3.5.1 起播定格门上限（毫秒）：首帧上屏后音频迟迟不开写时，最多定格这么久就放行，
+ * 避免音频链异常时画面永久冻结。 */
+#define PENBILI_HOLD_MAX_MS 4000
 /* v2.9.3：墙钟节拍下落后时的**最大追赶倍率**（1.25 = 略快一点追上，不出现"突然快放"） */
 #define PACE_CATCHUP_MAX 1.25
 #define AV_WAIT_CAP_MS 200 /* durl 单进程模式每帧等待上限（video pipe 满互锁死锁的解扣） */
@@ -2400,6 +2430,31 @@ static void *video_thread(void *arg) {
         int do_blit = 1;
         ssize_t got;
 
+        /* ---- v3.5.1 起播定格门（修「音画载入不同时」）----
+         * 现象（用户反馈）：拖完进度条松手，画面先跳到目标位置开始播，声音过一会儿才来；
+         * 起播时也是画面先动、声音后到。
+         * 根因：音频 writer 线程有起播门（等视频首帧 + KMS 平面 ACTIVE），而视频侧**没有
+         * 反向的门** —— 首帧一上屏，节拍器就按名义帧率继续往下推，音频还在门里等着。
+         * 修法：首帧上屏后，若音频尚未真正开写（writer_bytes==0），画面**定格**在首帧，
+         * 不读新帧、不推进 position；音频一开始写，本门立刻放行，两者同时起播。
+         *
+         * 只对 DASH 拆流生效（audio_input[0]）：durl 单文件里音视频同进程，冻结视频读
+         * 会反压 ffmpeg，音频也就永远等不到 —— 那才是真死锁。
+         *
+         * ⚠️ 阈值 6 帧的理由：kmssink 双缓冲 + PREROLL 大约吃掉 4~5 个 buffer 才开始
+         * 真正 page-flip。给得更少，KMS 平面迟迟不 ACTIVE，音频侧就只能靠超时解开
+         * （真机实测：2 帧 → 起播总耗时 4.6s；6 帧 → 平面能正常转 ACTIVE）。
+         * 排查开关：/tmp/vp_nohold.on → 关闭本门（回退旧行为）。 */
+        /* ⚠️ 阈值 6 帧必须与音频门的 `video_written_frames < 6` 一致。
+         * 定格门若停在 2 帧，音频门等的 6 帧永远等不到 → 又是互等。 */
+        if (s->frames >= 6 && s->audio_enabled && s->audio_alive && s->audio_input[0] &&
+            s->writer_bytes <= 0 && access("/tmp/vp_nohold.on", F_OK) != 0) {
+            if ((now_seconds() - s->last_blit_at) * 1000.0 < (double)PENBILI_HOLD_MAX_MS) {
+                usleep(5000);
+                continue; /* 不读新帧 → FIFO 不写 → 画面停在首帧 */
+            }
+        }
+
         /* ---- v3.0.1 读前视：先把 pipe 里已有的压缩字节尽量吸进 au_buf ----
          * 非阻塞（poll timeout 0）：有多少拿多少，拿不到就去走下面的等待/节拍逻辑。
          * 这一步是「上屏不出现网络空档」的关键——见 AU_READ_AHEAD 的注释。 */
@@ -2628,28 +2683,67 @@ static void *video_thread(void *arg) {
              * 音频锚（每帧最多 ±3ms，时间常数 ~0.3s）。台阶被这个低通滤掉，上屏间隔均匀；
              * 音频仍是权威时钟（长期相位由 drift 纠正锁死），真正的大滞后照旧走
              * 快进 / 强制重同步两条既有兜底路径。 */
-            int frame_ms = (s->fps > 0) ? (int)(1000.0 / (double)s->fps) : 40;
-            if (frame_ms < 1) frame_ms = 1;
+            /* ---- v3.5.0 绝对截止时刻调度（修「上屏 ±7% 抖动」）----
+             * 旧实现两个缺陷叠加，实测把 30fps 内容喂成 31.25fps：
+             *  ① `frame_ms = (int)(1000.0/fps)` 对 30fps **截断成 33ms**（真值 33.333）；
+             *  ② PLL 的 adj 恒为 +1 —— 稳态 drift 有 ~100ms 的**固定正偏**
+             *     （= audio_anchor_ms() 里 pipe 残留 + ALSA 缓冲的估算偏差，见 AV_SKIP_MS
+             *     的注释），于是 gap = 33-1 = 32ms → 31.25fps。
+             * 下游 videorate 要把 29.94fps 严格按 2:1 复制到 59.88fps；喂 31.25fps 时
+             * 比例变成 1.916:1，每帧该复制 1 次还是 2 次只能在两个值之间来回跳
+             * → 输出帧间隔在 16.7/33.4ms 之间抖动 = 用户看到的「卡顿」。
+             * 真机 fpsdisplaysink current 实测 p10=55.3 / p90=63.8（目标 59.88）；
+             * 同一条管线换成 ffmpeg -re 均匀喂帧只有 ±0.3 —— 差别就在喂帧节奏。
+             *
+             * 修法：
+             *  ① 帧周期用 double 精确值，**不截断**；
+             *  ② 相位纠偏**不再改喂帧间隔**：喂帧必须严格等间隔，否则 videorate 的
+             *     复制节奏必乱。真实滞后交给下面既有的 drift 判据
+             *     （>AV_SKIP_MS 有界追赶 / >AV_RESYNC_MS 强制重同步），它们按整帧
+             *     丢/追，不破坏喂帧均匀性；
+             *  ③ 按**绝对目标时刻**推进 + 末段自旋收尾，避免 usleep 过冲被逐帧累加
+             *     （实测 usleep(31ms) 常落到 37ms，正是 wgap 33/37 交替的来源）。 */
+            /* ⚠️ 单位：frame_ms_d 是**毫秒**，now_seconds()/last_pace_at 是**秒**。
+             * 混用会让每帧睡 1000/fps **秒**（真机踩过：30fps 下单帧 wait=32384ms，
+             * 画面停在首帧、drift 飙到 6s）。所有时刻运算统一用 frame_s。 */
+            double frame_ms_d = (s->fps > 0) ? (1000.0 / (double)s->fps) : 40.0;
+            if (frame_ms_d < 1.0) frame_ms_d = 1.0;
+            double frame_s = frame_ms_d / 1000.0;
             if (s->frames > 0 && s->audio_alive) {
-                /* PLL：drift>0 = 声音超前 → 本帧间隔缩短（加快）；<0 → 拉长（放慢）。
-                 * ±3ms/帧 @30fps = 每秒最多纠 90ms，既够压住台阶又能跟上真实漂移。 */
-                int adj = 0;
-                long long d0 = apos - due;
-                if (d0 > AV_SKIP_MS) adj = 3;
-                else if (d0 < -AV_SKIP_MS) adj = -3;
-                else if (d0 > 0) adj = 1;
-                else if (d0 < 0) adj = -1;
-                int gap = frame_ms - adj;
-                if (gap < 1) gap = 1;
-                {
-                    double since = (now_seconds() - s->last_pace_at) * 1000.0;
-                    if (since < (double)gap) {
-                        int ms = (int)((double)gap - since);
-                        usleep((useconds_t)(ms * 1000));
-                        waited = ms;
-                    }
+                double nowd = now_seconds();
+                /* ---- 为什么这里**不做**音画相位对齐（v3.5.0 结论）----
+                 * 曾试过「按 last_drift_ms 一次性平移 last_pace_at」。它确实能一次性
+                 * 延迟视频、真实改善音画同步，但：
+                 *  ① drift 是**内容位置**域的差（due = video_base_ms + frames*1000/fps），
+                 *     平移喂帧时刻**不会**让它变化 —— 改了也无法用 drift 验收；
+                 *  ② 更关键，drift 本身不可信：真机同一时刻 ab=10201536（写入 57.8s 音频）
+                 *     而 pos=53800（画面 53.8s），扣掉 1.25s 前视仍差 2.8s，说明
+                 *     audio_anchor_ms() 的「writer_bytes − pipe 残留 − ALSA 缓冲」估算
+                 *     偏差远大于这里的 280ms。按它对齐会**制造**真实的音画不同步。
+                 * 故：相位对齐需要独立的音画同步测量手段，不能拿 drift 当依据。
+                 * 卡顿（喂帧节奏）已由下面的绝对截止时刻调度解决，与本条无关。 */
+                /* 防呆 1：last_pace_at 落在未来（暂停恢复 / 上一轮被信号打断）→ 归位。 */
+                if (s->last_pace_at > nowd + frame_s) s->last_pace_at = nowd;
+                double target = s->last_pace_at + frame_s;
+                /* 防呆 2：目标已落后（探流耗时/解码抖动）→ 重锚到当下，**不追赶**。
+                 * 追赶是上面 drift 判据的职责（按整帧丢帧）；这里补发会造成喂帧突发，
+                 * 直接破坏 videorate 的复制节奏。 */
+                if (target < nowd) target = nowd;
+                /* 防呆 3：单帧最多等 1 个帧周期。再多必然是状态异常（fps 解析错、
+                 * 基准被推飞），宁可把 last_pace_at 一起重锚，也不让一帧睡几十秒。 */
+                if (target - nowd > frame_s) {
+                    s->last_pace_at = nowd;
+                    target = nowd + frame_s;
                 }
-                s->last_pace_at = now_seconds();
+                {
+                    double remain_ms = (target - nowd) * 1000.0;
+                    if (remain_ms > 2.0) usleep((useconds_t)((remain_ms - 1.0) * 1000.0));
+                    /* 最后 ~1ms 自旋：usleep 过冲（实测可达 6ms）会直接变成喂帧抖动。
+                     * 每帧 ≤1ms，30fps 下 CPU 占用 <3%。 */
+                    while (!s->stop_flag && now_seconds() < target) { /* spin */ }
+                    waited = (int)((now_seconds() - nowd) * 1000.0);
+                }
+                s->last_pace_at = target;
             }
             d_wait += (double)waited;
             if ((double)waited > d_maxwait) d_maxwait = (double)waited;
@@ -2758,6 +2852,7 @@ static void *video_thread(void *arg) {
             double f_dt = (now_seconds() - f_t0) * 1000.0;
             d_fifo += f_dt;
             if (f_dt > d_maxfifo) d_maxfifo = f_dt;
+            if (wr == 0) s->video_written_frames++;
             if (wr != 0) {
                 /* 注意：v3.0.0 起 KMS 分支下 fb_blit 是空操作，真正的出画在 fb_write_stream。 */
                 if (s->stop_flag) break;
@@ -2778,6 +2873,7 @@ static void *video_thread(void *arg) {
              * 音频立刻开写、而 gst-launch 还要 PREROLL + 解码首帧，用户听到「先声后画」。
              * v2.1.0 起滞后帧也逐帧贴屏（平滑快进），故 last_blit_at 每帧刷新、不会误报停帧。 */
             s->video_first_frame = 1;
+            if (s->t_video_ready <= 0) s->t_video_ready = now_seconds();
         }
         /* 每秒落一行节奏诊断（上限 300 行）。默认关闭 —— 排查「上屏卡顿」时再打开，
          * 免得日常播放每秒一次 open/write/close。
@@ -2794,7 +2890,8 @@ static void *video_thread(void *arg) {
                         "aulen=%lu st=%s\n",
                         now_seconds() - d_t0, d_n, s->fps, d_wait, d_maxwait, d_maxgap,
                         d_maxrdgap, d_maxaugap, d_fifo, d_maxfifo, s->video_skips,
-                        s->last_drift_ms, (unsigned long)s->au_len, state_name(s->state));
+                        s->last_drift_ms, (unsigned long)s->au_len,
+                        state_name(s->state));
                 if (dl_n > 0) (void)!write(dfd, dl, (size_t)dl_n);
                 close(dfd);
             }
@@ -3025,7 +3122,20 @@ static void *audio_writer_thread(void *arg) {
          * kmssink 拿到 buffer，实测有几百毫秒空档，音频若此刻开写就是「先声后画」。
          * 这里再等 KMS 平面真的 ACTIVE 且有 buffer（最多 1.2s，超时照样放行——
          * 不能让读不到 debugfs 的设备永远没声音）。 */
-        if (s->video_first_frame && !s->stop_flag) wait_kms_video(1200.0);
+        /* v3.5.1：判据从「KMS 平面 ACTIVE」改成「视频已写出 N 帧」。
+         * 为什么必须换：KMS 要 ACTIVE 得先完成首次 page-flip，而 page-flip 需要
+         * **持续**有新 buffer 进来。定格门把画面停在 2 帧之后，KMS 就永远等不到
+         * ACTIVE → 音频门只能靠超时解开（真机实测 4.6s 才起播，比原来还慢）。
+         * 帧数判据没有这个耦合：视频线程只管往 FIFO 写，写出 ≥6 帧（gst 的
+         * PREROLL + 双缓冲已经吃满，再往下就是真实播放）就放行音频。
+         * 之后仍等一次 KMS ACTIVE，但只作为**诊断时间戳**，不再阻塞放行。 */
+        if (s->video_first_frame && !s->stop_flag) {
+            double tw0 = now_seconds();
+            while (!s->stop_flag && s->video_written_frames < 6 && now_seconds() - tw0 < 3.0) {
+                usleep(10000);
+            }
+            if (wait_kms_video(600.0)) s->t_kms_ready = now_seconds();
+        }
         s->gate_wait_ms = (now_seconds() - gate_t0) * 1000.0;
         if (!s->video_first_frame) s->last_blit_at = now_seconds();
         s->gate_passed = 1; /* 门结束（放行即判据切换）：巡检从此刻起才有裁决权 */
@@ -3069,6 +3179,7 @@ static void *audio_writer_thread(void *arg) {
             break;
         }
         if (off > 0) {
+            if (s->t_audio_ready <= 0) s->t_audio_ready = now_seconds();
             s->writer_bytes += (long)off; /* 真实播放时钟（音频时钟锚） */
             ring_drop(s, (size_t)off);
         }
@@ -3228,6 +3339,10 @@ static int session_start(struct session *s, long start_ms, int with_audio, const
     s->last_pace_at = now_seconds();
     s->last_blit_at = now_seconds();
     s->gate_wait_ms = 0;
+    s->t_video_ready = 0;
+    s->t_audio_ready = 0;
+    s->t_kms_ready = 0;
+    s->video_written_frames = 0;
 
     /* DASH（有第二输入音频轨）→ 音频走独立进程，视频进程只需单输出；
      * durl 回退（单文件，音视频同文件）→ 保持原双输出同进程模式 */
@@ -3590,6 +3705,21 @@ static JSValue js_status(JSContext *ctx, JSValueConst this_val, int argc, JSValu
      * seek 重开恢复，重开必经起播门保证音画成对重启）；gateWaitMs=起播门等待时长（诊断）。 */
     mk_int(ctx, "videoStallMs", s->state == ST_PLAYING ? (int)((now_seconds() - s->last_blit_at) * 1000.0) : 0, res);
     mk_int(ctx, "gateWaitMs", (int)s->gate_wait_ms, res);
+    /* v3.5.1：起播时序（毫秒，相对视频首帧）。>0 = 声音比画面晚这么久才开写。
+     * 这是「音画载入不同时」的直接量化指标，也是定格门是否生效的验收依据。 */
+    mk_int(ctx, "audioLateMs",
+           (s->t_video_ready > 0 && s->t_audio_ready > 0)
+               ? (int)((s->t_audio_ready - s->t_video_ready) * 1000.0)
+               : -1,
+           res);
+    /* v3.5.1：真正的感知差 —— 声音比「画面可见」晚多少毫秒。
+     * 基准是 KMS 平面转 ACTIVE（不是首帧写进 FIFO），因为 gst 启动那 1.2s 里
+     * 屏幕是黑的，不构成音画不同步。这个值才该被压到 ~0。 */
+    mk_int(ctx, "audioLateVisibleMs",
+           (s->t_kms_ready > 0 && s->t_audio_ready > 0)
+               ? (int)((s->t_audio_ready - s->t_kms_ready) * 1000.0)
+               : -1,
+           res);
     /* 门进行中（等首帧/未放行）→ JS 巡检让位，防弱网首帧 8~15s 区间被误判停帧打断门 */
     mk_bool(ctx, "gateActive", s->audio_enabled && !s->gate_passed, res);
     /* 音画漂移诊断（v1.8.0 出，v1.9.0 改用可闻锚）：可闻音频位置 − 已读帧内容位置，
@@ -3641,6 +3771,14 @@ static JSValue js_pause(JSContext *ctx, JSValueConst this_val, int argc, JSValue
     if (s->has_session && s->state == ST_PLAYING) {
         if (s->ff_pid > 0) kill(s->ff_pid, SIGSTOP);
         if (s->aplay_pid > 0) kill(s->aplay_pid, SIGSTOP);
+        /* v3.5.1 致命修复：必须同时冻结上屏进程。
+         * 真机现象（用户反馈）：点暂停后**音频停了、画面还在放**。
+         * 根因：视频是独立进程 `gst-launch-1.0 ... kmssink`，SIGSTOP 只发给了
+         * ffmpeg 和 aplay。kmssink 手里还压着 FIFO 里的帧，且 sync=true 会按 PTS
+         * 继续 page-flip，直到把缓冲吐完 —— 于是画面自顾自播下去。
+         * 只 SIGSTOP 不够用 SIGCONT 配对恢复：gst 被冻结时 FIFO 会写满，
+         * ffmpeg 侧 resume 后自然继续，无需额外处理。 */
+        if (g_rd.gst_pid > 0) kill(g_rd.gst_pid, SIGSTOP);
         clock_gettime(CLOCK_MONOTONIC, &s->paused_at); /* v1.8.0：记暂停起点 */
         s->state = ST_PAUSED;
     }
@@ -3661,6 +3799,7 @@ static JSValue js_resume(JSContext *ctx, JSValueConst this_val, int argc, JSValu
     if (s->has_session && s->state == ST_PAUSED) {
         if (s->ff_pid > 0) kill(s->ff_pid, SIGCONT);
         if (s->aplay_pid > 0) kill(s->aplay_pid, SIGCONT);
+        if (g_rd.gst_pid > 0) kill(g_rd.gst_pid, SIGCONT); /* v3.5.1：与 pause 的 SIGSTOP 配对 */
         /* v1.8.0：把暂停时长补偿进墙钟基准 started_at——否则 paced（无音频/音频死亡）模式
          * 恢复后 target 远超 due，画面会以丢帧快进方式追赶整段暂停时长（闪跳）。
          * 音频时钟模式不受影响（锚 = writer 字节量，暂停期间 aplay 被 SIGSTOP → writer

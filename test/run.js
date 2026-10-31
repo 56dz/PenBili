@@ -2246,6 +2246,68 @@ async function main() {
     );
   });
 
+  test('native: fps 解析必须吞掉小数点（29.97 不能变成 97）', () => {
+    // 真机致命 bug（2026-10-31）：parse_fps_line 只向前扫数字，遇到 '.' 就停，
+    // 于是 `29.97 fps` 被解析成 **97**。节拍器按 97fps 排程（10.3ms/帧）喂 30fps
+    // 内容 → 画面 3.2 倍速快放，drift 飙到十几秒、skip 每秒几十次。
+    // 凡是 29.97 / 59.94 的稿件全中招（B站大量番剧/影视是 23.976/29.97）。
+    assert.ok(
+      /q\[-1\] >= '0' && q\[-1\] <= '9'\) \|\| q\[-1\] == '\.'/.test(csrc) ||
+        /\|\| q\[-1\] == '\.'/.test(csrc),
+      "向前扫描必须包含 '.' 分支"
+    );
+    assert.ok(
+      /double fv = atof\(q\)/.test(csrc),
+      '必须用 atof 取带小数的帧率'
+    );
+    assert.ok(
+      /\(int\)\(fv \+ 0\.5\)/.test(csrc),
+      '必须四舍五入到整数（29.97→30、59.94→60）'
+    );
+  });
+
+  test('native: 暂停必须同时冻结上屏进程 gst_pid', () => {
+    // 真机 bug（用户反馈）：点暂停后**音频停了、画面还在放**。
+    // 根因：视频是独立进程 `gst-launch-1.0 ... kmssink`，js_pause 只给 ff_pid 和
+    // aplay_pid 发 SIGSTOP，kmssink 手里还压着 FIFO 里的帧，sync=true 会按 PTS
+    // 继续 page-flip 直到吐完缓冲。
+    /* ⚠️ 必须匹配带参数表的完整签名：indexOf('static JSValue js_pause') 会先命中
+     * js_pauseRender（第 3616 行），拿到的函数体里当然没有 gst_pid。 */
+    const pauseAt = csrc.indexOf('static JSValue js_pause(JSContext');
+    const resumeAt = csrc.indexOf('static JSValue js_resume(JSContext');
+    assert.ok(pauseAt > 0 && resumeAt > 0, 'js_pause / js_resume 都必须存在');
+    const pauseBody = csrc.slice(pauseAt, resumeAt);
+    assert.ok(
+      /kill\(g_rd\.gst_pid, SIGSTOP\)/.test(pauseBody),
+      'js_pause 必须给 g_rd.gst_pid 发 SIGSTOP'
+    );
+    const resumeBody = csrc.slice(resumeAt, csrc.indexOf('static JSValue', resumeAt + 10));
+    assert.ok(
+      /kill\(g_rd\.gst_pid, SIGCONT\)/.test(resumeBody),
+      'js_resume 必须给 g_rd.gst_pid 发 SIGCONT（与 pause 配对）'
+    );
+  });
+
+  test('native: 起播定格门存在、只对拆流生效、且有排查开关', () => {
+    // 修「音画载入不同时」：首帧上屏后若音频还没开写（writer_bytes==0），
+    // 画面必须定格等音频，而不是按名义帧率继续往前跑。
+    // 关键约束：只对 DASH 拆流（audio_input[0]）生效 —— durl 单文件里音视频同进程，
+    // 冻结视频读会反压 ffmpeg，音频就永远等不到，那才是真死锁。
+    assert.ok(/PENBILI_HOLD_MAX_MS/.test(csrc), '必须有定格门超时上限');
+    assert.ok(
+      /s->writer_bytes <= 0[\s\S]{0,200}continue;/.test(csrc),
+      '定格门必须在 writer_bytes<=0 时 continue（不读新帧）'
+    );
+    assert.ok(
+      /s->audio_input\[0\][\s\S]{0,200}writer_bytes <= 0/.test(csrc),
+      '定格门必须限定 audio_input[0]（DASH 拆流），否则 durl 会死锁'
+    );
+    assert.ok(
+      /access\("\/tmp\/vp_nohold\.on", F_OK\) != 0/.test(csrc),
+      '定格门要有 /tmp/vp_nohold.on 排查开关，且默认开启'
+    );
+  });
+
   test('native: 帧率上限 videorate 仍在归一化之前（先降帧再复制）', () => {
     // 顺序错了会先复制到 60 再丢到 30，白跑一倍像素。
     const capAt = csrc.indexOf('max-rate=%d');

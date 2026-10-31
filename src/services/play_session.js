@@ -388,6 +388,13 @@ export async function readStatus(ctx) {
     videoStallMs: Number(st.videoStallMs) || 0,
     gateWaitMs: Number(st.gateWaitMs) || 0,
     gateActive: !!st.gateActive,
+    /* v3.5.1 起播时序：声音比画面首帧晚多少毫秒才开写（-1=未测到）。
+     * 这是「音画载入不同时」的直接量化指标，用于验证定格门是否真的把两者对齐。 */
+    audioLateMs: Number(st.audioLateMs),
+    /* v3.5.1：声音比「画面可见」（KMS 平面 ACTIVE）晚多少毫秒。这才是用户感知的
+     * 音画不同步量；audioLateMs 含 gst 启动耗时，会虚高 ~1.2s。 */
+    audioLateVisibleMs: Number(st.audioLateVisibleMs),
+
     /* v1.8.0 音画对齐诊断：videoSkips=丢帧快进计数（追音频钟）；avDriftMs=可闻音频位置−画面位置
      * （正=声音超前；修复后应稳定在 ±100ms 内，持续增长=软解吞吐贴实时线）
      * v1.9.0：audioBufMs=可闻锚修正量（aplay 管道+ALSA 缓冲，恒定即正常）

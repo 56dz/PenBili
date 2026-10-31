@@ -205,7 +205,7 @@
         </div>
         <div class="mine-row">
           <text class="mine-label">PenBili</text>
-          <text class="mine-value">v3.4.0 · {{ profile ? '已登录' : '匿名' }}</text>
+          <text class="mine-value">v3.5.1 · {{ profile ? '已登录' : '匿名' }}</text>
         </div>
       </scroller>
 
@@ -1317,6 +1317,12 @@ export default {
         if (st.gateWaitMs > 400 && st.gateWaitMs !== this._lastGateMs) {
           this._lastGateMs = st.gateWaitMs;
           logWarn('[bili] A/V gate wait=' + st.gateWaitMs + 'ms（音频等视频首帧后同步开播）');
+        }
+        /* v3.5.1 起播时序（验证定格门）：audioLateMs = 声音比画面首帧晚多久开写。
+         * 定格门生效时应接近 0；若仍是几百毫秒，说明门没起作用。 */
+        if (st.audioLateVisibleMs >= 0 && st.audioLateVisibleMs !== this._lastAudioLateMs) {
+          this._lastAudioLateMs = st.audioLateVisibleMs;
+          logWarn('[bili] A/V 音画起播差=' + st.audioLateVisibleMs + 'ms（声音比画面可见晚多少，定格门应压到 ~0；总启动 ' + st.audioLateMs + 'ms）');
         }
         // A/V 一致性巡检（v1.7.1）：视频 8s 无新帧而音频仍在写 → seek(pos+1) 重启对齐。
         // 重开必经起播门 → 音画成对重启；门期(音频未开写, audioBytes 不变)天然不触发；
