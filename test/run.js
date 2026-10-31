@@ -2315,6 +2315,69 @@ async function main() {
     assert.ok(capAt > 0 && normAt > 0, '两处都必须存在');
     assert.ok(capAt < normAt, 'max-rate 的 videorate 必须排在归一化之前');
   });
+
+  test('native: 迟到帧必须可丢（max-lateness 有限值 + qos=true 成组）', () => {
+    // 真机 bug（用户反馈）：暂停几秒再恢复，画面「轻微卡顿」。
+    // 取证（fpsdisplaysink 逐秒 current）：稳态 59.8，恢复后第 1 秒 7.0（一帧不出），
+    // 第 2 秒 418.3（一秒涌出 400+ 帧），第 3 秒才回稳态。
+    // 根因：SIGSTOP 期间 GstSystemClock 仍在走，恢复后暂停期间该播的 ~360 个 buffer
+    // PTS 全部过期；旧配置 max-lateness=-1（永不判迟到）+ qos=false（不向上游报）
+    // 让 kmssink 把过期帧全部照单翻页。
+    // 修法：max-lateness=40（一帧 33ms 的 1.2 倍）+ qos=true。
+    // 实测：旧配置峰值 417.84fps；新配置峰值 61.27fps 且**稳态 dropped 0**。
+    assert.ok(
+      /#define PENBILI_MAX_LATENESS_MS 40/.test(csrc),
+      '必须有 PENBILI_MAX_LATENESS_MS 40'
+    );
+    /* ⚠️ 宏必须定义在 render_start 之前：曾放在第 2196 行（render_start 在第 800 行用它），
+     * 编译直接报 `use of undeclared identifier`。 */
+    const defineAt = csrc.indexOf('#define PENBILI_MAX_LATENESS_MS');
+    const useAt = csrc.indexOf('PENBILI_MAX_LATENESS_MS)');
+    assert.ok(defineAt > 0 && useAt > 0, '宏定义与使用都必须存在');
+    assert.ok(defineAt < useAt, 'PENBILI_MAX_LATENESS_MS 必须定义在使用点之前');
+    assert.ok(
+      /no_late \? "false" : "true"/.test(csrc),
+      'qos 必须默认 true（只有 /tmp/vp_nolate.on 才回退 false）'
+    );
+    assert.ok(
+      /access\("\/tmp\/vp_nolate\.on", F_OK\) == 0/.test(csrc),
+      '要有 /tmp/vp_nolate.on 排查开关回退旧行为'
+    );
+  });
+
+  test('native: seek 落点补偿（关键帧回退导致的音画错位）', () => {
+    // 真机 bug（用户反馈）：拖进度条从新位置起播后音画不同步。
+    // 根因：`-c:v copy` 的 `-ss` 只能落在关键帧（本机间隔 5s），音频是解码输出能精确落点。
+    // 实测 `-ss 155.366`：视频首包 -0.365s、音频首包 -0.001s ⇒ 画面永久领先 365ms。
+    // 修法：把 |land| 换算成帧数，直接丢弃视频前 N 帧，使首帧上屏时内容位置 == start_ms。
+    assert.ok(
+      /seek_skip_frames/.test(csrc),
+      '必须有 seek_skip_frames 字段（要丢弃的帧数）'
+    );
+    assert.ok(
+      /s->seek_skip_frames = \(long\)\(\(double\)\(-land\) \* \(double\)s->fps \/ 1000\.0 \+ 0\.5\)/.test(csrc),
+      '必须把落点毫秒换算成帧数（四舍五入）'
+    );
+    assert.ok(
+      /s->video_base_ms = s->start_ms \+ land/.test(csrc),
+      '内容时钟基线必须同步前移，否则 position 会从关键帧算起'
+    );
+    assert.ok(
+      /access\("\/tmp\/vp_noseekskip\.on", F_OK\) == 0/.test(csrc),
+      '要有 /tmp/vp_noseekskip.on 排查开关'
+    );
+    /* 丢弃分支必须真的消费掉 AU 并 continue（不写 FIFO），否则等于没丢。 */
+    const skipAt = csrc.indexOf('if (s->seek_skip_frames > 0) {');
+    assert.ok(skipAt > 0, '必须有丢弃分支');
+    const skipBody = csrc.slice(skipAt, skipAt + 1600);
+    assert.ok(/au_consume\(s, au_n\)/.test(skipBody), '丢弃分支必须消费掉该 AU');
+    assert.ok(/continue;/.test(skipBody), '丢弃分支必须 continue（不走上屏路径）');
+    /* spawn 时必须清零，否则断流重连会白丢上一轮的帧。 */
+    assert.ok(
+      /s->seek_land_valid = 0;[\s\S]{0,200}s->seek_skip_frames = 0;/.test(csrc),
+      'spawn_ffmpeg 必须清零落点补偿状态'
+    );
+  });
 }
 
 main().then(

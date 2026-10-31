@@ -30,7 +30,7 @@
 > ② **外网链路修复**（STUN 打洞 + Cloudflare 301 场景）：CF 的 301 规则**会丢弃 query string**（`best/live?room=...` → `xyz:端口/live`，服务端 400）；`jsapi.http` 不跟随 301，重定向解析改走 **native libcurl**（`FOLLOWLOCATION=1`）拿终点 host 回写 `resolvedAddr`，播放直连打洞地址绕过 301；降级（解析失败）不再回写缓存；探测超时 2s/5s → 8s/15s（打洞端口 TCP connect 实测可达 5s+）；直播首帧上限 15s→60s、并禁用断流重启（`-ss` seek 对 HLS 直播滑动窗口无效，会卡死循环）。
 > **30 分钟外网长测**（某在播房间，手机热点 + STUN 打洞）：帧率 **29.95fps**、位置增速 **1.00x 实时**、**underrun 0 次**（修复前 8 次累计 3.17s）、丢帧/重启 0；音画偏移 `d` 全程稳定，仅 19.7 分钟处一次外网抖动导致音频进程短暂断供 ~2s（偏移最深 -2232ms），**伺服 30s 内自愈到 -40ms，无永久落后**（修复前会永久落后 1.5s）。
 
-![version](https://img.shields.io/badge/version-3.5.1-blue)
+![version](https://img.shields.io/badge/version-3.5.2-blue)
 ![license](https://img.shields.io/badge/license-GPL--3.0-green)
 
 ## 截图
@@ -131,8 +131,75 @@
 - [x] 暂停同时冻结上屏进程（此前只停 ffmpeg/aplay，画面会自顾自播完缓冲）
 - [x] 起播定格门：画面先出首帧、定格等音频就绪再一起起播（音画起播差实测 0ms）
 - [x] 小数帧率解析修复（`29.97 fps` 曾被解析成 97，导致 3.2 倍速快放）
+- [x] 迟到帧可丢（`max-lateness=40` + `qos=true`），修「暂停恢复后画面卡一下」
+- [x] seek 落点补偿（关键帧回退导致音画错位，丢弃多出的视频帧对齐音频起点）
 
 ## 性能诊断记录
+
+### v3.5.2：暂停恢复卡顿 + seek 音画错位（用户反馈驱动）
+
+**① 暂停几秒再恢复，画面「轻微卡顿」一下。**
+真机取证（`fpsdisplaysink` 逐秒 `current`）：
+
+```
+稳态            59.8  59.9  59.8
+恢复后第 1 秒    7.0        ← 一帧都出不来
+恢复后第 2 秒  418.3        ← 一秒内涌出 400+ 帧
+恢复后第 3 秒   59.8        ← 才回稳态
+```
+
+根因：`SIGSTOP` 冻结 `gst-launch` 期间 **GstSystemClock 仍在走**，恢复后暂停期间
+该播的 6s × 60fps ≈ 360 个 buffer 的 PTS 全部过期。旧配置 `max-lateness=-1`
+（永不判迟到）+ `qos=false`（不向上游报告）让 kmssink 把这些过期帧**全部照单翻页**。
+
+排除矩阵（判据统一为恢复后峰值 `current`）全部落空：`sync=true/false` 都爆发（241/268）；
+只停 gst / 只停 ffmpeg / 两个都停都爆发（415/348/420）；`ffmpeg -re` 与全速都爆发（418/301）；
+去掉 `videorate` 仍爆发（205）；`max-duplication-time` 100/200ms 无效；`drop-only=true` 起不来管线。
+
+解法是**让迟到帧可丢**：`max-lateness=40`（一帧 33ms 的 1.2 倍）+ `qos=true`。
+
+| 配置 | 稳态 dropped | 冻结 6s 后峰值 |
+|---|---|---|
+| `max-lateness=-1 qos=false`（旧） | 0 | **417.84**，新增 832 帧 |
+| `max-lateness=40 qos=false` | — | 仍 417.72 |
+| `max-lateness=100 qos=false` | — | 仍 415.21 |
+| **`max-lateness=40 qos=true`** | **0**（20s ×2 复测） | **61.27**，尾段回 59.8 |
+
+为什么现在 `qos=true` 是安全的：历史上它曾把播放打到 0.90fps（18872 条
+`Dropping frame due to QoS`），因为当年 `mppvideodec` 不产 PTS，每帧都被判迟到。
+现在上游有 `videorate` 归一到面板率，PTS 由它按到达时间重新生成，可信。
+
+**② 拖进度条后音画不同步。**
+根因：`-c:v copy` 的 `-ss` 只能落在**关键帧**上（本机实测关键帧间隔 5s），
+而音频是解码输出、能精确落点。真机实测 `-ss 155.366`：
+
+```
+视频首包 pkt_pts_time = -0.365s   （回退到关键帧 155.001s）
+音频首包 pts_time    = -0.001s   （几乎精确）
+```
+
+⇒ 画面永久领先声音 365ms，且不会自愈（`video_base_ms` 仍是 `start_ms`）。
+老代码其实早就解析了 `seek_land_ms`（`-debug_ts` 的 `pkt_pts_time`），但**从未被任何代码读取**
+——`seek_land_applied` 只声明、从未赋值，是个半成品。
+
+修法：把 `|land|` 换算成帧数，把视频前 N 帧**直接丢弃**（不写 FIFO），
+首帧上屏时内容位置正好等于 `start_ms`，与音频起点一致。真机实测：
+
+```
+seek start_ms=177589 land=-2589ms skip=78 fps=30 vbase=175000
+  skip done in 1171ms
+之后 poll tick drift 从 -2589ms 收敛到 +5ms，skip=0，wgap=33
+```
+
+为什么丢弃而不是平移 `video_base_ms`：`mppvideodec` 不产 PTS，下游 `videorate`
+按**到达时间**重排时间戳，平移内容时钟对不上真实帧序列；只有丢掉多出来的那段帧，
+送进管线的第一帧才真的是 `start_ms` 那一帧。
+
+代价：最坏空解 5s 内容（≈150 帧），实测 2589ms 落点用了 **1171ms**，用户看到的是
+「拖完稍等再出画」而不是「先出画再错位」。上限 8s 防脏值。
+
+A/B 对照（同一 tap 位置）：补偿开 `land=-3611ms skip=108`，补偿关 `skip=0`，
+证明补偿确实生效。排查开关：`touch /tmp/vp_noseekskip.on`。
 
 ### v3.5.1：三个真机 bug（都由用户反馈驱动）
 
@@ -235,7 +302,7 @@ X5 用的是 `arm-linux-gnueabihf.2.23`。32 位库在 X6 Pro 上会被 `dynamic
 
 ```bash
 npm ci
-npm test                    # 138 条逻辑、协议与几何回归测试（含图文正文解析、直播地址/画质档与重定向缓存、合并画质档与 v1 迁移）
+npm test                    # 140 条逻辑、协议与几何回归测试（含图文正文解析、直播地址/画质档与重定向缓存、合并画质档与 v1 迁移）
 node test/qr_login_test.js  # 21 条登录协议测试
 
 # 打包 AMR（QuickJS 生产包）

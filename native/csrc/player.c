@@ -141,7 +141,7 @@
 
 static void raise_audio_thread_prio(void); /* 定义在 RING 水位区（feeder 调用点更早） */
 
-#define PLAYER_VERSION "2.4.1"
+#define PLAYER_VERSION "2.4.2"
 
 /* ---- v2.2.0 网络预取（用户诉求："像 B 站 App 那样：起播缓冲 ~0.5s，播放中用多余带宽尽量多缓冲，
  *      缓冲池保持 ~15s 音视频；不足 15s 就缓冲到片尾"）----
@@ -198,6 +198,9 @@ static void raise_audio_thread_prio(void); /* 定义在 RING 水位区（feeder 
 /* v3.4.0：面板实际刷新率（`modetest -c` 报 #0 480x960 **59.88**，30000/1001 类时序）。
  * 用 1497/25 精确表达 59.88，别写 60/1 —— 差 0.2% 会在长跑里周期性多出一帧。 */
 #define PENBILI_PANEL_RATE "1497/25"
+/* v3.5.2：迟到帧阈值（毫秒）—— 超过它才判「迟到」并丢弃（配合 kmssink qos=true）。
+ * 必须定义在这里：render_start()（第 ~800 行）要用，而原先放在 2196 行是错的。 */
+#define PENBILI_MAX_LATENESS_MS 40
 #define GST_LAUNCH_PATH "/usr/bin/gst-launch-1.0"
 #define KMS_FIFO_PATH "/tmp/vp_vid.fifo"
 #define FFMPEG_PATH "/usr/bin/ffmpeg"
@@ -791,13 +794,23 @@ static int render_start(int x, int y, int w, int h) {
              * 所以：**普通属性必须一个 argv 一个**；只有 video-sink 这种"值本身带
              * 空格"的属性才故意拼成带引号的单段（那是 gst 语法要求）。 */
             char sync[24];
+            /* v3.5.2：迟到帧策略改成「可丢」——见下面 kmssink 直连分支的长注释。
+             * ⚠️ 这两个属性必须各自成一个 argv（gst-launch 用空格拼接 argv，
+             * 拼成 "max-lateness=40 qos=true" 会被当成前一个属性的值 → 管线不建）。
+             * 排查开关：/tmp/vp_nolate.on → 回退 max-lateness=-1 qos=false（旧行为）。 */
+            int no_late = access("/tmp/vp_nolate.on", F_OK) == 0;
+            char late[32], qos[24];
+            snprintf(late, sizeof(late), "max-lateness=%d",
+                    no_late ? -1 : PENBILI_MAX_LATENESS_MS);
+            snprintf(qos, sizeof(qos), "qos=%s", no_late ? "false" : "true");
             snprintf(sync, sizeof(sync), "sync=%s",
                     access("/tmp/vp_nosync.on", F_OK) == 0 ? "false" : "true");
             if (access("/tmp/vp_fps.on", F_OK) == 0) {
                 char vs[400];
                 snprintf(vs, sizeof(vs),
                         "video-sink=\"kmssink plane-id=" KMS_ID_STR " driver-name=rockchip %s "
-                        "max-lateness=-1 qos=false force-aspect-ratio=false skip-vsync=true %s\"", sync, rect);
+                        "%s %s force-aspect-ratio=false skip-vsync=true %s\"",
+                        sync, late, qos, rect);
                 argv[i++] = (char *)"fpsdisplaysink";
                 argv[i++] = (char *)"signal-fps-measurements=true";
                 argv[i++] = (char *)"fps-update-interval=1000";
@@ -808,8 +821,44 @@ static int render_start(int x, int y, int w, int h) {
                 argv[i++] = (char *)"plane-id=" KMS_ID_STR;
                 argv[i++] = (char *)"driver-name=rockchip";
                 argv[i++] = strdup(sync);
-                argv[i++] = (char *)"max-lateness=-1";
-                argv[i++] = (char *)"qos=false";
+                /* ---- v3.5.2 迟到帧必须可丢（修「暂停恢复后画面轻微卡顿」）----
+                 *
+                 * 现象（用户反馈）：起播正常，暂停几秒再恢复，画面会「轻微卡顿」一下。
+                 * 真机取证（fpsdisplaysink 逐秒 current）：
+                 *   稳态            59.8 59.9 59.8
+                 *   恢复后第 1 秒    7.0            ← 一帧都出不来
+                 *   恢复后第 2 秒  418.3            ← 一秒内涌出 400+ 帧
+                 *   恢复后第 3 秒   59.8            ← 才回稳态
+                 *
+                 * 根因链（已用本地文件受控复现，与网络无关）：
+                 *  ① SIGSTOP 冻结 gst-launch 期间，**GstSystemClock 仍在走**；
+                 *  ② 恢复后，暂停期间该播的 6s × 60fps ≈ 360 个 buffer 的 PTS 全部过期；
+                 *  ③ 旧配置 `max-lateness=-1`（= 永不判迟到）+ `qos=false`（= 不向上游报告）
+                 *     让 kmssink 把这些过期帧**全部照单翻页**——一秒内 400 次 page-flip，
+                 *     人眼看到的就是「卡一下然后画面窜一下」。
+                 *  对照实验（每项都在真机跑过）：
+                 *   · 停 gst / 只停 ffmpeg / 全停 → 三种都爆发（所以与「冻结谁」无关）；
+                 *   · sync=true / sync=false      → 都爆发（所以与 PTS 对齐无关）；
+                 *   · 去掉 videorate 直通 30fps   → 仍爆发（所以不是 videorate 补帧）；
+                 *   · max-lateness=40/100 + qos=false → 仍爆发（qos=false 时 sink 不报告，
+                 *     上游不知道该丢，buffers 照旧堆积）；
+                 *   · **max-lateness=40 + qos=true → 峰值 61fps、积压被丢成 dropped**。
+                 *
+                 * 为什么 qos=true 在这里安全（历史上它曾把播放打到 0.90fps）：
+                 * 当年 mppvideodec **不产 PTS**（`MPP is not able to generate pts`），
+                 * 每帧都被判迟到 → 无限丢帧。现在上游有 `videorate` 归一化到面板率，
+                 * PTS 由 videorate 按到达时间重新生成，是可信的。真机稳态 A/B（各 20s）：
+                 *   qos=false → dropped 0 / rendered 1206
+                 *   qos=true  → dropped 0 / rendered 1205   ← 稳态一帧不丢
+                 * 只在恢复瞬间丢积压（dropped 425、峰值 61fps），正是想要的行为。
+                 *
+                 * 40ms 的取值：一帧 33ms 的 1.2 倍。小于它会把正常抖动误判成迟到；
+                 * 大于它则恢复瞬间仍会放出一批。实测 40/100 在 qos=true 下都干净，
+                 * 取更小的 40 让积压丢得更果断。
+                 *
+                 * 排查开关：/tmp/vp_nolate.on → 回退 max-lateness=-1 qos=false。 */
+                argv[i++] = strdup(late);
+                argv[i++] = strdup(qos);
                 argv[i++] = (char *)"force-aspect-ratio=false";
                 /* v3.4.0：原子驱动下 kmssink 的 vsync 等待是**双份**的（自己等一次，
                  * drmModeAtomicCommit 内部再等一次），60fps 内容因此只跑到 57.45fps
@@ -1161,7 +1210,8 @@ struct session {
     int seek_pending;           /* 1 = 本次 spawn 带 -ss，等 -debug_ts 报出真实落点 */
     int seek_land_valid;        /* 1 = seek_land_ms 已解析 */
     long seek_land_ms;          /* 落点相对 -ss 的偏移（实测 -ss 10.5 → -500ms，即关键帧 10.0s） */
-    int seek_land_applied;      /* 1 = 已修正 video_base_ms（只修正一次） */
+    int seek_land_applied;      /* 1 = 已按落点算出要丢的帧数（只算一次） */
+    long seek_skip_frames;      /* v3.5.2：剩余要丢弃的帧数（对齐音画起点用） */
     volatile int pump_quit;     /* stderr 泵线程退出标志（stop_flag 不适用：重启时不能置） */
     unsigned char *au_buf;      /* Annex-B 累积缓冲（变长压缩字节，按 AU 边界切分后转发） */
     size_t au_cap;
@@ -1725,6 +1775,12 @@ static int spawn_ffmpeg(struct session *s, long start_ms, int with_audio) {
     s->stderr_fd = spipe[0];
     s->fps_known = 0;
     s->seek_pending = (start_ms > 0) ? 1 : 0;
+    /* v3.5.2：每次 spawn（起播/seek/断流重连）都要清掉落点补偿状态，
+     * 否则上一轮的 skip 计数会漏到新一轮（重连时表现为白丢几帧）。 */
+    s->seek_land_valid = 0;
+    s->seek_land_ms = 0;
+    s->seek_land_applied = 0;
+    s->seek_skip_frames = 0;
     if (pthread_create(&s->sth, NULL, ff_stderr_thread, s) == 0) s->sth_started = 1;
     else {
         close_fd(&s->stderr_fd);
@@ -2447,7 +2503,8 @@ static void *video_thread(void *arg) {
          * 排查开关：/tmp/vp_nohold.on → 关闭本门（回退旧行为）。 */
         /* ⚠️ 阈值 6 帧必须与音频门的 `video_written_frames < 6` 一致。
          * 定格门若停在 2 帧，音频门等的 6 帧永远等不到 → 又是互等。 */
-        if (s->frames >= 6 && s->audio_enabled && s->audio_alive && s->audio_input[0] &&
+        if (s->frames >= 6 && s->seek_skip_frames <= 0 &&
+            s->audio_enabled && s->audio_alive && s->audio_input[0] &&
             s->writer_bytes <= 0 && access("/tmp/vp_nohold.on", F_OK) != 0) {
             if ((now_seconds() - s->last_blit_at) * 1000.0 < (double)PENBILI_HOLD_MAX_MS) {
                 usleep(5000);
@@ -2588,6 +2645,78 @@ static void *video_thread(void *arg) {
             }
         }
         /* 到这儿 au_ready=1 且 au_n>0：缓冲区前 au_n 字节就是一个完整 AU（== 一帧） */
+        /* ---- v3.5.2 seek 落点补偿（修「拖进度条后音画不同步」）----
+         *
+         * 现象（用户反馈）：拖完进度条从新位置开始播，音画不同步。
+         * 根因：`-c:v copy` 的 `-ss` 只能落在**关键帧**上（本机实测关键帧间隔 5s），
+         * 而音频是解码输出、能精确落在 `-ss` 点。真机实测 `-ss 155.366`：
+         *   视频首包 pkt_pts_time = -0.365s  （回退到关键帧 155.001s）
+         *   音频首包 pts_time    = -0.001s  （几乎精确）
+         * ⇒ 画面永久领先声音 365ms，且**不会自愈**（video_base_ms 仍是 start_ms）。
+         *
+         * 修法：解析出的落点 |land| 换算成帧数，把视频前这么多帧**直接丢弃**（不写 FIFO），
+         * 于是首帧上屏时内容位置正好 = start_ms，与音频起点一致。
+         * 为什么丢弃而不是平移 video_base_ms：`mppvideodec` 不产 PTS，下游 `videorate`
+         * 按**到达时间**重排时间戳，平移内容时钟对不上真实的帧序列；只有丢掉多出来的
+         * 那段帧，送进管线的第一帧才真的是 start_ms 那一帧。
+         *
+         * 代价：最坏要空解 5s 内容（≈150 帧 @30fps）。清场实测解码有 2~4x 实时余量，
+         * 即最坏多等 ~1.5s，用户看到的是「拖完稍等再出画」，而不是「先出画再错位」。
+         * 上限 8s 防脏值把画面吃掉。
+         * 排查开关：/tmp/vp_noseekskip.on → 不补偿（回退旧行为）。 */
+        if (s->seek_pending && s->seek_land_valid && !s->seek_land_applied && s->fps > 0) {
+            long land = s->seek_land_ms;
+            if (land > 0) land = 0;
+            if (land < -8000) land = -8000;
+            s->seek_skip_frames = (long)((double)(-land) * (double)s->fps / 1000.0 + 0.5);
+            /* 内容时钟基线同步前移：丢弃的帧是 -ss 之前的内容，首帧上屏时
+             * position 必须正好回到 start_ms。 */
+            s->video_base_ms = s->start_ms + land;
+            if (access("/tmp/vp_noseekskip.on", F_OK) == 0) {
+                s->seek_skip_frames = 0;
+                s->video_base_ms = s->start_ms;
+            }
+            s->seek_land_applied = 1;
+            /* 取证（/tmp/vp_seek.log）：补偿是否真的算出来、要丢多少帧。
+             * drift 不是可信判据（见本文件对 audio_anchor_ms 的说明），排查必须看这里。 */
+            {
+                int sfd = open("/tmp/vp_seek.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+                if (sfd >= 0) {
+                    char sb[192];
+                    int sn = snprintf(sb, sizeof(sb),
+                            "seek start_ms=%ld land=%ldms skip=%ld fps=%d vbase=%ld\n",
+                            s->start_ms, land, s->seek_skip_frames, s->fps,
+                            (long)s->video_base_ms);
+                    if (sn > 0) { if (write(sfd, sb, (size_t)sn) < 0) { /* ignore */ } }
+                    close(sfd);
+                }
+            }
+        }
+        if (s->seek_skip_frames > 0) {
+            s->seek_skip_frames--;
+            s->frames++; /* 丢弃的帧也计入内容位置，但不上屏 */
+            s->position_ms = s->video_base_ms + (long)((double)s->frames * 1000.0 / (double)s->fps);
+            if (s->seek_skip_frames == 0) {
+                /* 补偿丢弃结束 → 记录耗时（衡量「拖完进度条要等多久才出画」的代价）。 */
+                int sfd = open("/tmp/vp_seek.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+                if (sfd >= 0) {
+                    char sb[128];
+                    int sn = snprintf(sb, sizeof(sb), "  skip done in %.0fms\n",
+                            (now_seconds() - s->video_spawn_at) * 1000.0);
+                    if (sn > 0) { if (write(sfd, sb, (size_t)sn) < 0) { /* ignore */ } }
+                    close(sfd);
+                }
+            }
+            au_consume(s, au_n);
+            s->au_bytes += (long)au_n;
+            au_n = 0;
+            au_ready = 0;
+            if (s->video_eof && s->au_len == 0) {
+                eof_done = 1;
+                break;
+            }
+            continue;
+        }
         /* ---- 播出节拍（v1.8.0 重写，锚 = 音频时钟 = writer 写出量换算的播放位置）----
          * 帧到时（apos ≥ due）→ 立即贴屏；帧落后音频钟 → v2.1.0 分两档：轻微滞后平滑快进、
          * 过大滞后强制重同步（见下）；音频时钟死亡（audio_alive=0）→ 墙钟节拍接管（画面续播）。
