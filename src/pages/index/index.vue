@@ -930,6 +930,11 @@ export default {
          * 判据不是"能不能恢复"，而是**恢复后帧率立刻回到满速、没有大空档**：
          * 旧实现恢复后 fps 掉到 10、出现 1127/540/293ms 的空档、要 10 秒才收敛。 */
         this._probePause = at && typeof at === 'object' ? Math.max(0, Math.floor(Number(at.probePause) || 0)) : 0;
+        /* probeRect：探针收尾时验证键盘避让（SET_RECT）全链路真的通了。
+         * 判据不在 JS 侧——JS 拿到 ok:1 只证明命令入队成功。真正的证据是
+         * native 日志里出现 `SET_RECT <x,y,w,h>`（= process_cmd 真的执行了
+         * gst_util_set_object_arg），以及恢复时出现原矩形。 */
+        this._probeRect = at && typeof at === 'object' && at.probeRect === true;
         logWarn('[bili] autotest seeded → ' + (liveOnly
           ? 'liveOnly room=' + (liveRoom || '-')
           : wbiStress > 0 ? 'wbiStress n=' + wbiStress
@@ -2151,7 +2156,9 @@ export default {
       // 键盘避让（问题 2，goal-b29d60aa）：falcon 输入法是独立系统 app，从屏幕底部弹出，
       // 会盖住物理面板下半部 —— 而视频平面（kmssink render-rectangle）正压在下半区。
       // 输入前把视频缩到面板上部（y 0~260 区域），关闭输入法后恢复原矩形。
-      // SET_RECT 坐标 = 含 107 面板偏移的物理面板坐标，与 open 下发的 rectPhysical 同系。
+      // 坐标系：传的 x 与 open 时下发的 x 同系（视频逻辑区左缘，不含面板偏移）；
+      // 面板偏移 PB2_PANEL_X_OFFSET 由 native 统一加（build_pipeline 与 SET_RECT 都加），
+      // 这样 JS 不必知道面板几何。真机实测 orig.x=0 → 管线里是 107。
       const phys = this.play.session && this.play.session.rectPhysical;
       let rectShrunk = false;
       try {
@@ -2881,6 +2888,42 @@ export default {
               ' 采样窗口=' + Math.round(winMs) + 'ms' +
               (fps >= 24 ? ' PASS' : ' SLOW')
             );
+          }
+        }
+        /* SET_RECT 探针：验证键盘避让链路（JS → JSAPI → cmdq → worker → kmssink）。
+         * 这一步不能靠"看代码对不对"，因为 SET_RECT 要穿过 4 层才到 kmssink，
+         * 且 g_w.vsink 历史上存的是分支 bin（没有 render-rectangle 属性，会静默无效）。
+         * 判据：native 日志出现缩小的 rect，再出现原 rect。
+         * 注意这里**不能**用 input.open（会真的弹系统输入法、并触发宿主 onHide），
+         * 直接调 player.setVideoRect 走同一条 native 路径。 */
+        if (this._probeRect) {
+          const phys = this.play.session && this.play.session.rectPhysical;
+          if (!phys || !(phys.width > 0)) {
+            logWarn('[bili] rectProbe SKIP 无 rectPhysical（会话未建立）');
+          } else {
+            const w = phys.width;
+            const h = Math.round((w * phys.height) / Math.max(1, phys.width * 1.6));
+            const shrinkH = Math.max(120, Math.min(h, 260));
+            logWarn('[bili] rectProbe orig=' + JSON.stringify(phys) + ' shrink=<' + phys.x + ',0,' + w + ',' + shrinkH + '>');
+            let r1 = null;
+            try {
+              r1 = await player.setVideoRect(phys.x, 0, w, shrinkH);
+              logWarn('[bili] rectProbe shrink ret=' + JSON.stringify(r1));
+            } catch (e) {
+              logWarn('[bili] rectProbe shrink FAIL ' + ((e && e.message) || e));
+            }
+            /* 等 native 真的执行完再发恢复命令。
+             * 1.5s 实测不够：探针紧跟着 onBack → closeSession → worker 收到
+             * shutdown 时恢复命令还在队列里，被直接丢弃（真机日志只看到缩小那条
+             * SET_RECT）。3s 留足 worker 空闲轮询的余量。 */
+            await this.sleep(3000);
+            /* 恢复原矩形——这一半同样重要：只缩不恢复会让视频永远停在半屏。 */
+            try {
+              const r2 = await player.setVideoRect(phys.x, phys.y, phys.width, phys.height);
+              logWarn('[bili] rectProbe restore ret=' + JSON.stringify(r2));
+            } catch (e) {
+              logWarn('[bili] rectProbe restore FAIL ' + ((e && e.message) || e));
+            }
           }
         }
         await this.onBack();

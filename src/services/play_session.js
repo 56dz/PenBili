@@ -376,9 +376,11 @@ export async function openVideo(ctx, item) {
       durationMs: rs.durationMs,
       outWidth: openRes.outWidth,
       outHeight: openRes.outHeight,
-      /* 键盘避让恢复用：SET_RECT 走的是含 107 面板偏移的物理面板坐标
-       * （native session.c 拼 render-rectangle 时对 x 加 PB2_PANEL_X_OFFSET），
-       * 这里存的就是 open 时下发的 rects.physical，评论键盘弹出/收起时原样回传。 */
+      /* 键盘避让恢复用：open 时下发给 native 的物理矩形（= open 参数里的 x/y/width/height）。
+       * 注意坐标系：x 是「视频逻辑区左缘」，**不含**面板偏移 —— native 在
+       * build_pipeline 与 PB2_CMD_SET_RECT 里都会统一加 PB2_PANEL_X_OFFSET(107)。
+       * 所以这里原样回传给 setVideoRect 即可，不要在 JS 侧再加偏移（加了会变 214）。
+       * 真机实测：orig.x=0 → 管线里 render-rectangle 是 <107,299,240,427>。 */
       rectPhysical: rects.physical
     }
   };

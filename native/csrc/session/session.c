@@ -1826,6 +1826,12 @@ static void process_cmd(pb2_cmd_t *c) {
              * 帧率不受影响。w/h 为 0 时等效隐藏平面。
              * 只在管线活着且 vsink 存在时执行；JS 侧在 open 前/后任意时刻
              * 都可以发，worker 空闲时处理，零阻塞。
+             *
+             * 【必须加面板偏移】JS 传的 x 与 open 下发的 req->x 同一坐标系
+             * （都是「视频逻辑区左缘」），而 build_pipeline 拼 g_w.rect 时会加
+             * PB2_PANEL_X_OFFSET（见上面那个 snprintf）。这里若直接用 rx，
+             * 恢复原矩形时画面会左移 107 像素。真机实测过：不加偏移打出
+             * `<0,299,240,427>`，而 open 时建的是 `<107,299,240,427>`。
              */
             if (g_w.pipe && g_w.pipeline_alive && g_w.vsink_el) {
                 int rx = (int)(short)((c->i64 >> 0) & 0xFFFF);
@@ -1833,6 +1839,8 @@ static void process_cmd(pb2_cmd_t *c) {
                 int rw = (int)(unsigned short)((c->i64 >> 32) & 0xFFFF);
                 int rh = (int)(unsigned short)((c->i64 >> 48) & 0xFFFF);
                 char rect[48];
+                /* w/h==0 表示隐藏平面，别让偏移把 0 宽矩形变成非零 */
+                if (rw > 0 && rh > 0) rx += PB2_PANEL_X_OFFSET;
                 snprintf(rect, sizeof(rect), "<%d,%d,%d,%d>", rx, ry, rw, rh);
                 gst_util_set_object_arg(g_w.vsink_el, "render-rectangle", rect);
                 pb2_logf("SET_RECT %s", rect);
