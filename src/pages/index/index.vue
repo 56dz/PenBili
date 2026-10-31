@@ -926,6 +926,10 @@ export default {
         if (this._noKeep) logWarn('[bili] noKeep=1 → 本次运行关闭屏幕保活（仅诊断用）');
         // probeSeek：探针收尾时连打 N 次绝对定位，量 JS 侧往返耗时（验证 seek 不阻塞主线程）
         this._probeSeek = at && typeof at === 'object' ? Math.max(0, Math.floor(Number(at.probeSeek) || 0)) : 0;
+        /* probePause：探针收尾时做 N 轮「暂停 1.2s → 恢复」，量缺陷 A（暂停后恢复卡顿）。
+         * 判据不是"能不能恢复"，而是**恢复后帧率立刻回到满速、没有大空档**：
+         * 旧实现恢复后 fps 掉到 10、出现 1127/540/293ms 的空档、要 10 秒才收敛。 */
+        this._probePause = at && typeof at === 'object' ? Math.max(0, Math.floor(Number(at.probePause) || 0)) : 0;
         logWarn('[bili] autotest seeded → ' + (liveOnly
           ? 'liveOnly room=' + (liveRoom || '-')
           : wbiStress > 0 ? 'wbiStress n=' + wbiStress
@@ -2820,6 +2824,63 @@ export default {
               (land.ok ? '' : ' 原因=' + land.error)
             );
             if (!land.ok) break; /* 落点没到，继续发只会更乱 */
+          }
+        }
+        /* 暂停探针：量缺陷 A（暂停后恢复卡顿）。
+         * 判据三项，缺一不可：
+         *   1) 暂停期间 frames 完全冻结（旧实现靠 SIGSTOP 也能冻结，所以这项只是前提）
+         *   2) 恢复后到下一帧的延迟（旧实现 2703ms）
+         *   3) **恢复后 2s 窗口内的帧率**（旧实现掉到 10fps、有 1127/540/293ms 空档、
+         *      要 10 秒才收敛；新实现应立刻满速 ~30fps）
+         * 只有 3) 达标才算真的修好了——只看"能恢复"是假阳性。 */
+        if (this._probePause > 0) {
+          const myGen = this.gen;
+          const ctx = this.makeCtx(myGen);
+          for (let i = 1; i <= this._probePause; i++) {
+            if (this.gen !== myGen || this.mode !== 'play') break;
+            const before = await readStatus(ctx);
+            if (!before.ok || before.state !== 'playing') break;
+            const tPause0 = Date.now();
+            await this.onTogglePlay();
+            const pauseMs = Date.now() - tPause0;
+            if (this.play.state !== 'paused') {
+              logWarn('[bili] pauseProbe ' + i + ' FAIL 暂停未生效 state=' + this.play.state);
+              break;
+            }
+            await this.sleep(1200);
+            const held = await readStatus(ctx);
+            const frozen = (held.frames || 0) - (before.frames || 0);
+            const tResume0 = Date.now();
+            await this.onTogglePlay();
+            const resumeMs = Date.now() - tResume0;
+            if (this.play.state !== 'playing') {
+              logWarn('[bili] pauseProbe ' + i + ' FAIL 恢复未生效 state=' + this.play.state);
+              break;
+            }
+            /* 到下一帧：轮询 100ms，最多 5s。旧实现 2703ms。 */
+            let firstMs = -1;
+            for (let k = 0; k < 50; k++) {
+              await this.sleep(100);
+              const s = await readStatus(ctx);
+              if (!s.ok) break;
+              if ((s.frames || 0) > (held.frames || 0)) { firstMs = Date.now() - tResume0; break; }
+            }
+            /* 恢复后 2s 的稳态帧率——这才是"卡顿有没有修好"的真判据。 */
+            const win0 = Date.now();
+            const s0 = await readStatus(ctx);
+            await this.sleep(2000);
+            const s1 = await readStatus(ctx);
+            const winMs = Date.now() - win0;
+            const fps = winMs > 0 ? (((s1.frames || 0) - (s0.frames || 0)) * 1000) / winMs : 0;
+            logWarn(
+              '[bili] pauseProbe ' + i +
+              ' pause=' + pauseMs + 'ms resume=' + resumeMs + 'ms' +
+              ' 暂停期新增帧=' + frozen + '(应=0)' +
+              ' 恢复后到首帧=' + (firstMs < 0 ? 'TIMEOUT' : firstMs + 'ms') +
+              ' 恢复后帧率=' + fps.toFixed(2) + 'fps' +
+              ' 采样窗口=' + Math.round(winMs) + 'ms' +
+              (fps >= 24 ? ' PASS' : ' SLOW')
+            );
           }
         }
         await this.onBack();
