@@ -16,6 +16,76 @@ import { dashLadderFor, videoFpsCapFor, liveFpsCapFor, liveQnFor, pixelBudgetFor
 
 export const SEEK_STEP_MS = 20000;
 
+/* ================= native 数值字段归一化（P0-1 防御性修复） =================
+ *
+ * 为什么必须有：native 的 status() 用**哨兵值**表达"还没测到"，最典型的是
+ * videoStallMs 在"从未出过一帧"时返回 **-1**。旧代码写的是
+ *     videoStallMs: Number(st.videoStallMs) || 0
+ * 而 Number(-1) 是 -1（真值，|| 不会兜底）→ -1 原样透传到页面看门狗的
+ * `videoStallMs > 8000` 判断，恒为 false → 看门狗永不触发 → 界面永久"加载中…"，
+ * 用户只能杀进程。B 站 m4s 直链带 deadline（约 2 小时过期）是最常见的踩中路径。
+ *
+ * 三个工具的分工（不要混用）：
+ *   num(v, dflt)        —— 计数/位置/字节/时长：非 number、非有限数、负数 → dflt。
+ *                          用于 frames/positionMs/audioBytes/videoStallMs 等"负数无意义"的量。
+ *   numSigned(v, dflt)  —— 可为负的诊断量：只挡非 number 与非有限数，保留负数。
+ *                          avDriftMs（音频位置−画面位置，负=声音滞后）、
+ *                          audioBufMs（可闻锚修正量）、lastError（native 错误码本身可为负，
+ *                          真机见过 -5/EIO）都属于这一类。
+ *   numLatency(v)       —— 音画起播差：**-1 是"未测到"的有效语义**，必须原样保留，
+ *                          页面用 `>= 0` 判断"是否测到了"。缺失时也返回 -1。
+ * ========================================================================= */
+export function num(v, dflt) {
+  const d = typeof dflt === 'number' ? dflt : 0;
+  const n = typeof v === 'number' ? v : typeof v === 'string' && v !== '' ? Number(v) : NaN;
+  return isFinite(n) && n >= 0 ? n : d;
+}
+
+export function numSigned(v, dflt) {
+  const d = typeof dflt === 'number' ? dflt : 0;
+  if (typeof v === 'number') return isFinite(v) ? v : d;
+  if (v === null || v === undefined || v === '') return d;
+  const n = Number(v);
+  return isFinite(n) ? n : d;
+}
+
+export function numLatency(v) {
+  if (typeof v === 'number') return isFinite(v) ? v : -1;
+  if (v === null || v === undefined || v === '') return -1;
+  const n = Number(v);
+  return isFinite(n) ? n : -1;
+}
+
+/* native status().state 白名单。
+ *
+ * native 自己的枚举是 idle/opening/playing/paused/error/stopped（见
+ * native/csrc/jsapi_player2.c 的 names[]），页面另有两个 UI 态 loading/seeking/ended。
+ * 这里只放行这些已知值，其余（含拼错、native 将来新增未知态、返回对象/数组等）
+ * 一律落到 'error' —— 让界面显示"可返回重试"，而不是停在一个谁都分支不到的状态上
+ * 无限"加载中…"。
+ *
+ * 'stopped' 特殊处理：它是 native 对 stop() 之后的正常态（不是故障），归一到 'idle'，
+ * 否则正常停止会被界面当成错误。 */
+const KNOWN_STATES = {
+  idle: 'idle',
+  opening: 'opening',
+  playing: 'playing',
+  paused: 'paused',
+  seeking: 'seeking',
+  ended: 'ended',
+  error: 'error',
+  stopped: 'idle'
+};
+
+export function normalizeState(raw, ctx) {
+  if (typeof raw === 'string' && KNOWN_STATES[raw] !== undefined) return KNOWN_STATES[raw];
+  const shown = typeof raw === 'string' ? raw : raw === undefined ? 'undefined' : JSON.stringify(raw);
+  if (ctx && ctx.log) {
+    ctx.log('[bili] 未识别的播放器状态 state=' + shown + ' → 按 error 处理（避免界面卡在未知态）');
+  }
+  return 'error';
+}
+
 /* 解码像素预算的历史默认值（= 1080p 全尺寸），保留导出供测试/诊断引用。
  * 真正生效的预算现在来自「我的 → 视频调节 → 分辨率」（pixelBudgetFor）。
  *
@@ -305,7 +375,11 @@ export async function openVideo(ctx, item) {
       aid: rs.aid || 0, /* 评论 oid（直播 = 0 → 评论不可用） */
       durationMs: rs.durationMs,
       outWidth: openRes.outWidth,
-      outHeight: openRes.outHeight
+      outHeight: openRes.outHeight,
+      /* 键盘避让恢复用：SET_RECT 走的是含 107 面板偏移的物理面板坐标
+       * （native session.c 拼 render-rectangle 时对 x 加 PB2_PANEL_X_OFFSET），
+       * 这里存的就是 open 时下发的 rects.physical，评论键盘弹出/收起时原样回传。 */
+      rectPhysical: rects.physical
     }
   };
 }
@@ -320,7 +394,38 @@ export async function togglePlay(ctx, playing) {
   return { ok: true, state: r.state };
 }
 
-// ±定位，钳制到 [0, duration-1s]（时长未知时不设上界）→ {ok, positionMs} | {ok:false, message}
+// 绝对定位（P1-7 修复）：直接给目标毫秒，**不用** positionMs 算 delta。
+//
+// 旧实现是 seekBy(positionMs, dur, goal - positionMs)，而 positionMs 来自每秒一次的
+// 轮询快照，最多旧 1s → 落点系统性偏 ±1000ms（defect-inventory P1-7）。拖进度条本质
+// 是"我要跳到 X"，没有任何理由绕一圈减法。
+//
+// 钳制 [0, dur-1s]：越界 seek 会让 native 侧 gst 立刻 EOS（ADR §6.3 边界），
+// 所以上界必须留 1s 余量；时长未知（直播）时不设上界。
+// → {ok, target} | {ok:false, message}
+export async function seekTo(ctx, targetMs, durationMs) {
+  const dur = Number(durationMs) || 0;
+  let target = Math.floor(Number(targetMs) || 0);
+  if (target < 0) target = 0;
+  if (dur > 0 && target > dur - 1000) target = Math.max(0, dur - 1000);
+  const r = await ctx.player.seek(target);
+  if (!r || r.ok === false) {
+    const detail = r ? [r.code, r.error].filter(Boolean).join(': ') : '';
+    return { ok: false, message: detail || '定位失败' };
+  }
+  /* v2：seek 是覆盖式的（native 侧 debounce），positionMs 可能还是旧落点 —— 有
+   * seekTargetMs 就以它为准，否则回落到 native 给的 positionMs。
+   * 注意 r.ok===true 只代表"请求已受理"，不代表首帧已上屏；页面不该等它。 */
+  const settled = Number(r.seekTargetMs);
+  return {
+    ok: true,
+    positionMs: settled > 0 ? settled : Number(r.positionMs) || 0,
+    target: target,
+    pending: !!r.seekPending
+  };
+}
+
+// ±相对定位（按钮 ±20s 用），钳制规则同 seekTo → {ok, positionMs, target} | {ok:false, message}
 export async function seekBy(ctx, positionMs, durationMs, deltaMs) {
   let target = (Number(positionMs) || 0) + (Number(deltaMs) || 0);
   if (target < 0) target = 0;
@@ -331,7 +436,26 @@ export async function seekBy(ctx, positionMs, durationMs, deltaMs) {
     const detail = r ? [r.code, r.error].filter(Boolean).join(': ') : '';
     return { ok: false, message: detail || '定位失败' };
   }
-  return { ok: true, positionMs: Number(r.positionMs) || 0, target: target };
+  const settled = Number(r.seekTargetMs);
+  return { ok: true, positionMs: settled > 0 ? settled : Number(r.positionMs) || 0, target: target };
+}
+
+// 原地自愈（任务 D）：优先 native recover()，不支持时返回 {ok:false, code:'PLAYER_UNSUPPORTED'}。
+// 页面据此决定是"重试一次 seek(pos)"还是"只提示不动手"——绝不再用 onSeek(0.001) 全量重启。
+export async function recoverSession(ctx) {
+  if (!ctx || !ctx.player || typeof ctx.player.recover !== 'function') {
+    return { ok: false, code: 'PLAYER_UNSUPPORTED', message: '当前播放器实现不支持原地恢复' };
+  }
+  try {
+    const r = await ctx.player.recover();
+    if (!r || r.ok === false) {
+      const detail = r ? [r.code, r.error].filter(Boolean).join(': ') : '';
+      return { ok: false, code: (r && r.code) || 'PLAYER_RECOVER_FAILED', message: detail || '原地恢复失败' };
+    }
+    return { ok: true, state: r.state };
+  } catch (e) {
+    return { ok: false, code: 'PLAYER_RECOVER_FAILED', message: (e && e.message) || '原地恢复失败' };
+  }
 }
 
 // → {ok, state, frames, positionMs, audioBytes, audioDropped, audioUnderruns, audioWrErrors, audioRingDrops}
@@ -374,44 +498,293 @@ export async function readStatus(ctx) {
   }
   return {
     ok: true,
-    state: st.state || 'idle',
-    frames: Number(st.frames) || 0,
-    positionMs: Number(st.positionMs) || 0,
-    audioBytes: Number(st.audioBytes) || 0,
-    audioDropped: Number(st.audioDropped) || 0,
-    audioUnderruns: Number(st.audioUnderruns) || 0,
-    audioWrErrors: Number(st.audioWrErrors) || 0,
-    audioRingDrops: Number(st.audioRingDrops) || 0,
+    state: normalizeState(st.state, ctx),
+    frames: num(st.frames, 0),
+    positionMs: num(st.positionMs, 0),
+    audioBytes: num(st.audioBytes, 0),
+    audioDropped: num(st.audioDropped, 0),
+    audioUnderruns: num(st.audioUnderruns, 0),
+    audioWrErrors: num(st.audioWrErrors, 0),
+    audioRingDrops: num(st.audioRingDrops, 0),
     audioDead: !!st.audioDead,
     /* A/V 巡检（v1.7.1）：playing 态距最近帧的毫秒（>8000=视频停帧）；gateWaitMs=起播门时长；
-     * gateActive=门进行中（此时巡检让位，防弱网首帧期被误判打断） */
-    videoStallMs: Number(st.videoStallMs) || 0,
-    gateWaitMs: Number(st.gateWaitMs) || 0,
+     * gateActive=门进行中（此时巡检让位，防弱网首帧期被误判打断）。
+     *
+     * videoStallMs 必须过 num()：native 在"从未出过一帧"时返回哨兵 **-1**
+     * （见 native/csrc/jsapi_player2.c 的 `long long stall = -1;` 与
+     * `mk_int(ctx, "videoStallMs", stall, res);`），而 -1 是真值，
+     * 旧写法 `Number(-1) || 0` 兜不住它 → -1 直通页面看门狗的
+     * `videoStallMs > 8000`（恒 false）→ 看门狗彻底失效 → 界面永久"加载中…"。
+     * 归一化后 -1 → 0，真正的停帧（>8000 的正数）照样透传。 */
+    videoStallMs: num(st.videoStallMs, 0),
+    gateWaitMs: num(st.gateWaitMs, 0),
     gateActive: !!st.gateActive,
     /* v3.5.1 起播时序：声音比画面首帧晚多少毫秒才开写（-1=未测到）。
-     * 这是「音画载入不同时」的直接量化指标，用于验证定格门是否真的把两者对齐。 */
-    audioLateMs: Number(st.audioLateMs),
+     * 这是「音画载入不同时」的直接量化指标，用于验证定格门是否真的把两者对齐。
+     * **-1 是有意义的**（页面用 `>= 0` 判断"是否已经测到"）→ 走 numLatency 保留负值。 */
+    audioLateMs: numLatency(st.audioLateMs),
     /* v3.5.1：声音比「画面可见」（KMS 平面 ACTIVE）晚多少毫秒。这才是用户感知的
-     * 音画不同步量；audioLateMs 含 gst 启动耗时，会虚高 ~1.2s。 */
-    audioLateVisibleMs: Number(st.audioLateVisibleMs),
+     * 音画不同步量；audioLateMs 含 gst 启动耗时，会虚高 ~1.2s。同样保留 -1 语义。 */
+    audioLateVisibleMs: numLatency(st.audioLateVisibleMs),
 
     /* v1.8.0 音画对齐诊断：videoSkips=丢帧快进计数（追音频钟）；avDriftMs=可闻音频位置−画面位置
-     * （正=声音超前；修复后应稳定在 ±100ms 内，持续增长=软解吞吐贴实时线）
-     * v1.9.0：audioBufMs=可闻锚修正量（aplay 管道+ALSA 缓冲，恒定即正常）
+     * （正=声音超前，**负=声音滞后** → 必须保留负号，否则诊断瞎掉一半）
+     * v1.9.0：audioBufMs=可闻锚修正量（aplay 管道+ALSA 缓冲，恒定即正常，也可能为负）
      * v1.9.3：videoRestarts=视频断流重启次数（>0=发生过 CDN 断流，表现为短暂追赶后恢复） */
-    videoSkips: Number(st.videoSkips) || 0,
-    avDriftMs: Number(st.avDriftMs) || 0,
-    audioBufMs: Number(st.audioBufMs) || 0,
-    videoRestarts: Number(st.videoRestarts) || 0,
+    videoSkips: num(st.videoSkips, 0),
+    avDriftMs: numSigned(st.avDriftMs, 0),
+    audioBufMs: numSigned(st.audioBufMs, 0),
+    videoRestarts: num(st.videoRestarts, 0),
     /* v2.1.0 音画同步分层：resyncing=视频流正在强制重同步（首帧未产出）→ 页面显示"加载中…"；
-     * resyncCount=漂移触发的强制重同步次数；avDriftNowMs=native 侧最近漂移（诊断） */
-    resyncing: !!st.resyncing,
-    resyncCount: Number(st.resyncCount) || 0,
-    avDriftNowMs: Number(st.avDriftNowMs) || 0,
-    resyncLeadMs: Number(st.resyncLeadMs) || 0,
+     * resyncCount=漂移触发的强制重同步次数；avDriftNowMs=native 侧最近漂移（诊断，可为负）；
+     * resyncLeadMs=重同步前移量（诊断）。
+     *
+     * resyncing 的"字段缺失"必须读作 false（= 不存在重同步这回事）：老 native 没有这个
+     * 字段时，页面看门狗的让位条件 `!st.resyncing` 会成立 → 看门狗照常工作。
+     * 反过来若把缺失当 true，看门狗就永久裸奔了（P0-1 第 4 条）。 */
+    resyncing: st.resyncing === true,
+    resyncCount: num(st.resyncCount, 0),
+    avDriftNowMs: numSigned(st.avDriftNowMs, 0),
+    resyncLeadMs: numSigned(st.resyncLeadMs, 0),
     /* v2.2.4：本次重同步已持续毫秒（未重同步为 0）——页面据此只在"恢复确实慢"时才弹「加载中」 */
-    resyncingMs: Number(st.resyncingMs) || 0
+    resyncingMs: num(st.resyncingMs, 0),
+
+    /* ---- player2 新字段透传（缺失一律给安全默认值，v1 下恒为默认值）----
+     * seekPending/seekTargetMs：覆盖式 seek 的进行态。拖动进度条时页面据此知道
+     *   "我下发的落点还没生效"，避免用旧 positionMs 回写 UI 造成进度条回跳。
+     * planeActive：KMS 显示平面是否 ACTIVE（false = 画面没在屏上）。
+     * pipelineAlive：native 管线进程是否存活（false = 需要 recover/open）。
+     * durationMs/fps/hasAudio：native 侧实测值（页面可用它校正 session 里的估算）。 */
+    seekPending: st.seekPending === true,
+    seekTargetMs: num(st.seekTargetMs, 0),
+    planeActive: st.planeActive === undefined ? true : !!st.planeActive,
+    pipelineAlive: st.pipelineAlive === undefined ? true : !!st.pipelineAlive,
+    nativeDurationMs: num(st.durationMs, 0),
+    nativeFps: num(st.fps, 0),
+    hasAudio: st.hasAudio === undefined ? true : !!st.hasAudio,
+    /* lastError 是 native 的 errno，真机见过 -5（EIO）→ 走 numSigned 保留负号 */
+    lastError: numSigned(st.lastError, 0),
+    lastErrorMsg: typeof st.lastErrorMsg === 'string' ? st.lastErrorMsg : '',
+    /* muted/mutedBy：全局静音开关（player2 新增）。老 native 没有该字段 → 按"未静音"
+     * 处理，不能因为字段缺失就在界面上给人打一个「已静音」角标。 */
+    muted: st.muted === true,
+    mutedBy: typeof st.mutedBy === 'string' ? st.mutedBy : '',
+    /* screenOff：屏幕是否真的黑了（player2 读 /sys/class/backlight/*\/bl_power 判定，
+     * 比 brightness JSAPI 的 getScreenState() 可靠 —— 后者把"调暗 DIM=3"也算非亮屏）。
+     * 三态：true=熄屏/背光断电、false=亮、null=旧 native 没有该字段（页面回退到 JSAPI）。 */
+    screenOff: st.screenOff === undefined ? null : !!st.screenOff
   };
+}
+
+/* ================= seek 落点等待（探针 + 页面共用的判据） =================
+ *
+ * 为什么不能"发完就查一次"：player2 的 seek 是**覆盖式 debounce**
+ * （native/csrc/session/session.c 的 PB2_SEEK_DEBOUNCE_MS=250）——
+ *   · js_seek() 只把目标塞进队列并立刻返回（JS 零阻塞）；
+ *   · worker 要等最后一次 seek 之后满 250ms 才真正执行 do_seek()；
+ *   · do_seek() 内部还要「起新 ffmpeg(-ss) → 拆旧管线 → 重建 → preroll」，
+ *     真机实测 seek(restart) done total≈505ms，到首帧约 550~620ms。
+ * 所以「落点到了没有」必须轮询等，而且必须同时满足两个条件：
+ *
+ *   1) settled —— 观察到 seekPending 从 true 变回 false。do_seek() 收尾时
+ *      才 pb2_stats_patch_seek(&stats, 0, clamped)，这一步是"命令确实被 native
+ *      执行过"的唯一证据。只看位置会被"目标离当前位置很近"骗过去（假阳性）。
+ *      老 native（v1）没有 seekPending 字段 → 读作 false，等价于不设这道门。
+ *   2) 落点 |positionMs - target| <= near。do_seek 收尾时会把 positionMs
+ *      直接 patch 成 clamped（ffmpeg -ss 的请求值），且 base_ms 也设为 clamped，
+ *      之后 refresh_position 报 base_ms + 播放前进量 → 关键帧对齐不会让落点
+ *      回退到 target 之前，drift 恒 >= 0。
+ *
+ * 之前探针用 `frames > f0` 判完成是彻底假阳性：正常播放每帧都让 frames+1，
+ * 判据永远立刻满足，于是 N 个 seek 全挤进同一个 debounce 窗口，前 N-1 个
+ * 根本没执行（真机 pb2.log 里连一条 `SEEK target=` 都没有）。
+ *
+ * 依赖全部可注入（read/sleep/now），便于单测用假序列跑完四种分支，
+ * 不必真等 8 秒、也不依赖系统时钟。
+ * ========================================================================= */
+export const SEEK_LAND_NEAR_MS = 5000; // 落点容差：关键帧对齐 + base_ms 对齐的余量
+export const SEEK_LAND_DEADLINE_MS = 8000; // 落点等待上限（实测 550~620ms，约 13 倍余量）
+export const SEEK_LAND_POLL_MS = 100; // 采样间隔
+export const SEEK_FRAME_DEADLINE_MS = 3000; // 首帧软上限（native 预算 PB2_SEEK_TARGET_MS=800ms）
+/* 源秒退自愈（check_first_frame -> retry）需要 teardown + 重新拉起 ffmpeg（网络重连 1~2s）。
+ * probe 若仍用 3s 软上限，会在重试完成前判 TIMEOUT 并 onBack() 拆会话，把飞行中的重试杀掉
+ * （真机 20:43 复现：retry 1 @31.7s，shutdown done @34.1s）。探针场景放宽到 9s，
+ * 正常播放路径（waitFirstFrame 的默认 3s）不受影响。 */
+export const SEEK_FRAME_RETRY_DEADLINE_MS = 9000;
+
+function defaultSleep(ms) {
+  return new Promise(function (resolve) {
+    setTimeout(resolve, ms);
+  });
+}
+
+function defaultNow() {
+  return Date.now();
+}
+
+function pickMs(v, dflt) {
+  return typeof v === 'number' && isFinite(v) && v > 0 ? v : dflt;
+}
+
+// 等落点 → {ok, landing, drift, waitedMs, samples, sawPending, lastPos, frames, error}
+//   ok=true   : landing=实测位置，drift=landing-target（可正可负，正常 0~数百 ms）
+//   ok=false  : error='TIMEOUT' | 'NO_FRAME'? | 播放错误原文；drift=null（调用方打 n/a，
+//               不要打 0ms —— 没落点就没有偏差可言）
+// opts: {near, deadlineMs, pollMs, requireSettled(默认 true), sleep, now}
+export async function waitLanded(read, targetMs, opts) {
+  const o = opts || {};
+  const target = Math.floor(Number(targetMs) || 0);
+  const near = pickMs(o.near, SEEK_LAND_NEAR_MS);
+  const deadlineMs = pickMs(o.deadlineMs, SEEK_LAND_DEADLINE_MS);
+  const pollMs = pickMs(o.pollMs, SEEK_LAND_POLL_MS);
+  const requireSettled = o.requireSettled !== false;
+  const failOnNewError = o.failOnNewError === true;
+  const sleep = typeof o.sleep === 'function' ? o.sleep : defaultSleep;
+  const now = typeof o.now === 'function' ? o.now : defaultNow;
+  const t0 = now();
+  let samples = 0;
+  let sawPending = false;
+  let pendingAt = -1;
+  let pos = 0;
+  let frames = 0;
+  let lastErr = '';
+  let baseErr = null; // null = 还没采到第一帧基线
+  const pendingMs = function () {
+    return pendingAt >= 0 ? now() - pendingAt : -1;
+  };
+  for (;;) {
+    await sleep(pollMs);
+    samples++;
+    let st = null;
+    try {
+      st = await read();
+    } catch (e) {
+      lastErr = (e && e.message) || String(e);
+      st = null;
+    }
+    if (st && st.ok === false) {
+      /* 真错误态（native 报 error / status 读失败）：立刻失败并带上原因，
+       * 不要空转满 deadline 才打一个什么都没说明的 TIMEOUT。 */
+      if (st.state === 'error') {
+        return {
+          ok: false,
+          error: st.message || '播放错误',
+          landing: 0,
+          drift: null,
+          waitedMs: now() - t0,
+          samples: samples,
+          sawPending: sawPending,
+          pendingMs: pendingMs(),
+          lastPos: pos,
+          frames: frames
+        };
+      }
+    } else if (st) {
+      pos = num(st.positionMs, 0);
+      frames = num(st.frames, 0);
+      /* native 的「seek 没落点」不会把 state 置 error，只 patch_error(PB2_E_SEEK=10,
+       * "seek did not land") 并保留真实位置（session.c 的 P0-3 修复）。这种情形下
+       * 光等位置永远不会到位，只能靠 lastError 变化识别 —— 基线取第一次采样的值，
+       * 之后变了就说明这次 seek 报了新错。默认关闭（保持纯函数语义稳定），
+       * 探针/页面可以按需打开。 */
+      if (failOnNewError) {
+        const le = numSigned(st.lastError, 0);
+        const msg = typeof st.lastErrorMsg === 'string' ? st.lastErrorMsg : '';
+        if (baseErr === null) baseErr = { code: le, msg: msg };
+        /* 只把「新出现的**非零**错误」当失败。为什么必须排除 0：
+         * native 的自愈成功路径会 patch_error(PB2_E_NONE(0), "") 把错误清空
+         * （session.c 的 self-heal / open 收尾），那是"变好了"，不是"失败了"。
+         * 若把清零也当变化，会把一次成功的自愈 seek 误判成失败。 */
+        else if (le !== 0 && (le !== baseErr.code || msg !== baseErr.msg)) {
+          return {
+            ok: false,
+            error: 'SEEK ' + (msg || 'native 报错 errno=' + le) + '（落点 ' + pos + 'ms，目标 ' + target + 'ms）',
+            landing: 0,
+            drift: null,
+            waitedMs: now() - t0,
+            samples: samples,
+            sawPending: sawPending,
+            pendingMs: pendingMs(),
+            lastPos: pos,
+            frames: frames
+          };
+        }
+      }
+      if (st.seekPending === true) {
+        if (!sawPending) {
+          sawPending = true;
+          pendingAt = now();
+        }
+      }
+      const settled = !requireSettled || st.seekPending !== true;
+      const onTarget = (pos > 0 || target === 0) && Math.abs(pos - target) <= near;
+      if (settled && onTarget) {
+        return {
+          ok: true,
+          error: '',
+          landing: pos,
+          drift: pos - target,
+          waitedMs: now() - t0,
+          samples: samples,
+          sawPending: sawPending,
+          /* 从"第一次看到 pending"到"看到落点"的时长 = native 侧 debounce+do_seek 的实耗，
+           * 这才是排查 seek 慢的可用数字；waitedMs 含前面的轮询粒度，不是它。 */
+          pendingMs: pendingMs(),
+          lastPos: pos,
+          frames: frames
+        };
+      }
+    }
+    if (now() - t0 >= deadlineMs) break;
+  }
+  return {
+    ok: false,
+    error: lastErr ? 'READ ' + lastErr : 'TIMEOUT',
+    landing: 0,
+    drift: null,
+    waitedMs: now() - t0,
+    samples: samples,
+    sawPending: sawPending,
+    pendingMs: pendingMs(),
+    lastPos: pos,
+    frames: frames
+  };
+}
+
+// 等首帧 → {ok, frameMs, frames, samples, error}
+// seek 后 native 会把 frames 归零（core/queue.c 的 pb2_probe_reset），所以
+// frames>0 第一次为真 = 新管线真的出帧了，这才是"到首帧耗时"的真值。
+// 软判据：超时也算一种结果（frameMs=-1），不否定落点结论。
+export async function waitFirstFrame(read, opts) {
+  const o = opts || {};
+  const deadlineMs = pickMs(o.deadlineMs, SEEK_FRAME_DEADLINE_MS);
+  const pollMs = pickMs(o.pollMs, SEEK_LAND_POLL_MS);
+  const sleep = typeof o.sleep === 'function' ? o.sleep : defaultSleep;
+  const now = typeof o.now === 'function' ? o.now : defaultNow;
+  const t0 = now();
+  let samples = 0;
+  let frames = 0;
+  for (;;) {
+    await sleep(pollMs);
+    samples++;
+    let st = null;
+    try {
+      st = await read();
+    } catch (e) {
+      st = null;
+    }
+    if (st && st.ok === false && st.state === 'error') {
+      return { ok: false, error: st.message || '播放错误', frameMs: -1, frames: frames, samples: samples };
+    }
+    if (st && st.ok !== false) {
+      frames = num(st.frames, 0);
+      if (frames > 0) {
+        return { ok: true, error: '', frameMs: now() - t0, frames: frames, samples: samples };
+      }
+    }
+    if (now() - t0 >= deadlineMs) break;
+  }
+  return { ok: false, error: 'NO_FRAME', frameMs: -1, frames: frames, samples: samples };
 }
 
 // 幂等停止 + 释放 fb（stop/release 自身幂等）

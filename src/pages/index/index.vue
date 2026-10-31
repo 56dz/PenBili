@@ -26,6 +26,14 @@
         <text class="ptitle">{{ infoTitle }}</text>
         <text class="pup">{{ infoUp }}</text>
         <text class="pdesc">{{ playDesc }}</text>
+        <!-- 播放提示（「定位中…」「加载中…」「音画不同步，正在恢复…」等）。
+             为什么要单独一行：这些 note 以前只赋值给 this.play.note，**模板里从来没有渲染过**，
+             用户完全看不到（P0-2 要求 2 的真实缺口）。而 .pvideo 里是 <hole>（透明挖孔，让 KMS
+             视频平面透出来），不能把文字塞进 hole 里 —— hole 的职责就是"这里什么都没有"。
+             所以提示落在左列信息卡最下面一行：播放态（holeVisible）同样看得见。
+             这一行**恒定渲染**（无提示时是空串），不改几何尺寸，避免提示出现/消失时布局抖动；
+             代价是简介从 7 行缩到 5 行（192px 高度是固定预算，见 base.less .pleft-info）。 -->
+        <text class="pnote">{{ play.note }}</text>
       </div>
       <div class="pleft-btns">
         <div class="pbtn" @click="onToggleLike">
@@ -243,7 +251,7 @@
              不一定从子节点冒泡到父容器，真机实测只绑父级会有一半面积点不动。 -->
         <hole v-if="holeVisible" class="video-hole" @click="onTogglePlay"></hole>
         <div v-else class="play-idle" @click="onTogglePlay">
-          <text class="play-idle-text">{{ idleText }}</text>
+          <text class="play-idle-text">{{ play.note || idleText }}</text>
         </div>
       </div>
       <div
@@ -423,7 +431,21 @@ import {
 } from '../../services/feed.js';
 import { fetchViewState, fetchFavFolders, setLike, addCoin, dealFav } from '../../services/bili/action.js';
 // 主页网格列数 + 尾部裁剪（用户要求 m11950-3：加载更多后条目数必须能被列数整除）
-import { GRID_COLS, trimToGridRows } from '../../services/screen.js';
+import {
+  GRID_COLS,
+  trimToGridRows,
+  KEEP_INTERVAL_MS,
+  keepScreenOn,
+  keepScreenOff,
+  keepScreenBackend,
+  keepScreenTicks,
+  isKeepingScreen,
+  getScreenState,
+  screenStateName,
+  getBrightness,
+  seekRatioFromX,
+  seekFillWidth
+} from '../../services/screen.js';
 // 图标：本地 PNG 走 aiot-vue-cli 的 image 插件 → 产物 images/<md5>.png（见 rollup-plugins/image.js）。
 // 不用 falcon-ui 的 icon 组件：它依赖 font-family: falcon-icons，但包内没有该字体文件（渲染为空）。
 import icHome from '../../assets/icons/home.png';
@@ -464,11 +486,17 @@ import {
   openVideo,
   togglePlay,
   seekBy,
+  // 与页面方法 seekTo 同名，取别名避免词法歧义（页面方法是入口，这个是服务层实现）
+  seekTo as seekToAbsolute,
+  recoverSession,
   readStatus,
+  waitLanded,
+  waitFirstFrame,
   closeSession,
   describePlayError,
   ensureMixinResult,
-  SEEK_STEP_MS
+  SEEK_STEP_MS,
+  SEEK_FRAME_RETRY_DEADLINE_MS
 } from '../../services/play_session.js';
 import * as player from '../../services/player.js';
 import {
@@ -552,6 +580,42 @@ const STATE_LABELS = {
   ended: '已播完',
   error: '出错'
 };
+
+/* 自愈看门狗参数（任务 D）。
+ *
+ * WATCHDOG_COOLDOWN_MS=60000：旧值 45s/25s。两次自愈之间至少隔 1 分钟 —— 弱网下
+ *   视频停帧是常态，短冷却会让看门狗连环触发，每次都往管线里塞一次 seek，反而
+ *   把它拖死。1 分钟也足够长，真正的假死用户早就察觉到了。
+ * WATCHDOG_MAX_RECOVER=3：每个播放会话最多自愈 3 次。旧实现无上限（靠冷却限流），
+ *   长时间弱网下能无限重启。用尽后停止动手、给一行提示让用户自己返回重进 ——
+ *   比"永远在重启中"的体验好得多。 */
+const WATCHDOG_COOLDOWN_MS = 60000;
+const WATCHDOG_MAX_RECOVER = 3;
+
+/* seek 交互参数（缺陷 B 的 JS 侧体验）。
+ *
+ * SEEK_DEBOUNCE_MS=250：touchend 后等 250ms 再下发。真机上手指离开屏幕到系统把
+ *   touchend 送进 QuickJS 有几十毫秒抖动，用户"拖一下就松"时也可能收到两次 touchend
+ *   （falcon 的 touch 事件在快速滑动下会重发）。250ms 内再来的 release 直接顶掉前一次，
+ *   保证一次拖动最多一次 seek —— 每次 seek 都要重建管线，代价 500ms+，绝不能连发。
+ * SEEK_NOTE_TIMEOUT_MS=4000：seek 受理后「定位中…」要撑到首帧落屏（实测 500~600ms）。
+ *   这里给 4s 上限：弱网下 seek 后首帧可能很久，超时就收起提示，不把用户困在提示里。 */
+const SEEK_DEBOUNCE_MS = 250;
+const SEEK_NOTE_TIMEOUT_MS = 4000;
+
+/* 「无首帧」判失败阈值（review2 审计 P0-1 的 JS 侧防线）。
+ *
+ * 背景：native 旧实现在"从未出过一帧"时把 videoStallMs 返回成哨兵 -1，
+ * 页面看门狗判的是 `videoStallMs > 8000` → 恒 false → **永不触发**，界面就一直
+ * 停在「加载中…」，用户只能杀进程。B 站 m4s 直链带 deadline（约 2 小时过期），
+ * 这是现实中最常见的一条失败路径（缓存里的老 URL 直接 403/超时，一帧都出不来）。
+ * play_session.readStatus() 已把 -1 归一化成 0（防线一），但 0 同样不满足 > 8000，
+ * 所以这里必须有独立判据（防线二）：只要**还没有任何视频帧且已等超过 15s**，
+ * 就直接判失败，不再等"帧间隔"这类只对"出过帧之后"才有意义的指标。
+ *
+ * 15s 的取值依据：真机弱网起播门最坏情况实测 8~12s 才出首帧（audio 先放行），
+ * 15s 既留了余量，又不会让用户盯着"加载中"超过十五秒还不知道发生了什么。 */
+const NO_FRAME_FAIL_MS = 15000;
 
 export default {
   name: 'PageBili',
@@ -705,14 +769,14 @@ export default {
       const s = this.play.session;
       return s ? formatDuration((s.durationMs || 0) / 1000) : '';
     },
-    // 进度条填充宽（px）：中列 469，左右 padding 各 8 → 轨道 453；圆点 10 与填充同排 → 填充最多 443
+    /* 进度条填充宽（px）。几何来自 screen.js（P1-14：以前这里写死 443/453，
+     * 布局一改就静默错位）。拖动中用 seekDragMs，松手前不下发 seek。 */
     seekFillW() {
       const s = this.play.session;
       const dur = s ? s.durationMs || 0 : 0;
       if (!(dur > 0)) return 0;
       const ms = this.seekDragMs == null ? this.play.positionMs : this.seekDragMs;
-      const r = Math.max(0, Math.min(1, ms / dur));
-      return Math.round(443 * r);
+      return seekFillWidth(ms / dur);
     },
     // 左列简介（用户手绘稿 m11950：左列上方显示视频标题和简介）
     playDesc() {
@@ -729,6 +793,27 @@ export default {
     this._poll = 0;
     this.mixinMemo = {}; // WBI 密钥会话级缓存（播放与搜索共享）
     this.client = createClient({});
+    /* 播放器实现选择（v1=旧 player.c，v2=新 player2 模块）在这里一次性读盘：
+     * 之后每次 open/status 都走内存值，热路径不碰 storage（storage 是同步 FS 调用，
+     * 每秒一次轮询里读盘会拖慢 QuickJS 主线程）。 */
+    this._playerImpl = await player.loadPlayerImpl();
+    /* 屏幕保活状态（任务 A）：_keepOn=当前是否在保活；_bgPaused=这次暂停是退后台
+     * 触发的（回前台要自动恢复），用户手动暂停的不动。 */
+    this._keepOn = false;
+    this._bgPaused = false;
+    this._noKeep = false; // 诊断种子可置 true 关闭保活（保持息屏前提）
+    /* seek 交互状态（缺陷 B 的 JS 侧体验）：
+     *   _seekDebounceT = 排队中的 seek 定时器句柄（0=没有排队）
+     *   _seekNoteAt    = 最近一次下发 seek 的时刻（0=没有在等首帧）→ 「定位中…」靠它撑着
+     *   _seekFrames0   = 下发 seek 前的累计帧数（用来判断首帧有没有到） */
+    this._seekDebounceT = 0;
+    this._seekNoteAt = 0;
+    this._seekFrames0 = 0;
+    /* _noFrameAt = 「连续无视频帧」这个状态是从什么时候开始的（0=当前有帧）。
+     * 用途：看门狗的「无首帧」判据（NO_FRAME_FAIL_MS）—— frames 恒为 0 时没有
+     * "上次出帧时刻"可比，只能靠"零帧已经持续多久"来判断起播是不是真死了。
+     * 用滚动计时而不是"起播时刻"：这样 seek 后、recover 后重新零帧也能被兜住。 */
+    this._noFrameAt = 0;
     // 关键顺序：先恢复登录 Cookie（loadLocal），其末尾才发起首屏加载 ——
     // 否则首屏 rcmd 会以匿名身份发出，拿到的是默认推荐而非账号个性化推荐
     await this.loadLocal();
@@ -809,7 +894,13 @@ export default {
         })();
       }
       const at = await getJson(KEYS.autotest, null);
-      if (at && (at === true || at.enabled === true)) {
+      /* 【防误触】自动探针/自检只认「双开关」：enabled 且 autotest 显式为 true。
+       * 背景：测试期靠 bili_autotest={playProbe:N} 让 App 启动即自动播放，
+       * 但正式包若用户存储里残留这份种子，普通用户一进软件就自动播视频（用户实测反馈）。
+       * 现在改为：只有 enabled===true 且 autotest===true 才进自动流程；
+       * 只有 playProbe 数值、没有 autotest:true 的种子一律视为残留，走正常首屏。 */
+      const atOn = at && (at === true || (at.enabled === true && at.autotest === true));
+      if (atOn) {
         const soakSec = at && typeof at === 'object' ? Number(at.soak) || 0 : 0;
         // soakBv：把 soak 固定到指定稿件（跨轮可复现同一稿件 → 才能做换网/换版本的 A/B 对比）
         const soakBv = at && typeof at === 'object' && /^BV[0-9A-Za-z]{10}$/.test(at.soakBv || '') ? at.soakBv : '';
@@ -822,12 +913,27 @@ export default {
         const liveHold = at && typeof at === 'object' ? Math.floor(Number(at.liveHold) || 0) : 0;
         // pollEvery：巡检打点间隔秒数（默认 5）——诊断时设 1 便于看时序
         this._pollEvery = at && typeof at === 'object' ? Math.max(1, Math.floor(Number(at.pollEvery) || 5)) : 5;
+        /* playProbe：只做「起播 + 按秒采样」，不跑全链路自检（缺陷 C / 屏幕保活取证用）。
+         * 种子 {enabled:true, playProbe:90} → 起播推荐首个稿件，持续 90s 每秒打一行
+         * [bili] probe，包含 frames/positionMs/videoStallMs/保活后端/屏幕电源态。
+         * 这样就能在**关屏**状态下验证：息屏期间看门狗有没有误杀管线（缺陷 C 根因）。 */
+        const playProbe = at && typeof at === 'object' ? Math.max(0, Math.floor(Number(at.playProbe) || 0)) : 0;
+        /* noKeep：诊断用，强制关掉屏幕保活。
+         * 为什么需要：验证「息屏期间看门狗有没有误杀管线」必须让屏幕**保持关闭**，
+         * 而保活生效后每 20s 会把屏幕点亮（实测 hal-screen keep 能把 bp 4→0、br 5→113），
+         * 既烧屏又让"息屏"这个前提不成立。只在种子显式给出时生效，正常路径不受影响。 */
+        this._noKeep = at && typeof at === 'object' && at.noKeep === true;
+        if (this._noKeep) logWarn('[bili] noKeep=1 → 本次运行关闭屏幕保活（仅诊断用）');
+        // probeSeek：探针收尾时连打 N 次绝对定位，量 JS 侧往返耗时（验证 seek 不阻塞主线程）
+        this._probeSeek = at && typeof at === 'object' ? Math.max(0, Math.floor(Number(at.probeSeek) || 0)) : 0;
         logWarn('[bili] autotest seeded → ' + (liveOnly
           ? 'liveOnly room=' + (liveRoom || '-')
           : wbiStress > 0 ? 'wbiStress n=' + wbiStress
+          : playProbe > 0 ? 'playProbe ' + playProbe + 's'
           : 'run' + (soakSec > 0 ? ' soak=' + soakSec + 's' : '') + (soakBv ? ' bv=' + soakBv : '')));
         if (liveOnly) this.runLiveAutotest(liveRoom, liveHold);
         else if (wbiStress > 0) this.runWbiStress(wbiStress);
+        else if (playProbe > 0) this.runPlayProbe(playProbe, soakBv);
         else this.runAutotest(soakSec, soakBv); // 自检内部自带首屏加载（避免与这里并发双 load 竞态）
       } else {
         await this.selectTab('rcmd'); // 首屏加载：此刻登录 Cookie 已就位 → 个性化推荐
@@ -1210,6 +1316,11 @@ export default {
       this.play.session = r.session;
       this.play.state = 'playing';
       this.play.note = '';
+      /* 起播成功 → 立刻开始屏幕保活（缺陷 C）。
+       * 必须在这里而不是"第一帧之后"：起播本身就可能要几秒，且暂停态同样要保活
+       * （用户按暂停思考时屏幕变黑同样会触发 600s 背光断电）。 */
+      this.startKeepScreen();
+      this._avRecoverCount = 0; // 每次播放会话重置自愈配额（任务 D）
       this.history = pushHistory(
         this.history,
         {
@@ -1241,11 +1352,67 @@ export default {
       }
       return { st: st, ms: Date.now() - t0 };
     },
+    /* 当前是否"真的黑了"（看门狗门禁用）——只有背光断电才算，两级优先：
+     *  1) native `status().screenOff`（player2 直接读 /sys/class/backlight/*\/bl_power，
+     *     true=背光断电、false=背光上电）；
+     *  2) 回退 brightness JSAPI 的 getScreenState()：0=亮屏、3=调暗、1=熄屏断电、null=拿不到。
+     * 注意两者语义不同（真机实测）：JSAPI 把"调暗 DIM=3"也算非亮屏，但调暗时用户**看得见**
+     * 画面，看门狗不该让位 —— 那会把"画面冻死"这种真故障拖成不可恢复。native 的 bl_power
+     * 判据只认断电，正好对应"用户看不见"这一真实条件，所以优先用它。
+     * 都拿不到时**当作亮屏**（false）：宁可让看门狗按老逻辑工作，也不能因为探测失败
+     * 就永久禁用自愈。 */
+    isScreenOff(st) {
+      if (st && typeof st.screenOff === 'boolean') return st.screenOff;
+      const s = getScreenState();
+      if (s == null) return false;
+      /* JSAPI 回退路径：只有"断电熄屏(1)"算黑屏，调暗(3)仍然可见 → 不让位。
+       * 早期版本把 3 也算非亮屏，真机验证后发现会导致调暗期间看门狗全程让位。 */
+      const n = Number(s);
+      return n === 1;
+    },
+    /* 原地自愈（任务 D 核心）：优先 native recover()，退化到"原地 seek 一次"。
+     *
+     * 两个动作都**不跳位置**：
+     *   - recover()：native 侧自己重挂平面/重连，不动播放位置（最理想）；
+     *   - seek(st.positionMs)：把当前位置再下发一次，等于"重新解一次这一帧"。
+     *     注意旧实现是 onSeek(0.001) = seek(pos+1)，会**跳过 1ms 并重建整条管线**；
+     *     这里明确用当前 positionMs，不再 +1、不再重开进程。
+     * 两者都失败时只打日志，不动 play.state —— 让轮询继续，下一轮冷却后还能再试。 */
+    async tryRecover(myGen, st, tag) {
+      const ctx = this.makeCtx(myGen);
+      const pos = Math.max(0, Number(st && st.positionMs) || 0);
+      const r = await recoverSession(ctx);
+      if (this.gen !== myGen) return;
+      if (r.ok) {
+        logWarn('[bili] ' + tag + ' 自愈: recover() ok state=' + r.state);
+        return;
+      }
+      if (r.code === 'PLAYER_UNSUPPORTED') {
+        // v2 契约里没有 recover() → 退化到原地 seek（不重启管线，只重新解当前帧）
+        const rr = await seekBy(ctx, pos, Number(st && st.durationMs) || 0, 0);
+        if (this.gen !== myGen) return;
+        if (rr.ok) {
+          logWarn('[bili] ' + tag + ' 自愈: 原地 seek(' + pos + 'ms) ok（无 recover()）');
+        } else {
+          logWarn('[bili] ' + tag + ' 自愈失败（原地 seek）: ' + rr.message);
+        }
+        return;
+      }
+      logWarn('[bili] ' + tag + ' 自愈失败（recover）: ' + (r.code || '') + ' ' + (r.message || ''));
+    },
     startPoll(myGen) {
       this.stopPoll();
       this._pollLogged = false;
       this._audioDeadWarned = false; // 每次新播放重置音频中断提示状态。
       this._resyncNoteOn = false;
+      /* 自愈状态按会话重置（任务 D）：换一个视频就是新会话，配额重新给满。 */
+      this._avRecoverAt = 0;
+      this._avRecoverCount = 0;
+      this._avQuotaWarned = false;
+      this._hardQuotaWarned = false;
+      this._screenOffStallLogged = false;
+      this._seekNoteAt = 0; // 新会话没有在等的 seek
+      this._noFrameAt = 0;  // 新会话的"连续零帧"计时也归零
       const tick = async () => {
         if (this.gen !== myGen) {
           this.stopPoll();
@@ -1290,7 +1457,9 @@ export default {
         // 首帧落屏后 native 清 resyncing，提示自动消失。
         // v2.2.5：只有"恢复确实慢"才弹「加载中」。视频流重启通常 1~2s（缓冲还顶着），这种快速自愈
         // 不打扰用户（只表现为一次极短画面停顿）；真正慢（>2.5s）才给提示，避免提示刷屏。
-        if (st.state === 'playing' && st.resyncing && (st.resyncingMs || 0) > 2500) {
+        // seek 等首帧期间（_seekNoteAt>0）不走这里：seek 本身也可能让 native 触发重同步，
+        // 但此时提示必须是「定位中…」，不能被改写成「加载中…」。
+        if (st.state === 'playing' && st.resyncing && (st.resyncingMs || 0) > 2500 && !(this._seekNoteAt > 0)) {
           if (!this._resyncNoteOn) {
             this._resyncNoteOn = true;
             this.play.note = '加载中…';
@@ -1324,13 +1493,81 @@ export default {
           this._lastAudioLateMs = st.audioLateVisibleMs;
           logWarn('[bili] A/V 音画起播差=' + st.audioLateVisibleMs + 'ms（声音比画面可见晚多少，定格门应压到 ~0；总启动 ' + st.audioLateMs + 'ms）');
         }
-        // A/V 一致性巡检（v1.7.1）：视频 8s 无新帧而音频仍在写 → seek(pos+1) 重启对齐。
-        // 重开必经起播门 → 音画成对重启；门期(音频未开写, audioBytes 不变)天然不触发；
-        // 评论面板遮挡(commentsOpen)是用户主动暂停画面，跳过；45s 冷却防弱网打转。
+        /* ---------- 自愈看门狗（任务 D 重写） ----------
+         *
+         * 旧实现的两个致命问题（defect-inventory P1-13）：
+         *  1) 动作是 `onSeek(0.001)` —— v1 的 seek 会停掉双进程、重开、重过 15s 起播门，
+         *     为了"对齐一下"把整条管线杀掉重建。真机实测这一次 seek 阻塞 QuickJS 主线程
+         *     4961ms，用户看到的是画面卡住好几秒再回来。
+         *  2) **没有息屏门禁**。息屏后视频 vsink 不再消费帧 → native 的 videoStallMs 持续
+         *     增长，而音频进程独立于平面仍在写 → "视频 8s 无新帧但音频在播"成立，看门狗
+         *     判定管线卡死并重启。可息屏期间画面停滞是**完全正常**的。真机表现：熄屏一会儿
+         *     再点一下，只亮屏不出画（管线正被自己杀掉重建），要再点一次才好 —— 这就是
+         *     用户说的"要点两次"。所以下面每个看门狗都必须带 !screenOff。
+         *
+         * 新动作分级（从轻到重，绝不无条件杀管线）：
+         *  1. native 提供 recover() → 调它（原地重挂平面/重连，不动进程）；
+         *  2. 不支持 recover → 最多补一次 seek(currentPos)（原地重试，不跳位置）；
+         *  3. 冷却 ≥60s（旧的是 45s/25s，弱网下会连环重启）；
+         *  4. 每个播放会话最多 3 次（旧的无上限，弱网下能无限重启）。
+         */
+        const screenOff = this.isScreenOff(st);
+        const now = Date.now();
+        const cooldownOk = !this._avRecoverAt || now - this._avRecoverAt > WATCHDOG_COOLDOWN_MS;
+        const quotaOk = (this._avRecoverCount || 0) < WATCHDOG_MAX_RECOVER;
+        /* seek 进行中让位（P0-2 要求 2）：seek 会重建管线，期间 videoStallMs 必然增长、
+         * frames 停涨，这在看门狗看来和"卡死"一模一样。若不放行，用户每拖一次进度条就
+         * 可能被自愈逻辑再补一次 seek（雪上加霜，且耗尽 3 次配额）。 */
+        const seekBusy = this._seekNoteAt > 0;
+        // 息屏期间画面停滞是正常现象，不判故障（但仍然每 5s 打一行日志留证据）
+        if (screenOff && st.state === 'playing' && st.videoStallMs > 8000 && !this._screenOffStallLogged) {
+          this._screenOffStallLogged = true;
+          logWarn('[bili] 息屏期间 videoStall=' + st.videoStallMs + 'ms（正常，画面不在屏上）→ 看门狗让位');
+        }
+        if (!screenOff) this._screenOffStallLogged = false;
+
+        /* ---------- 无首帧兜底看门狗（review2 审计 P0-1） ----------
+         * 下面两个 stall 看门狗都建立在「videoStallMs 会增长」之上，但 videoStallMs
+         * 只在"出过帧之后"才有意义：一帧都没出时 native 返回哨兵 -1（现在已被
+         * readStatus 归一化成 0），0 > 8000 同样恒 false → 两个看门狗都永远不触发。
+         * B 站 m4s 直链带 deadline（约 2 小时过期），缓存里的老 URL 会 403/超时，
+         * 表现正是"一帧都出不来"且 native 不报错 —— 用户看到永久「加载中…」。
+         *
+         * 判据：还在等起播（opening/loading）或累计帧数仍为 0，且这种状态已经
+         * 连续持续超过 15s → 直接判失败，不再等帧间隔指标。用**滚动计时**
+         * （_noFrameAt）而不是"起播时刻"：这样 seek 后/recover 后重新零帧也能兜住，
+         * 同时只要中途出过帧（frames > 0）就清零重新计。 */
+        const waitingFrames =
+          st.state === 'opening' ||
+          st.state === 'loading' ||
+          (st.state === 'playing' && st.frames === 0);
+        if (waitingFrames && !screenOff && !seekBusy && !this.commentsOpen) {
+          if (this._noFrameAt <= 0) this._noFrameAt = now;
+          const noFrameMs = now - this._noFrameAt;
+          if (noFrameMs > NO_FRAME_FAIL_MS) {
+            this._noFrameAt = 0;
+            logWarn(
+              '[bili] 无首帧 ' + noFrameMs + 'ms（state=' + st.state + ' frames=' + st.frames +
+              ' stall=' + st.videoStallMs + ' gate=' + st.gateWaitMs +
+              '）/ 阈值 ' + NO_FRAME_FAIL_MS + 'ms → 判起播失败，停止轮询让用户返回重试'
+            );
+            this.play.state = 'error';
+            this.play.note = '起播失败 · 可返回重试';
+            this.stopPoll();
+            return;
+          }
+        } else {
+          // 出过帧 / 不在等起播 → 计时归零，下次零帧重新起算
+          this._noFrameAt = 0;
+        }
+
+        // A/V 一致性巡检：视频 8s 无新帧而音频仍在写 → 原地恢复（不重启管线）
         if (
+          !screenOff &&
+          !seekBusy &&
           st.state === 'playing' &&
           !st.gateActive &&
-          // v2.2.5：重同步期间让位，但**有限让位**——超过 15s 仍未恢复就交回 JS 兜底，
+          // 重同步期间让位，但**有限让位**——超过 15s 仍未恢复就交回 JS 兜底，
           // 否则一旦 native 侧重启卡死，两个看门狗都被压住 → 画面永久冻结（真机实测过 66s+）。
           (!st.resyncing || (st.resyncingMs || 0) > 15000) &&
           st.videoStallMs > 8000 &&
@@ -1338,21 +1575,26 @@ export default {
           st.audioBytes !== (this._lastAvAudioBytes || 0) &&
           !this.commentsOpen
         ) {
-          const now = Date.now();
-          if (!this._avRecoverAt || now - this._avRecoverAt > 45000) {
+          if (cooldownOk && quotaOk) {
             this._avRecoverAt = now;
-            logWarn('[bili] A/V stall: video ' + st.videoStallMs + 'ms 无新帧但音频在播 → seek 恢复 pos=' + st.positionMs);
+            this._avRecoverCount = (this._avRecoverCount || 0) + 1;
+            logWarn(
+              '[bili] A/V stall: video ' + st.videoStallMs + 'ms 无新帧但音频在播 → 原地恢复' +
+              '（第 ' + this._avRecoverCount + '/' + WATCHDOG_MAX_RECOVER + ' 次）pos=' + st.positionMs
+            );
             this.play.note = '音画不同步，正在恢复…';
-            this.onSeek(0.001) /* = seek(pos+1)：重启双进程并重新过起播门 */
-              .catch(function (e) {
-                logWarn('[bili] A/V recover seek: ' + (e && e.message));
-              });
+            this.tryRecover(myGen, st, 'av');
+          } else if (!quotaOk && !this._avQuotaWarned) {
+            this._avQuotaWarned = true;
+            logWarn('[bili] A/V stall 自愈配额已用尽（' + WATCHDOG_MAX_RECOVER + ' 次）→ 不再动手，交给用户');
+            this.play.note = '画面已停滞，可返回重进';
           }
         }
-        // 僵尸涓流看门狗（v2.6.1）：视频停帧 ≥25s 且音频字节也不再增长 = 双链路假死
-        // （TCP 涓流让 rw_timeout 永不触发，实测可冻结 60s+）。主动 seek(pos+1) 双重启：
-        // 网络恢复即瞬回，仍断网则按冷却重试（优于无限冻结）。25s 冷却防弱网风暴。
+        // 僵尸涓流看门狗：视频停帧 ≥25s 且音频字节也不再增长 = 双链路假死
+        // （TCP 涓流让 rw_timeout 永不触发，实测可冻结 60s+）。同样先原地恢复。
         if (
+          !screenOff &&
+          !seekBusy &&
           st.state === 'playing' &&
           !st.gateActive &&
           (!st.resyncing || (st.resyncingMs || 0) > 15000) &&
@@ -1360,22 +1602,53 @@ export default {
           st.audioBytes === (this._lastAvAudioBytes || 0) &&
           !this.commentsOpen
         ) {
-          const now2 = Date.now();
-          if (!this._hardStallAt || now2 - this._hardStallAt > 25000) {
-            this._hardStallAt = now2;
-            logWarn('[bili] hard stall: video ' + st.videoStallMs + 'ms 无帧且音频冻结 → 双重启');
+          if (cooldownOk && quotaOk) {
+            this._avRecoverAt = now;
+            this._avRecoverCount = (this._avRecoverCount || 0) + 1;
+            logWarn(
+              '[bili] hard stall: video ' + st.videoStallMs + 'ms 无帧且音频冻结 → 原地恢复' +
+              '（第 ' + this._avRecoverCount + '/' + WATCHDOG_MAX_RECOVER + ' 次）'
+            );
             this.play.note = '网络不稳定，正在重连…';
-            this.onSeek(0.001).catch(function (e) {
-              logWarn('[bili] hard stall restart: ' + (e && e.message));
-            });
+            this.tryRecover(myGen, st, 'hard');
+          } else if (!quotaOk && !this._hardQuotaWarned) {
+            this._hardQuotaWarned = true;
+            logWarn('[bili] hard stall 自愈配额已用尽（' + WATCHDOG_MAX_RECOVER + ' 次）→ 不再动手');
+            this.play.note = '网络异常，可返回重进';
           }
         }
         this._lastAvAudioBytes = st.audioBytes;
+        /* ---------- seek 的「定位中…」（P0-2 要求 2） ----------
+         * seek 受理后画面要到首帧才换（实测 500~600ms），这段窗口里：
+         *   1) 必须显示「定位中…」——不能是「加载中…」，也不能是黑屏无提示；
+         *   2) 不能被下面「无画面帧 → 加载中…」覆盖（seek 期间 frames 会短暂停涨/归零）；
+         *   3) 不能触发看门狗（seek 本身会让 videoStallMs 增长，属正常）。
+         * 判据用 frames 的增长（seek 后首帧到达 → 累计帧数一定会超过下发前的值），
+         * 4s 兜底收起，避免弱网下把用户困在提示里。 */
+        let seekWaiting = false;
+        if (this._seekNoteAt > 0) {
+          const waited = Date.now() - this._seekNoteAt;
+          if (st.frames > this._seekFrames0) {
+            logWarn('[bili] seek 首帧到达 耗时=' + waited + 'ms frames=' + st.frames);
+            this._seekNoteAt = 0;
+            if (this.play.note === '定位中…') this.play.note = '';
+          } else if (waited > SEEK_NOTE_TIMEOUT_MS) {
+            logWarn('[bili] seek 等首帧超时 ' + waited + 'ms（frames 仍为 ' + st.frames + '）→ 收起提示');
+            this._seekNoteAt = 0;
+            if (this.play.note === '定位中…') this.play.note = '';
+          } else {
+            seekWaiting = true; // 还在等首帧：保持提示、且不让「加载中」覆盖
+          }
+        }
         // v2.9.4：**只要还没有任何视频帧就提示「加载中」**。原因（真机诊断实测）：起播门 15s 会
         // 先放行音频（"极弱网先出声"），此时音频已响但画面仍是冻的 → 用户感受正是"画面卡住但声音
         // 正常"。原判据（首帧+位置0+无音频字节）在音频放行后就不成立了，于是画面冻着却没有任何提示。
         // 注意区分：resyncing（视频流重启）走上面的 2.5s 门槛保持静默自愈，避免提示刷屏。
-        if (st.state === 'playing' && st.frames === 0 && !st.resyncing) {
+        // seek 等首帧期间（seekWaiting）不覆盖「定位中…」：seek 后 frames 会短暂归零/停涨，
+        // 若按这里判定就会把提示改成「加载中…」，用户看到的是"定位"变"加载"，语义错且更焦虑。
+        if (seekWaiting) {
+          // 保持「定位中…」原样
+        } else if (st.state === 'playing' && st.frames === 0 && !st.resyncing) {
           if (this.play.note !== '加载中…') {
             this.play.note = '加载中…';
             logWarn('[bili] 无画面帧（起播/卡死）→ 加载中…');
@@ -1383,7 +1656,9 @@ export default {
         } else if (this.play.note === '加载中…' && st.frames > 0) {
           this.play.note = '';
         }
-        this.play.positionMs = st.positionMs;
+        /* 位置回写：seek 等首帧期间保持本地乐观值（目标落点），否则 thumb 会被旧的
+         * native 位置拉回去，表现为"拖完往左弹一下"。首帧到达后再交回 native。 */
+        if (!seekWaiting) this.play.positionMs = st.positionMs;
         this.play.frames = st.frames;
         if (st.state === 'ended') {
           this.play.state = 'ended';
@@ -1434,15 +1709,18 @@ export default {
       }
       const myGen = this.gen;
       this.play.note = '定位中…';
+      this._seekFrames0 = this.play.frames || 0;
+      this._seekNoteAt = Date.now();
       const r = await seekBy(this.makeCtx(myGen), this.play.positionMs, s.durationMs, deltaSec * 1000);
       if (this.gen !== myGen) return;
       if (!r.ok) {
+        this._seekNoteAt = 0;
         this.play.note = r.message;
         logWarn('[bili] seek fail: ' + r.message);
         return;
       }
       this.play.positionMs = r.positionMs;
-      this.play.note = '';
+      // 「定位中…」交给 startPoll 的首帧判据清（见 tick 的 seekNote 段），不在这里清
       logWarn('[bili] seek ' + (deltaSec > 0 ? '+' : '') + deltaSec + 's → pos=' + r.positionMs + 'ms');
     },
     /* 播放态右栏只有评论区；点收藏按钮时用收藏夹覆盖层顶掉它（m07040-5）。
@@ -1683,16 +1961,22 @@ export default {
       logWarn('[bili] fav ' + (on ? 'add' : 'del') + ' id=' + f.id);
     },
 
-    /* ---------- 可拖动进度条 ---------- */
+    /* ---------- 可拖动进度条（任务 E：拖动中不下发 seek） ---------- */
     // falcon 运行时只有 changedTouches[0].pageX / pageY（offsetX/clientX/touches 全为 0），
     // 没有 panstart/panmove，所以自己按逻辑坐标算比例。
-    // 轨道几何（v4 手绘布局 m11950）：.seek 宽 469（中列宽），左右 padding 各 8 → 轨道 453。
-    // pageX 是「相对被触摸元素」的坐标，不是整页坐标 —— 实测在 .seek 内点元素内 x=37
-    // 得到的 pageX 就是 37，所以只需减 8px 左 padding，不用再减中列的绝对 x。
+    // 几何统一由 screen.js 提供（seekRatioFromX）：轨道 = 中列 469 − 2×8 padding = 453。
+    // pageX 是「相对被触摸元素」的坐标，不是整页坐标 —— 实测在 .seek 内点 x=37 得到的
+    // pageX 就是 37，所以只需减 8px 左 padding，不用再减中列的绝对 x。
     seekRatioAt(x) {
-      if (!isFinite(x)) return null;
-      return Math.max(0, Math.min(1, (x - 8) / 453));
+      return seekRatioFromX(x);
     },
+    /* 拖动中：**只更新本地 seekDragMs，绝不下发 seek**。
+     *
+     * 旧实现每次 touchmove 都走 onSeek → native seek，一次拖动会打出几十次 seek。
+     * v1 的 seek 是"停掉双进程 + 重开 + 重过起播门"，实测阻塞 QuickJS 主线程 4961ms，
+     * 拖一下就卡死；v2 的 seek 虽然只阻塞 0.1~25ms，但背靠背 seek 会互相干扰
+     * （ADR §6.3：前一次还没 ASYNC_DONE 就来的新 seek 会拖到几秒）。
+     * 所以拖动期间一次都不发，touchend 只发最后一次 —— 天然 debounce 到 0 次中间态。 */
     onSeekTouch(e) {
       const t = (e && e.changedTouches && e.changedTouches[0]) || null;
       if (!t) return;
@@ -1705,6 +1989,11 @@ export default {
     },
     // touchend 必须再取一次触点：falcon 的 touchmove 在快速滑动时会被丢弃，
     // 实测从 x=100 拖到 x=420（应 80.6%）只收到第 16 步（66%），落点会偏。
+    //
+    // 下发纪律（P0-2 要求 1）：整个拖动期间 onSeekTouch 一次 seek 都不发，只更新本地
+    // seekDragMs（thumb/fill 跟手）；touchend 再把**最后一次**落点排进 250ms debounce 队列
+    // → 一次拖动最多一次 player.seek()。每次 seek 都要重建管线（实测 500ms+），连发会
+    // 让画面连续黑闪，且 v2 背靠背 seek 会互相干扰（前一次没 ASYNC_DONE 就来的新 seek 拖到几秒）。
     async onSeekRelease(e) {
       const t = (e && e.changedTouches && e.changedTouches[0]) || null;
       const s = this.play.session;
@@ -1716,9 +2005,33 @@ export default {
       const target = this.seekDragMs;
       this.seekDragMs = null;
       if (target == null) return;
-      await this.seekTo(target);
+      /* 250ms 内再来的 release 直接顶掉前一次（不叠加、不排队两套）。 */
+      if (this._seekDebounceT) {
+        clearTimeout(this._seekDebounceT);
+        this._timers.delete(this._seekDebounceT);
+        this._seekDebounceT = 0;
+      }
+      // 取证：拖动期间 onSeekTouch 一次 seek 都没发，这里是唯一的下发入口。
+      // 真机拖一次应当只看到 1 行 "seek 排队" + 1 行 "[bili] seekTo"（= 只调 1 次 player.seek）。
+      logWarn('[bili] seek 排队 target=' + target + 'ms（debounce ' + SEEK_DEBOUNCE_MS + 'ms，拖动中下发 0 次）');
+      this._seekDebounceT = setTimeout(() => {
+        this._timers.delete(this._seekDebounceT);
+        this._seekDebounceT = 0;
+        this.seekTo(target).then(
+          () => {},
+          (err) => logWarn('[bili] seekTo 异常: ' + (err && err.message))
+        );
+      }, SEEK_DEBOUNCE_MS);
+      this._timers.add(this._seekDebounceT);
     },
-    // 绝对定位（拖动结束/点击轨道时用）：复用 seekBy 的相对位移
+    /* 绝对定位（拖动结束/点击轨道时用）。P1-7 修复：直接下发目标毫秒。
+     *
+     * 旧实现 seekBy(positionMs, dur, goal - positionMs)，而 positionMs 来自每秒一次的
+     * 轮询快照，最多旧 1s → 落点系统性偏 ±1000ms（defect-inventory P1-7）。
+     * 现在走 play_session.seekTo(ctx, goal, dur)，钳制 [0, dur-1s] 在服务层做。
+     *
+     * 注意：这里**不等首帧**。v2 的 seek 立即返回 {ok,seekPending:true}，画面会在
+     * 0.1~13.3ms（ADR §6.3）后自己换；await 只等 JSAPI 受理，不阻塞主线程。 */
     async seekTo(targetMs) {
       const s = this.play.session;
       const st = this.play.state;
@@ -1733,17 +2046,30 @@ export default {
       const dur = s.durationMs;
       const goal = Math.max(0, Math.min(dur - 1000, Math.floor(Number(targetMs) || 0)));
       const myGen = this.gen;
+      /* 立刻显示「定位中…」+ thumb 直接跳到目标位置（本地乐观值）。
+       * 为什么不能等 native 回报位置：seek 后要到首帧才会更新 positionMs（500~600ms），
+       * 期间如果继续显示旧位置，用户会觉得"拖了没反应"；而每帧轮询回来的位置是旧值，
+       * 会让 thumb 往回弹。所以这里先本地写死 seekDragMs 的落点，等轮询追上再交回。 */
       this.play.note = '定位中…';
-      const r = await seekBy(this.makeCtx(myGen), this.play.positionMs, dur, goal - this.play.positionMs);
+      this.play.positionMs = goal;
+      this._seekFrames0 = this.play.frames || 0;
+      this._seekNoteAt = Date.now();
+      const r = await seekToAbsolute(this.makeCtx(myGen), goal, dur);
       if (this.gen !== myGen) return;
       if (!r.ok) {
+        this._seekNoteAt = 0;
         this.play.note = r.message;
         logWarn('[bili] seekTo fail: ' + r.message);
         return;
       }
       this.play.positionMs = r.positionMs;
-      this.play.note = '';
-      logWarn('[bili] seekTo ' + goal + 'ms → pos=' + r.positionMs + 'ms');
+      /* 「定位中…」不在这里清 —— 由 startPoll 的首帧判据清（见 tick 里的 seekNote 段）。
+       * v2 的 seek 是"立即返回 + 0.1~13ms 后开始重建管线"，返回 ok 时画面还没换，
+       * 立刻清提示会露出 500ms 的黑屏/旧画面。 */
+      logWarn(
+        '[bili] seekTo ' + goal + 'ms → pos=' + r.positionMs + 'ms' +
+        (r.pending ? ' (pending)' : '') + ' frames0=' + this._seekFrames0
+      );
     },
 
     /* ---------- 评论（覆盖面板 scroller 滑动 + 行内子楼） ---------- */
@@ -1818,6 +2144,23 @@ export default {
       const myGen = this.gen;
       // 系统输入法会触发宿主 onHide —— 同 onOpenInput 用 imBusy 守卫，防 teardown 作废本次输入
       this.imBusy = true;
+      // 键盘避让（问题 2，goal-b29d60aa）：falcon 输入法是独立系统 app，从屏幕底部弹出，
+      // 会盖住物理面板下半部 —— 而视频平面（kmssink render-rectangle）正压在下半区。
+      // 输入前把视频缩到面板上部（y 0~260 区域），关闭输入法后恢复原矩形。
+      // SET_RECT 坐标 = 含 107 面板偏移的物理面板坐标，与 open 下发的 rectPhysical 同系。
+      const phys = this.play.session && this.play.session.rectPhysical;
+      let rectShrunk = false;
+      try {
+        if (phys && phys.width > 0 && player.setVideoRect) {
+          /* 输入框（.pinput-box）在播放态右栏底部：逻辑 y≈240~266、x≈682~960。
+           * 换算成物理面板坐标大约是 x∈[0,94]（面板左缘）一带 —— 键盘从面板 y 大约 300 起
+           * 向下弹出。视频缩到 y 0~280 就必然在键盘之上；宽度保持 240，高度按信箱比收窄。 */
+          const w = phys.width;
+          const h = Math.round((w * phys.height) / Math.max(1, phys.width * 1.6));
+          await player.setVideoRect(phys.x, 0, w, Math.max(120, Math.min(h, 260)));
+          rectShrunk = true;
+        }
+      } catch (e) { /* v1 无 setRect 能力（PLAYER_UNSUPPORTED）：接受遮挡，不阻塞输入 */ }
       try {
         const inp = await input.open({
           value: this.cinText || '',
@@ -1834,6 +2177,10 @@ export default {
         this.replyStatus = this.cinText ? '' : this.replyStatus;
       } finally {
         this.imBusy = false;
+        if (rectShrunk) {
+          // 无论正常返回、取消还是出错，都把视频恢复到 open 时的原矩形
+          try { await player.setVideoRect(phys.x, phys.y, phys.width, phys.height); } catch (e) { /* 恢复失败只影响画面位置 */ }
+        }
       }
     },
     async onSendReply() {
@@ -1976,6 +2323,10 @@ export default {
       const myGen = ++this.gen;
       this.stopPoll();
       this.closeComments();
+      // 主动离开播放页：停保活（真正该停的地方，不是 onHide）
+      keepScreenOff();
+      this._keepOn = false;
+      this._bgPaused = false;
       await closeSession(this.makeCtx(myGen));
       this.mode = 'browse';
       this.play = idlePlay();
@@ -2164,14 +2515,27 @@ export default {
       return liveQualityLabel(this.videoSettings);
     },
 
-    /* ---------- 生命周期：后台/卸载与手动返回共用同一停止路径 ---------- */
+    /* ---------- 生命周期：前后台 / 离开播放页 / 卸载 ----------
+     *
+     * 三种"离开"必须区分开（defect-inventory P0-6 的核心错误就是把它们混成一个 teardown）：
+     *   1. 应用退到后台（onHide）—— 系统级，用户随时回来。**不能 teardown**：
+     *      管线进程被杀掉后回来只会看到黑屏，得再点一次播放（用户报的"要点两次"）。
+     *      正确处理：暂停播放 + 保留会话 + 停掉保活定时器，onShow 恢复。
+     *   2. 离开播放页（onBack / 切 tab）—— 用户主动结束。teardown。
+     *   3. 卸载（onUnload）—— 页面销毁。teardown（定时器必须清干净）。
+     */
     teardown(note) {
       this.gen++;
       this.stopPoll();
       this._timers.forEach((t) => clearTimeout(t));
       this._timers.clear();
+      this._seekDebounceT = 0; // 排队中的 seek 已随 _timers 一起清掉
+      this._seekNoteAt = 0;
       cancelNativePosts(); // 丢弃在途 form POST（幂等）
       input.dispose(); // 退订系统输入法回调（幂等）
+      // 真正离开播放页才停保活；定时器不清干净会在页面销毁后继续跑
+      this.stopKeepScreen('teardown');
+      this._bgPaused = false;
       if (this.mode === 'play') {
         closeSession(this.makeCtx(this.gen)).then(
           () => {},
@@ -2182,16 +2546,96 @@ export default {
       }
       if (note) this.statusText = note;
     },
-    onShow() {
-      // 回前台不自动联网（列表/播放状态原样保留）
+    /* 进入/维持播放态 → 启动 20s 屏幕保活（播放态和暂停态都要保活）。
+     * 幂等：screen.js 内部是单例 keeper，重复调用只返回当前状态。
+     *
+     * 注意周期必须 < 30s：`hal-screen keep` 自身只续 30 秒窗口，且 30s 就是第一级
+     * 调暗阈值（真机 /etc/input-event-daemon.conf 的 [Idle]）。KEEP_INTERVAL_MS=20000。 */
+    startKeepScreen() {
+      if (this._noKeep) return; // 诊断模式（noKeep）下不保活，保持息屏前提
+      if (this._keepOn) return;
+      this._keepOn = keepScreenOn();
+      if (this._keepOn) {
+        logWarn(
+          '[bili] 屏幕保活启动 backend=' + (keepScreenBackend() || 'probe-pending') +
+          ' interval=' + KEEP_INTERVAL_MS / 1000 + 's'
+        );
+      } else {
+        logWarn('[bili] 屏幕保活不可用（brightness JSAPI 缺失）→ 30s 后系统会自动调暗，需 native 侧兜底');
+      }
     },
-    onHide() {
-      // 系统输入法拉起/关闭会触发 onHide —— 输入会话中不做任何清理
-      //（否则 gen++ 会让输入确认结果被丢弃：表现为"返回后显示已停止且无内容"）
-      if (this.imBusy) {
-        logWarn('[bili] onHide during IM session → skip teardown');
+    /* 停保活（onHide/teardown 共用）。必须打一行含 ticks 的日志：
+     * 两次进出播放态后应看到 ticks=0 重新计数 —— 若看到两套 #N 交错，就是定时器泄漏。 */
+    stopKeepScreen(where) {
+      const wasOn = this._keepOn || isKeepingScreen();
+      const ticks = keepScreenTicks();
+      keepScreenOff();
+      this._keepOn = false;
+      if (wasOn) logWarn('[bili] 屏幕保活停止（' + where + '）ticks=' + ticks);
+    },
+    onShow() {
+      /* 回前台：若退后台时暂停过播放，这里恢复。
+       * 只恢复"我们自己暂停的那一次"，用户手动暂停的不动。
+       * 不自动联网（列表/播放状态原样保留）。 */
+      if (this.mode === 'play' && this._bgPaused) {
+        this._bgPaused = false;
+        this.startKeepScreen();
+        const myGen = this.gen;
+        togglePlay(this.makeCtx(myGen), false).then(
+          (r) => {
+            if (this.gen !== myGen) return;
+            if (r && r.ok) {
+              if (r.state === 'playing' || r.state === 'paused') this.play.state = r.state;
+              logWarn('[bili] onShow → 恢复播放 state=' + this.play.state);
+            } else {
+              logWarn('[bili] onShow 恢复失败: ' + ((r && r.message) || '未知'));
+            }
+          },
+          (e) => logWarn('[bili] onShow 恢复异常: ' + (e && e.message))
+        );
         return;
       }
+      // 后台期间保活被停过，回前台仍处播放态则重启
+      if (this.mode === 'play') this.startKeepScreen();
+    },
+    onHide() {
+      // 系统输入法拉起/关闭会触发 onHide —— 输入会话中不做任何处理
+      //（否则 gen++ 会让输入确认结果被丢弃：表现为"返回后显示已停止且无内容"）
+      if (this.imBusy) {
+        logWarn('[bili] onHide during IM session → skip');
+        return;
+      }
+      /* 应用退后台：**保留会话**，只暂停 + 停保活。
+       *
+       * 为什么暂停而不是让它后台播：本机音频输出是独占的（alsasink），后台继续播会
+       * 抢走其他应用的音频；而且息屏后视频 vsink 不消费帧，白占 CPU。
+       * 为什么不能 teardown：旧实现（defect-inventory P0-6）在这里 teardown，回来
+       * 时播放器进程已经没了，用户看到黑屏必须再点一次 —— 这正是"要点两次"的一半成因。
+       *
+       * 保活必须**连定时器一起停**：应用在后台还每 20s 唤一次屏，等于永不熄屏（烧屏风险），
+       * 也白耗电。onShow 会重新 startKeepScreen()，所以停是安全的。 */
+      if (this.mode === 'play' && (this.play.state === 'playing' || this.play.state === 'paused')) {
+        this.stopKeepScreen('onHide');
+        if (this.play.state === 'playing') {
+          this._bgPaused = true;
+          const myGen = this.gen;
+          // 不 await：onHide 是同步生命周期，await 会拖住系统
+          togglePlay(this.makeCtx(myGen), true).then(
+            (r) => {
+              if (this.gen !== myGen) return;
+              if (r && r.ok) {
+                this.play.state = 'paused';
+                logWarn('[bili] onHide → 暂停并保留会话（回前台恢复）');
+              } else {
+                logWarn('[bili] onHide 暂停失败: ' + ((r && r.message) || '未知'));
+              }
+            },
+            (e) => logWarn('[bili] onHide 暂停异常: ' + (e && e.message))
+          );
+        }
+        return;
+      }
+      // 非播放态（浏览列表等）：退后台无需保留任何资源
       this.teardown('');
     },
     onUnload() {
@@ -2255,6 +2699,132 @@ export default {
         await this.onBack();
       } catch (e) {
         logWarn('[bili] LIVE AUTOTEST FAIL: ' + ((e && e.message) || e));
+      }
+    },
+    /* 播放探针（缺陷 C / 屏幕保活取证专用）。
+     *
+     * 种子：{enabled:true, playProbe:<秒>, soakBv?:'BV...', pollEvery:1}
+     * 行为：起播推荐首个稿件（或 soakBv 指定稿件），然后每 2s 打一行 [bili] probe，
+     *       持续 N 秒后 onBack 收尾。**不做任何断言**，只输出证据。
+     *
+     * 为什么需要它：全链路 runAutotest 会主动 seek/暂停/切 tab，把"息屏期间管线是否
+     * 被看门狗误杀"这件事的现场搅乱了。探针只做一件事——挂着播，让外部（关屏）干预。
+     * 采样行包含 screen=亮/息屏、keep=保活后端、frames/stall，足够判定：
+     *   · frames 是否持续增长（管线活着）
+     *   · 息屏期间有没有 av/hard 自愈触发（日志里搜 "原地恢复"）
+     */
+    async runPlayProbe(seconds, bv) {
+      logWarn('[bili] PROBE start ' + seconds + 's bv=' + (bv || 'auto'));
+      try {
+        await this.selectTab('rcmd');
+        const item = bv ? { bvid: bv, title: 'PROBE ' + bv, up: '', cover: '', durationSec: 0 } : this.rcmdItems[0];
+        if (!item) {
+          logWarn('[bili] PROBE 推荐列表为空，无法起播');
+          return;
+        }
+        await this.onPlayItem(item);
+        if (this.play.state !== 'playing') {
+          logWarn('[bili] PROBE 起播失败: ' + this.play.note);
+          return;
+        }
+        const w = await this.waitForFrames(30000);
+        logWarn('[bili] PROBE first frame ' + w.ms + 'ms frames=' + (w.st && w.st.frames) + ' pos=' + (w.st && w.st.positionMs));
+        const t0 = Date.now();
+        let lastFrames = (w.st && w.st.frames) || 0;
+        while (Date.now() - t0 < seconds * 1000) {
+          await this.sleep(2000);
+          if (this.mode !== 'play') break;
+          const st = await readStatus(this.makeCtx(this.gen));
+          const rawScr = getScreenState();
+          const scr = rawScr == null ? 'null' : screenStateName(rawScr) + '(' + rawScr + ')';
+          /* 亮度/状态原始值（P0-1 要求 4）：两个 API 是两套编号，必须同时打原始数字才能
+           * 判断"保活到底生效没"。真机实测语义见 screen.js 的 screenStateName 注释：
+           *   getScreenState() 0=亮屏、3=调暗(DIM，能救)、1=熄灭(OFF，不强行点亮)
+           *   getBrightness()  返回的是**亮度设置档位**（真机恒为 80），
+           *                    屏幕被调暗到 bl_br=5 时它依然是 80 —— 所以不能只看它。 */
+          const rawBright = getBrightness();
+          const grew = (st.frames || 0) - lastFrames;
+          lastFrames = st.frames || 0;
+          logWarn(
+            '[bili] probe t=' + Math.round((Date.now() - t0) / 1000) + 's screen=' + scr +
+            ' bright=' + (rawBright == null ? 'null' : rawBright) +
+            ' keep=' + (this._keepOn ? (keepScreenBackend() || 'probe') : 'off') +
+            ' ticks=' + keepScreenTicks() +
+            ' state=' + st.state + ' frames=' + st.frames + '(+' + grew + ')' +
+            ' pos=' + st.positionMs + ' stall=' + (st.videoStallMs || 0) +
+            ' ab=' + (st.audioBytes || 0) + ' plane=' + (st.planeActive ? 1 : 0) +
+            ' alive=' + (st.pipelineAlive ? 1 : 0) +
+            ' recover=' + (this._avRecoverCount || 0) + '/' + WATCHDOG_MAX_RECOVER
+          );
+        }
+        logWarn('[bili] PROBE done（自愈触发 ' + (this._avRecoverCount || 0) + ' 次）');
+        /* seek 探针：一次测三件事，缺一不可。
+         *
+         *   1) JS 侧往返耗时（callMs）—— 旧实现 seek 同步阻塞 4961ms
+         *      （app 日志 `Msg process take too many time`）。>200ms 说明还在阻塞。
+         *   2) 落点是否等于目标（landing）—— 曾经 `js_seek` 只返回 {ok:1}，
+         *      seekToAbsolute 拿不到 seekTargetMs/positionMs，回落到 0，
+         *      页面把 thumb 归零。所以只测耗时是假阳性。
+         *   3) 到首帧耗时（firstMs）—— 从下发到 frames 增长。旧实现 6136ms 起播门。
+         *
+         * 关键：**每次 seek 之间必须等这条命令真的被 native 执行完再发下一个**。
+         * v2 的 seek 是覆盖式 debounce（native 侧 PB2_SEEK_DEBOUNCE_MS=250），
+         * 背靠背连发只会执行最后一个，前 N-1 个的耗时/落点全是假的。
+         * 串行保证由 waitLanded 提供：它要求「seekPending 落回 false」+「位置靠近目标」
+         * 同时成立才返回（见 play_session.js 的 waitLanded 注释），不再靠固定 sleep(300) 猜。 */
+        if (this._probeSeek > 0) {
+          const myGen = this.gen;
+          const ctx = this.makeCtx(myGen);
+          const dur = (this.play.session && this.play.session.durationMs) || 0;
+          for (let i = 1; i <= this._probeSeek; i++) {
+            if (this.gen !== myGen) break;
+            if (this.mode !== 'play') break;
+            const target = Math.floor((dur * i) / (this._probeSeek + 1));
+            const t0 = Date.now();
+            const r = await seekToAbsolute(ctx, target, dur);
+            const callMs = Date.now() - t0;
+            if (!r.ok) {
+              logWarn('[bili] seekProbe target=' + target + ' FAIL ' + r.message + ' 耗时=' + callMs + 'ms');
+              continue;
+            }
+            /* 等落点：必须先看到 seekPending 落回 false（= native 真的执行过这条命令，
+             * do_seek 收尾才 pb2_stats_patch_seek(...,0,...)），再看 positionMs 靠近
+             * target。只看位置会被"目标离当前位置本来就近"骗过去，就又是假阳性。
+             * 判据细节与真机依据见 play_session.js 的 waitLanded 注释。 */
+            const land = await waitLanded(
+              function () { return readStatus(ctx); },
+              target,
+              { sleep: this.sleep.bind(this), failOnNewError: true }
+            );
+            /* 到首帧：seek 后 native 会把 frames 归零（pb2_probe_reset），所以
+             * frames 第一次 >0 就是新管线真的出帧了。这是软指标（超时不算失败）。
+             * 注意：若落点确认时 frames 已经 >0，说明 seek 完成前就已出新帧，
+             * 再等下去只会白等一个轮询周期并把 first 谎报成 ~100ms —— 直接用
+             * 落点耗时当"到首帧"的上界。 */
+            const ff = !land.ok
+              ? { ok: false, frameMs: -1, frames: 0, atLand: false }
+              : land.frames > 0
+                ? { ok: true, frameMs: land.waitedMs, frames: land.frames, atLand: true }
+                : await waitFirstFrame(function () { return readStatus(ctx); }, { sleep: this.sleep.bind(this), deadlineMs: SEEK_FRAME_RETRY_DEADLINE_MS });
+            logWarn(
+              '[bili] seekProbe target=' + target +
+              ' landing=' + (land.ok ? Math.round(land.landing) : 'FAIL') +
+              /* 没落点就没有偏差可言 → n/a；不要打 0ms（那是"落点正好=目标"的意思） */
+              ' drift=' + (land.ok ? Math.round(land.drift) + 'ms' : 'n/a') +
+              ' call=' + callMs + 'ms' +
+              ' pending=' + (r.pending ? 1 : 0) +
+              ' 落点耗时=' + land.waitedMs + 'ms(采样' + land.samples + ')' +
+              ' pending耗时=' + (land.sawPending ? land.pendingMs + 'ms' : 'n/a') +
+              ' first=' + (ff.ok ? ff.frameMs + 'ms' : 'TIMEOUT') +
+              (ff.atLand ? '(落点即已出帧)' : '') +
+              (land.ok ? '' : ' 原因=' + land.error)
+            );
+            if (!land.ok) break; /* 落点没到，继续发只会更乱 */
+          }
+        }
+        await this.onBack();
+      } catch (e) {
+        logWarn('[bili] PROBE 异常: ' + (e && e.message));
       }
     },
     async runAutotest(soakSec, soakBv) {

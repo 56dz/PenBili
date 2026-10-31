@@ -576,14 +576,32 @@
   text-overflow: ellipsis;
 }
 
-/* 简介：可滚动区（手绘稿左列上方「视频标题和简介」） */
+/* 简介：可滚动区（手绘稿左列上方「视频标题和简介」）
+ * 高度从 96(lnes 7) 收到 72(lines 5)，把最下面 20px 让给 .pnote（播放提示）。
+ * 192px 的 .pleft-info 是固定预算：8(pt) + 26(pback) + 6 + 34(ptitle) + 4 + 14(pup)
+ *   + 6 + 72(pdesc) + 4 + 16(pnote) = 190，留 2px 余量。
+ * 72 / 10px 字号 ≈ 7 行余量，lines 取 5 留出上下行距，避免最后一行被裁半截。 */
 .pdesc {
   margin-top: 6px;
   width: 193px;
-  height: 96px;
+  height: 72px;
   font-size: 10px;
   color: @text-color-dim;
-  lines: 7;
+  lines: 5;
+  text-overflow: ellipsis;
+}
+
+/* 播放提示行（「定位中…」「加载中…」「音画不同步，正在恢复…」「起播失败 · 可返回重试」…）
+ * 以前这些文案只写进 this.play.note，模板没有渲染 → 用户什么都看不到（P0-2 要求 2）。
+ * 现在恒定占位 16px（无提示时内容为空串），不随提示出现/消失改变布局，避免视频区抖动。
+ * 颜色用品牌粉：这些是"正在进行/出事了"的状态字，必须比简介灰更显眼。 */
+.pnote {
+  margin-top: 4px;
+  width: 193px;
+  height: 16px;
+  font-size: 10px;
+  color: @accent;
+  lines: 1;
   text-overflow: ellipsis;
 }
 

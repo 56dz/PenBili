@@ -92,7 +92,25 @@ async function main() {
     PANEL_X_OFFSET,
     BAR_WIDTH,
     GRID_COLS,
-    trimToGridRows
+    trimToGridRows,
+    KEEP_INTERVAL_MS,
+    createScreenKeeper,
+    seekRatioFromX,
+    seekFillWidth,
+    SEEK_TRACK_WIDTH,
+    SEEK_FILL_MAX,
+    keepScreenOnce,
+    keepScreenBackend,
+    getScreenState,
+    isKeepingScreen,
+    needsBrightRestore,
+    screenStateName,
+    KEEP_BRIGHT_MIN,
+    KEEP_BRIGHT_RESTORE,
+    KEEP_CLOSE_SCREEN_SEC,
+    keepScreenOn,
+    keepScreenOff,
+    keepScreenTicks
   } = await import('../src/services/screen.js');
   const { runProbe, STEPS } = await import('../src/services/bili/probe.js');
   const { normalizeStoredValue, normalizeSession, normalizeSettings, DEFAULT_TARGET } = await import(
@@ -252,12 +270,22 @@ async function main() {
     resolveLiveUrl,
     togglePlay,
     seekBy,
+    seekTo,
+    recoverSession,
     readStatus,
     closeSession,
     describePlayError,
     ensureMixin,
     ensureMixinResult,
-    SEEK_STEP_MS
+    SEEK_STEP_MS,
+    num,
+    numSigned,
+    numLatency,
+    normalizeState,
+    waitLanded,
+    waitFirstFrame,
+    SEEK_LAND_NEAR_MS,
+    SEEK_LAND_DEADLINE_MS
   } = await import('../src/services/play_session.js');
   const { fetchReplies, addReply, parseReplies, normalizeReply, replyType } = await import('../src/services/bili/reply.js');
   const {
@@ -726,6 +754,48 @@ async function main() {
   test('player: describeError 收录 PLAYER_BAD_HEADERS', () => {
     assert.ok(describeError('PLAYER_BAD_HEADERS').indexOf('请求头') >= 0);
   });
+  test('player: v1/v2 开关归一化（非法值一律当未指定）', async () => {
+    const P = await import('../src/services/player.js');
+    assert.strictEqual(P.normalizeImpl('v1'), 'v1');
+    assert.strictEqual(P.normalizeImpl(' V2 '), 'v2');
+    assert.strictEqual(P.normalizeImpl('v3'), '');
+    assert.strictEqual(P.normalizeImpl(''), '');
+    assert.strictEqual(P.normalizeImpl(null), '');
+    assert.strictEqual(P.normalizeImpl(1), '');
+    // 缺省实现是 v2（新模块）；storage 键名是与运维约定的硬契约
+    assert.strictEqual(P.PLAYER_IMPL_DEFAULT, 'v2');
+    assert.strictEqual(P.PLAYER_IMPL_KEY, 'bili_player_impl');
+  });
+  test('player: setPlayerImpl 切换后丢弃已加载模块（下次调用重新加载）', async () => {
+    const P = await import('../src/services/player.js');
+    P.resetPlayerModuleCache();
+    P.setPlayerImpl('v2');
+    assert.strictEqual(P.getPlayerImpl(), 'v2');
+    await P.getPlayerModule(); // 两个模块都不存在 → mod=null，但 implName 保持 ''
+    P.setPlayerImpl('v1');
+    assert.strictEqual(P.getPlayerImpl(), 'v1');
+    // 切回缺省
+    P.setPlayerImpl('');
+    assert.strictEqual(P.getPlayerImpl(), 'v2');
+    P.resetPlayerModuleCache();
+  });
+  test('player: recover() 在无 native 模块时返回 PLAYER_NATIVE_MISSING（不抛）', async () => {
+    const P = await import('../src/services/player.js');
+    P.resetPlayerModuleCache();
+    const r = await P.recover();
+    assert.strictEqual(r.ok, false);
+    assert.ok(r.code === 'PLAYER_NATIVE_MISSING' || r.code === 'PLAYER_UNSUPPORTED');
+  });
+  test('player: v2 专有可选接口缺失 → PLAYER_UNSUPPORTED（页面可降级）', async () => {
+    const P = await import('../src/services/player.js');
+    P.resetPlayerModuleCache();
+    for (const fn of ['pauseRender', 'resumeRender', 'redraw']) {
+      const r = await P[fn]();
+      assert.strictEqual(r.ok, false);
+      assert.ok(r.code === 'PLAYER_NATIVE_MISSING' || r.code === 'PLAYER_UNSUPPORTED', fn + ' → ' + r.code);
+    }
+    assert.ok(P.describeError('PLAYER_UNSUPPORTED').length > 0);
+  });
 
   // ---------------- screen ----------------
   test('screen: 360p 视频区矩形（X6 Pro 逻辑 960x266 / 物理 266x960）', () => {
@@ -752,6 +822,145 @@ async function main() {
     assert.strictEqual(isRectInsidePanel({ x: -1, y: 0, width: 10, height: 10 }), false);
     assert.strictEqual(isRectInsidePanel({ x: 0, y: 0, width: 0, height: 10 }), false);
     assert.strictEqual(isRectInsidePanel(null), false);
+  });
+
+  // ---- 屏幕保活（缺陷 C 修复）----
+  test('screen: 保活周期必须 < 30s（hal-screen keep 只续 30s）', () => {
+    assert.strictEqual(KEEP_INTERVAL_MS, 20000);
+    assert.ok(KEEP_INTERVAL_MS < 30000, '周期必须小于 hal-screen keep 的 30s 续期窗口');
+    // 必须挡住 570s 那一级调暗（113→5）：570s / 20s = 28 次续期，每次都把窗口推后
+    assert.ok(570000 / KEEP_INTERVAL_MS >= 20);
+  });
+  test('screen: createScreenKeeper 定时续期 / stop 后不再调用', async () => {
+    let calls = 0;
+    const timers = [];
+    const keeper = createScreenKeeper({
+      call: () => {
+        calls++;
+      },
+      intervalMs: 1000,
+      setTimer: (fn, ms) => {
+        timers.push(fn);
+        return timers.length;
+      },
+      clearTimer: (t) => {
+        timers[t - 1] = null;
+      }
+    });
+    assert.strictEqual(keeper.isActive(), false);
+    assert.strictEqual(keeper.start(), true);
+    assert.strictEqual(calls, 1, 'immediate 默认 true → 启动即续一次');
+    assert.strictEqual(keeper.start(), false, '重复 start 幂等');
+    // 手工推进定时器链
+    timers[0]();
+    assert.strictEqual(calls, 2);
+    timers[1]();
+    assert.strictEqual(calls, 3);
+    assert.strictEqual(keeper.ticks(), 2);
+    assert.strictEqual(keeper.intervalMs(), 1000);
+    assert.strictEqual(keeper.stop(), true);
+    assert.strictEqual(keeper.isActive(), false);
+    assert.strictEqual(keeper.stop(), false, '重复 stop 幂等');
+    // stop 后残留回调即使被触发也不得再调用
+    timers[2] && timers[2]();
+    assert.strictEqual(calls, 3);
+  });
+  test('screen: keeper immediate=false 不立刻续期', () => {
+    let calls = 0;
+    const keeper = createScreenKeeper({
+      call: () => {
+        calls++;
+      },
+      immediate: false,
+      setTimer: () => 1,
+      clearTimer: () => {}
+    });
+    keeper.start();
+    assert.strictEqual(calls, 0);
+    keeper.stop();
+  });
+  test('screen: 无 brightness 模块时 keepScreenOnce 静默返回 false（不抛）', () => {
+    // Node 环境没有 $falcon / brightness 模块：必须降级而不是崩
+    assert.strictEqual(keepScreenOnce(), false);
+    assert.strictEqual(keepScreenBackend(), '');
+    assert.strictEqual(getScreenState(), null);
+    assert.strictEqual(isKeepingScreen(), false);
+  });
+  test('screen: getScreenState 编号语义（真机实测 0=ON 3=DIM 1=OFF）', () => {
+    assert.strictEqual(screenStateName(0), 'ON');
+    assert.strictEqual(screenStateName(3), 'DIM');
+    assert.strictEqual(screenStateName(1), 'OFF');
+    assert.strictEqual(screenStateName(null), '未知');
+    assert.strictEqual(screenStateName(7), '未知(7)');
+  });
+  test('screen: 硬兜底以 state 为主判据（getBrightness 被调暗时仍是 80）', () => {
+    // 真机实证：hal-screen down 后 bl_br=5 / bl_power=0，但 getBrightness() 仍返回 80，
+    // 所以只靠亮度会漏判 —— 必须靠 state 触发兜底。
+    assert.strictEqual(needsBrightRestore(80, 3), true);
+    assert.strictEqual(needsBrightRestore(80, 0), false);
+    // 熄屏(1)：播放中也要救。真机实证 keepScreenOn() 能把 bp=4 拉回 bp=0；
+    // 用户主动按电源键时页面走 onHide → 停保活，这里不会跟他抢。
+    assert.strictEqual(needsBrightRestore(80, 1), true);
+    // state 读不到时退回亮度判据
+    assert.strictEqual(needsBrightRestore(KEEP_BRIGHT_MIN, null), true);
+    assert.strictEqual(needsBrightRestore(KEEP_BRIGHT_MIN + 1, null), false);
+    assert.strictEqual(needsBrightRestore(null, null), false);
+    // 恢复档位必须高于阈值，否则兜底会陷入"救回来又被判为调暗"的循环
+    assert.ok(KEEP_BRIGHT_RESTORE > KEEP_BRIGHT_MIN);
+  });
+  test('screen: 息屏超时档位落在 600~1200s（<1200 才不被 daemon 重置脚本清掉）', () => {
+    // /usr/bin/check_stop_input_deamon_times.sh：/tmp/stop_input_event_daemon 超过 1200s 会
+    // killall -USR2 input-event-daemon 把配置重置掉，所以设得比 1200 小才有意义。
+    assert.ok(KEEP_CLOSE_SCREEN_SEC >= 600, '不能短于 10 分钟，否则退化成频繁调用');
+    assert.ok(KEEP_CLOSE_SCREEN_SEC < 1200, '必须小于 daemon 重置阈值 1200s');
+  });
+  test('screen: 两次进出保活无定时器泄漏（start 幂等 / 计数按会话归零）', () => {
+    // 真机踩过的坑：onHide 停保活后如果 keeper 没真停，日志里会出现两条 #N 序列交织。
+    // 这里对单例直接断言：重复 start 不得叠第二套定时器，再次 start 计数必须归 0。
+    assert.strictEqual(keepScreenOn(), true);
+    assert.strictEqual(isKeepingScreen(), true);
+    // 启动那一刻的 immediate 续期不计入 keeper.ticks()（ticks 只统计定时器触发的轮次），
+    // 所以刚启动时是 0；20s 后才会变成 1。
+    assert.strictEqual(keepScreenTicks(), 0);
+    // 幂等：重复调用返回"当前仍在保活"，但绝不能叠第二套定时器（计数不变）
+    assert.strictEqual(keepScreenOn(), true, '重复调用返回仍在保活');
+    assert.strictEqual(isKeepingScreen(), true, '幂等调用不能把已启动的停掉');
+    assert.strictEqual(keepScreenTicks(), 0, '幂等调用不得再续期');
+    assert.strictEqual(keepScreenOff(), true);
+    assert.strictEqual(isKeepingScreen(), false);
+    assert.strictEqual(keepScreenOff(), false, '重复 stop 幂等');
+    // 第二轮：必须是一套全新的定时器链，计数从 0 起
+    assert.strictEqual(keepScreenOn(), true);
+    assert.strictEqual(keepScreenTicks(), 0, '新会话计数归零');
+    assert.strictEqual(keepScreenOff(), true);
+    assert.strictEqual(isKeepingScreen(), false);
+  });
+
+  // ---- 进度条轨道几何（P1-14）----
+  test('screen: 进度条轨道 = 中列 469 − 2×8 padding', () => {
+    assert.strictEqual(SEEK_TRACK_WIDTH, 453);
+    assert.strictEqual(SEEK_FILL_MAX, 443);
+  });
+  test('screen: seekRatioFromX 钳制与非法输入', () => {
+    assert.strictEqual(seekRatioFromX(8), 0); // 左 padding 边界
+    assert.strictEqual(seekRatioFromX(461), 1); // 8 + 453
+    assert.strictEqual(seekRatioFromX(0), 0); // 越界左 → 钳到 0
+    assert.strictEqual(seekRatioFromX(600), 1); // 越界右 → 钳到 1
+    assert.strictEqual(seekRatioFromX(234.5), 0.5); // (234.5-8)/453
+    assert.strictEqual(seekRatioFromX(NaN), null);
+    assert.strictEqual(seekRatioFromX('abc'), null);
+    assert.strictEqual(seekRatioFromX(undefined), null);
+    // 自定义轨道宽（布局改了也能对上）
+    assert.strictEqual(seekRatioFromX(108, 200), 0.5);
+  });
+  test('screen: seekFillWidth 钳制与四舍五入', () => {
+    assert.strictEqual(seekFillWidth(0), 0);
+    assert.strictEqual(seekFillWidth(1), 443);
+    assert.strictEqual(seekFillWidth(0.5), 222); // round(443*0.5)=222（.5 进位）
+    assert.strictEqual(seekFillWidth(-1), 0);
+    assert.strictEqual(seekFillWidth(2), 443);
+    assert.strictEqual(seekFillWidth(NaN), 0);
+    assert.strictEqual(seekFillWidth(0.5, 100), 50);
   });
 
   // ---------------- storage schema ----------------
@@ -1860,6 +2069,99 @@ async function main() {
     assert.strictEqual(d.target, 25000);
     assert.deepStrictEqual(w.calls.seek, [25000, 205000, 0, 25000]);
   });
+  test('play_session: seekTo 绝对定位（P1-7：不再用旧 positionMs 算 delta）', async () => {
+    const w = fakePlayDeps();
+    // 落点就是目标本身，与当前 positionMs 无关 —— 旧实现会偏 ±1000ms
+    const a = await seekTo(w, 90000, 206000);
+    assert.strictEqual(a.ok, true);
+    assert.strictEqual(a.target, 90000);
+    assert.strictEqual(w.calls.seek[0], 90000);
+    // 上界钳到 duration-1s（越界 seek 会让 gst 立刻 EOS）
+    const b = await seekTo(w, 999999, 206000);
+    assert.strictEqual(b.target, 205000);
+    // 下界钳到 0
+    const c = await seekTo(w, -5000, 206000);
+    assert.strictEqual(c.target, 0);
+    // 时长未知（直播）不设上界
+    const d = await seekTo(w, 123456, 0);
+    assert.strictEqual(d.target, 123456);
+    // 小数向下取整
+    const e = await seekTo(w, 1234.9, 206000);
+    assert.strictEqual(e.target, 1234);
+    assert.deepStrictEqual(w.calls.seek, [90000, 205000, 0, 123456, 1234]);
+  });
+  test('play_session: seekTo 优先用 native 的 seekTargetMs（覆盖式 seek 的落点）', async () => {
+    const w = fakePlayDeps();
+    w.player.seek = async (ms) => ({ ok: true, positionMs: 1, seekTargetMs: ms, seekPending: true });
+    const r = await seekTo(w, 45000, 206000);
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.positionMs, 45000, '有 seekTargetMs 就以它为准，不用滞后的 positionMs');
+    assert.strictEqual(r.pending, true, 'seekPending 透传（页面据此知道落点还没生效）');
+  });
+  test('play_session: recoverSession 无 recover() → PLAYER_UNSUPPORTED（不抛）', async () => {
+    const w = fakePlayDeps();
+    const r = await recoverSession(w);
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.code, 'PLAYER_UNSUPPORTED');
+  });
+  test('play_session: recoverSession 有 recover() → 透传 ok/state', async () => {
+    const w = fakePlayDeps();
+    w.player.recover = async () => ({ ok: true, state: 'playing' });
+    const r = await recoverSession(w);
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.state, 'playing');
+  });
+  test('play_session: recoverSession recover() 抛错 → PLAYER_RECOVER_FAILED', async () => {
+    const w = fakePlayDeps();
+    w.player.recover = async () => {
+      throw new Error('boom');
+    };
+    const r = await recoverSession(w);
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.code, 'PLAYER_RECOVER_FAILED');
+    assert.strictEqual(r.message, 'boom');
+  });
+  test('play_session: readStatus 透传 player2 新字段（缺省给安全默认值）', async () => {
+    const w = fakePlayDeps();
+    // v2 全字段
+    w.player.status = async () => ({
+      ok: true,
+      state: 'playing',
+      frames: 5,
+      positionMs: 100,
+      durationMs: 206000,
+      fps: 30,
+      hasAudio: false,
+      seekPending: true,
+      seekTargetMs: 90000,
+      planeActive: false,
+      pipelineAlive: false,
+      lastError: -5,
+      lastErrorMsg: 'EOS'
+    });
+    const s = await readStatus(w);
+    assert.strictEqual(s.seekPending, true);
+    assert.strictEqual(s.seekTargetMs, 90000);
+    assert.strictEqual(s.planeActive, false);
+    assert.strictEqual(s.pipelineAlive, false);
+    assert.strictEqual(s.nativeDurationMs, 206000);
+    assert.strictEqual(s.nativeFps, 30);
+    assert.strictEqual(s.hasAudio, false);
+    assert.strictEqual(s.lastError, -5);
+    assert.strictEqual(s.lastErrorMsg, 'EOS');
+    // v1（没有这些字段）→ 安全默认值，页面逻辑不会因为 undefined 走错分支
+    w.player.status = async () => ({ ok: true, state: 'playing', frames: 5, positionMs: 100 });
+    const v1 = await readStatus(w);
+    assert.strictEqual(v1.seekPending, false);
+    assert.strictEqual(v1.seekTargetMs, 0);
+    assert.strictEqual(v1.planeActive, true, '缺省视为平面正常，不能误判成故障');
+    assert.strictEqual(v1.pipelineAlive, true);
+    assert.strictEqual(v1.hasAudio, true);
+    assert.strictEqual(v1.nativeDurationMs, 0);
+    assert.strictEqual(v1.nativeFps, 0);
+    assert.strictEqual(v1.lastError, 0);
+    assert.strictEqual(v1.lastErrorMsg, '');
+  });
   test('play_session: readStatus 错误翻译 + closeSession 幂等连打', async () => {
     const w = fakePlayDeps();
     w.player.status = async () => ({
@@ -1912,6 +2214,392 @@ async function main() {
     assert.strictEqual(describePlayError({ ok: false, stage: 'cancel', message: '已取消' }), '');
     assert.strictEqual(describePlayError({ ok: true }), '');
     assert.strictEqual(SEEK_STEP_MS, 20000);
+  });
+  /* ---------------- native 数值归一化（review2 审计 P0-1） ----------------
+   * 核心回归点：native 的"未测到"哨兵 **-1** 必须被归一回 0。
+   * 旧写法 `Number(-1) || 0` 会漏掉 -1（-1 是真值），导致看门狗的
+   * `videoStallMs > 8000` 恒 false → 永不触发 → 界面永久「加载中…」。 */
+  test('play_session: num() 把 -1 哨兵/NaN/undefined 归一到默认值', () => {
+    assert.strictEqual(num(-1, 0), 0, 'native 的 -1 哨兵必须归一成 0');
+    assert.strictEqual(num(-1, 7), 7, '负数一律用默认值');
+    assert.strictEqual(num(undefined, 0), 0);
+    assert.strictEqual(num(null, 0), 0);
+    assert.strictEqual(num('', 0), 0);
+    assert.strictEqual(num(NaN, 0), 0);
+    assert.strictEqual(num(Infinity, 0), 0);
+    assert.strictEqual(num({}, 0), 0, '非 number 类型不接受');
+    assert.strictEqual(num(true, 0), 0, 'bool 不能当数字用');
+    assert.strictEqual(num(0, 9), 0, '0 是合法值，不能被默认值顶掉');
+    assert.strictEqual(num(9001, 0), 9001, '真正的停帧时长要原样透传');
+    assert.strictEqual(num('123', 0), 123, '字符串数字要接受（QuickJS 桥有时给字符串）');
+    assert.strictEqual(num(9001), 9001, '不传默认值 = 0');
+    assert.strictEqual(num(-1), 0);
+  });
+  test('play_session: numSigned() 保留负号 / numLatency() 保留 -1 语义', () => {
+    // 诊断量：负数有意义（声音滞后、ALSA 缓冲修正、native errno）
+    assert.strictEqual(numSigned(-812, 0), -812);
+    assert.strictEqual(numSigned(-5, 0), -5, 'lastError 见过 -5(EIO)，必须保负');
+    assert.strictEqual(numSigned(undefined, 0), 0);
+    assert.strictEqual(numSigned(NaN, 0), 0);
+    assert.strictEqual(numSigned('12', 0), 12);
+    // 音画起播差：-1 = 未测到，页面用 >= 0 判"测到了"，绝不能归一成 0（否则会被当成功）
+    assert.strictEqual(numLatency(-1), -1);
+    assert.strictEqual(numLatency(undefined), -1, '缺失同样返回 -1 而不是 0');
+    assert.strictEqual(numLatency(null), -1);
+    assert.strictEqual(numLatency(''), -1);
+    assert.strictEqual(numLatency(NaN), -1);
+    assert.strictEqual(numLatency(0), 0, '0ms 是真实的"完全同步"');
+    assert.strictEqual(numLatency(1200), 1200);
+  });
+  test('play_session: readStatus 归一化 videoStallMs/positionMs/frames 并把未知 state 落 error', async () => {
+    const w = fakePlayDeps();
+    // 起播阶段（从未出过帧）：native 返回哨兵 -1 + 负数位置
+    w.player.status = async () => ({
+      ok: true,
+      state: 'opening',
+      frames: -1,
+      positionMs: -1,
+      audioBytes: -1,
+      videoStallMs: -1,
+      gateWaitMs: -1,
+      resyncingMs: -1,
+      seekTargetMs: -1,
+      durationMs: -1,
+      fps: -1
+    });
+    const st = await readStatus(w);
+    assert.strictEqual(st.state, 'opening');
+    assert.strictEqual(st.videoStallMs, 0, '-1 哨兵归一到 0（否则看门狗 >8000 永不触发）');
+    assert.strictEqual(st.frames, 0);
+    assert.strictEqual(st.positionMs, 0);
+    assert.strictEqual(st.audioBytes, 0);
+    assert.strictEqual(st.gateWaitMs, 0);
+    assert.strictEqual(st.resyncingMs, 0);
+    assert.strictEqual(st.seekTargetMs, 0);
+    assert.strictEqual(st.nativeDurationMs, 0);
+    assert.strictEqual(st.nativeFps, 0);
+    // 真正的停帧要原样透传（归一化不能把真实故障吃掉）
+    w.player.status = async () => ({ ok: true, state: 'playing', frames: 10, videoStallMs: 9001 });
+    const st2 = await readStatus(w);
+    assert.strictEqual(st2.videoStallMs, 9001);
+    // 未知 state → 'error' + 一条 warn（避免界面卡在谁都分支不到的状态上）
+    const logs = [];
+    w.log = (m) => logs.push(m);
+    w.player.status = async () => ({ ok: true, state: 'bogus', frames: 10 });
+    const st3 = await readStatus(w);
+    assert.strictEqual(st3.state, 'error');
+    assert.ok(logs.some((m) => m.indexOf('未识别的播放器状态') >= 0), '未知态要留日志证据');
+    // stopped 是 stop() 之后的正常态 → 归一到 idle，不能当故障
+    w.player.status = async () => ({ ok: true, state: 'stopped', frames: 0 });
+    const st4 = await readStatus(w);
+    assert.strictEqual(st4.state, 'idle');
+  });
+  test('play_session: normalizeState 白名单（含 stopped→idle）', () => {
+    assert.strictEqual(normalizeState('playing'), 'playing');
+    assert.strictEqual(normalizeState('paused'), 'paused');
+    assert.strictEqual(normalizeState('seeking'), 'seeking');
+    assert.strictEqual(normalizeState('ended'), 'ended');
+    assert.strictEqual(normalizeState('error'), 'error');
+    assert.strictEqual(normalizeState('stopped'), 'idle');
+    assert.strictEqual(normalizeState('opening'), 'opening');
+    assert.strictEqual(normalizeState('idle'), 'idle');
+    assert.strictEqual(normalizeState(undefined), 'error');
+    assert.strictEqual(normalizeState(null), 'error');
+    assert.strictEqual(normalizeState(0), 'error');
+    assert.strictEqual(normalizeState('PLAYING'), 'error', '大小写敏感：不猜');
+  });
+  test('play_session: waitLanded 正常落点（等 seekPending 落 0 + 位置靠近目标）', async () => {
+    /* 假时钟：now 不自动走，sleep 推进时间 —— 这样不真等 8 秒，也不依赖系统时钟。 */
+    function clock() {
+      let t = 1000;
+      return {
+        now: function () {
+          return t;
+        },
+        sleep: async function (ms) {
+          t += ms || 100;
+        }
+      };
+    }
+    const c = clock();
+    const seq = [
+      { ok: true, seekPending: true, positionMs: 0, frames: 0 },
+      { ok: true, seekPending: true, positionMs: 0, frames: 0 },
+      { ok: true, seekPending: false, positionMs: 300120, frames: 3 }
+    ];
+    let n = 0;
+    const r = await waitLanded(
+      async function () {
+        return seq[Math.min(n++, seq.length - 1)];
+      },
+      300000,
+      { now: c.now, sleep: c.sleep }
+    );
+    assert.strictEqual(r.ok, true, '落点到了就该 ok');
+    assert.strictEqual(r.landing, 300120);
+    assert.strictEqual(r.drift, 120, 'drift=landing-target，正数=落在目标之后');
+    assert.strictEqual(r.samples, 3);
+    assert.strictEqual(r.sawPending, true, '必须观察到 seekPending=true（证明命令被 native 受理）');
+  });
+
+  test('play_session: waitLanded 超时（seekPending 一直不落 0 → TIMEOUT，drift 必须是 null）', async () => {
+    let t = 1000;
+    const r = await waitLanded(
+      async function () {
+        return { ok: true, seekPending: true, positionMs: 0, frames: 0 };
+      },
+      300000,
+      {
+        now: function () {
+          return t;
+        },
+        sleep: async function (ms) {
+          t += ms || 100;
+        }
+      }
+    );
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.error, 'TIMEOUT');
+    assert.strictEqual(r.drift, null, '没落点就没有偏差，调用方会打 n/a 而不是 0ms');
+    assert.strictEqual(r.landing, 0);
+    assert.ok(r.waitedMs >= SEEK_LAND_DEADLINE_MS, '应等满 deadline');
+    assert.ok(r.samples >= 2);
+  });
+
+  test('play_session: waitLanded 遇 native 错误态立刻失败（不空转到 deadline）', async () => {
+    let t = 1000;
+    const r = await waitLanded(
+      async function () {
+        return { ok: false, state: 'error', message: '取流失败：HTTP 403', positionMs: 0, frames: 0 };
+      },
+      300000,
+      {
+        now: function () {
+          return t;
+        },
+        sleep: async function (ms) {
+          t += ms || 100;
+        }
+      }
+    );
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.error, '取流失败：HTTP 403', '错误原因要透传，不能变成 TIMEOUT');
+    assert.strictEqual(r.samples, 1, '第一次读到 error 就该返回');
+    assert.strictEqual(r.drift, null);
+  });
+
+  test('play_session: waitLanded failOnNewError 识别「seek 没落点」（native 不清 state，只 patch lastError）', async () => {
+    let t = 1000;
+    /* 模拟 native P0-3 修复的行为：第一次采样基线 lastError=0，
+     * 之后 patch_error(PB2_E_SEEK=10, "seek did not land") 且位置停在原地。 */
+    const seq = [
+      { ok: true, seekPending: true, positionMs: 47000, frames: 900, lastError: 0, lastErrorMsg: '' },
+      { ok: true, seekPending: true, positionMs: 47000, frames: 900, lastError: 0, lastErrorMsg: '' },
+      {
+        ok: true,
+        seekPending: false,
+        positionMs: 47000,
+        frames: 901,
+        lastError: 10,
+        lastErrorMsg: 'seek did not land'
+      }
+    ];
+    let n = 0;
+    const c = {
+      now: function () {
+        return t;
+      },
+      sleep: async function (ms) {
+        t += ms || 100;
+      }
+    };
+    const r = await waitLanded(
+      async function () {
+        return seq[Math.min(n++, seq.length - 1)];
+      },
+      316629,
+      { now: c.now, sleep: c.sleep, failOnNewError: true }
+    );
+    assert.strictEqual(r.ok, false, 'native 报了 seek 新错 → 不能当成落点');
+    assert.ok(r.error.indexOf('seek did not land') >= 0, '错误原因要带上 native 原文');
+    assert.ok(r.error.indexOf('47000') >= 0, '诊断要留下真实落点，便于判断"画面没动"');
+    assert.strictEqual(r.samples, 3, '第三帧才出现新错，前两帧不能误报');
+    /* 不开 failOnNewError 时（默认）同一序列应等到 deadline 才 TIMEOUT */
+    let t2 = 1000;
+    const dflt = await waitLanded(
+      async function () {
+        return seq[seq.length - 1];
+      },
+      316629,
+      {
+        now: function () {
+          return t2;
+        },
+        sleep: async function (ms) {
+          t2 += ms || 100;
+        }
+      }
+    );
+    assert.strictEqual(dflt.ok, false);
+    assert.strictEqual(dflt.error, 'TIMEOUT', '默认行为保持不变（纯等落点）');
+  });
+  test('play_session: waitLanded failOnNewError 不把「错误被清零」当失败（native 自愈成功会 patch_error(0,"")）', async () => {
+    let t = 1000;
+    /* 上一轮失败的 lastError=10 留在 stats 里，这次 seek 自愈成功 → native
+     * patch_error(PB2_E_NONE=0, "") 清空错误。这是"变好了"，不能判失败。 */
+    const seq = [
+      { ok: true, seekPending: true, positionMs: 1000, frames: 0, lastError: 10, lastErrorMsg: 'seek did not land' },
+      { ok: true, seekPending: false, positionMs: 316000, frames: 0, lastError: 0, lastErrorMsg: '' }
+    ];
+    let n = 0;
+    const r = await waitLanded(
+      async function () {
+        return seq[Math.min(n++, seq.length - 1)];
+      },
+      316000,
+      {
+        failOnNewError: true,
+        now: function () {
+          return t;
+        },
+        sleep: async function (ms) {
+          t += ms || 100;
+        }
+      }
+    );
+    assert.strictEqual(r.ok, true, '错误被清空 + 位置到位 = 自愈成功，必须判落点');
+    assert.strictEqual(r.landing, 316000);
+  });
+  test('play_session: waitLanded 落点偏差过大不算落点（可放大 near 覆盖）', async () => {
+    let t = 1000;
+    const st = { ok: true, seekPending: false, positionMs: 291000, frames: 5 }; // 距目标 9000ms
+    const far = await waitLanded(
+      async function () {
+        return st;
+      },
+      300000,
+      {
+        now: function () {
+          return t;
+        },
+        sleep: async function (ms) {
+          t += ms || 100;
+        }
+      }
+    );
+    assert.strictEqual(far.ok, false, '偏 9000ms 超出 near=' + SEEK_LAND_NEAR_MS + '，不能算落点');
+    assert.strictEqual(far.error, 'TIMEOUT');
+    assert.strictEqual(far.lastPos, 291000, '超时也要把最后看到的位置留下来做诊断');
+    assert.strictEqual(far.drift, null);
+    let t2 = 1000;
+    const near2 = await waitLanded(
+      async function () {
+        return st;
+      },
+      300000,
+      {
+        near: 20000,
+        now: function () {
+          return t2;
+        },
+        sleep: async function (ms) {
+          t2 += ms || 100;
+        }
+      }
+    );
+    assert.strictEqual(near2.ok, true, '放大 near 后同一序列应判定落点');
+    assert.strictEqual(near2.drift, -9000, '落点在目标之前 → drift 为负');
+  });
+
+  test('play_session: waitLanded 位置已到位但 seekPending 仍 true → 不许提前成功（防假阳性）', async () => {
+    let t = 1000;
+    const seq = [
+      { ok: true, seekPending: true, positionMs: 300000, frames: 0 }, // 位置"看起来"已在目标
+      { ok: true, seekPending: true, positionMs: 300000, frames: 1 },
+      { ok: true, seekPending: false, positionMs: 300400, frames: 2 }
+    ];
+    let n = 0;
+    const r = await waitLanded(
+      async function () {
+        return seq[Math.min(n++, seq.length - 1)];
+      },
+      300000,
+      {
+        now: function () {
+          return t;
+        },
+        sleep: async function (ms) {
+          t += ms || 100;
+        }
+      }
+    );
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.samples, 3, '必须等到 seekPending 落 0 的那次采样');
+    assert.strictEqual(n, 3, '前两次不能提前 break');
+    /* requireSettled:false 时（老 native 根本没这个字段）应允许第一次就成功 */
+    let t2 = 1000;
+    const loose = await waitLanded(
+      async function () {
+        return { ok: true, seekPending: true, positionMs: 300000, frames: 0 };
+      },
+      300000,
+      {
+        requireSettled: false,
+        now: function () {
+          return t2;
+        },
+        sleep: async function (ms) {
+          t2 += ms || 100;
+        }
+      }
+    );
+    assert.strictEqual(loose.ok, true);
+    assert.strictEqual(loose.samples, 1);
+  });
+
+  test('play_session: waitFirstFrame 等 frames>0（seek 后 native 会把 frames 归零）', async () => {
+    let t = 1000;
+    const seq = [
+      { ok: true, frames: 0, positionMs: 300000 },
+      { ok: true, frames: 0, positionMs: 300100 },
+      { ok: true, frames: 4, positionMs: 300220 }
+    ];
+    let n = 0;
+    const r = await waitFirstFrame(
+      async function () {
+        return seq[Math.min(n++, seq.length - 1)];
+      },
+      {
+        now: function () {
+          return t;
+        },
+        sleep: async function (ms) {
+          t += ms || 100;
+        }
+      }
+    );
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.frames, 4);
+    assert.ok(r.frameMs >= 0, '到首帧耗时必须可量化');
+    /* 一直不出帧 → 软失败（不影响落点结论），frameMs=-1 */
+    let t2 = 1000;
+    const none = await waitFirstFrame(
+      async function () {
+        return { ok: true, frames: 0, positionMs: 300000 };
+      },
+      {
+        deadlineMs: 500,
+        now: function () {
+          return t2;
+        },
+        sleep: async function (ms) {
+          t2 += ms || 100;
+        }
+      }
+    );
+    assert.strictEqual(none.ok, false);
+    assert.strictEqual(none.error, 'NO_FRAME');
+    assert.strictEqual(none.frameMs, -1);
   });
   test('play_session: ensureMixin 会话级缓存（第二次不再打接口）', async () => {
     const w = fakePlayDeps();
