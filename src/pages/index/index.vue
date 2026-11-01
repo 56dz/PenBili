@@ -1004,6 +1004,13 @@ export default {
          * native 日志里出现 `SET_RECT <x,y,w,h>`（= process_cmd 真的执行了
          * gst_util_set_object_arg），以及恢复时出现原矩形。 */
         this._probeRect = seed.probeRect;
+        /* probePauseRect：验证「暂停态」键盘避让。
+         * 为什么必须单独测：render-rectangle 是 write-only 属性，kmssink 只在
+         * 重新 configure（分配 plane）时才读它，PAUSED 下没有新帧流过、不会
+         * reconfigure —— 真机实测暂停态 set 1x1 后平面仍是 240x427 完全无效，
+         * 而播放态同一条命令立刻生效。用户报的正是「暂停后点评论框，画面盖住
+         * 键盘」，所以这个探针必须在暂停态下跑。 */
+        this._probePauseRect = seed.probePauseRect;
         /* probeLiveEnd：直播「下播」判据的引擎级自证（纯计算，不取流/不播放/不亮屏）。
          * 为什么需要：真实下播要等主播关播，或断网等 souphttpsrc 重试耗尽才能复现；
          * 而判据跑在真机 QuickJS 上（typeof/Number 行为可能与 Node 有差异）。
@@ -3167,6 +3174,42 @@ export default {
             } catch (e) {
               logWarn('[bili] rectProbe restore FAIL ' + ((e && e.message) || e));
             }
+          }
+        }
+        /* ================= 暂停态键盘避让探针 =================
+         * 判据：native 日志出现 `SET_RECT <0,0,1,1> (hide) ... [paused->pulse PLAYING]`
+         * 和 `SET_RECT: pulse done -> back to PAUSED`，且 debugfs 里平面真的变 1x1。
+         * JS 侧只能证明命令发出去了，所以这里额外把暂停/恢复状态也打出来。 */
+        if (this._probePauseRect) {
+          const phys = this.play.session && this.play.session.rectPhysical;
+          if (!phys || !(phys.width > 0)) {
+            logWarn('[bili] pauseRectProbe SKIP 无 rectPhysical（会话未建立）');
+          } else {
+            logWarn('[bili] pauseRectProbe start state=' + this.play.state +
+                    ' orig=' + JSON.stringify(phys));
+            /* 先确保处于暂停态 */
+            if (this.play.state === 'playing') {
+              await this.onTogglePlay();
+              await this.sleep(600);
+            }
+            logWarn('[bili] pauseRectProbe paused state=' + this.play.state);
+            /* 暂停态隐藏平面 */
+            try {
+              const r1 = await player.setVideoRect(0, 0, 1, 1);
+              logWarn('[bili] pauseRectProbe hide ret=' + JSON.stringify(r1));
+            } catch (e) {
+              logWarn('[bili] pauseRectProbe hide FAIL ' + ((e && e.message) || e));
+            }
+            await this.sleep(2500);
+            /* 暂停态恢复原矩形 */
+            try {
+              const r2 = await player.setVideoRect(phys.x, phys.y, phys.width, phys.height);
+              logWarn('[bili] pauseRectProbe restore ret=' + JSON.stringify(r2));
+            } catch (e) {
+              logWarn('[bili] pauseRectProbe restore FAIL ' + ((e && e.message) || e));
+            }
+            await this.sleep(2500);
+            logWarn('[bili] pauseRectProbe done state=' + this.play.state);
           }
         }
         await this.onBack();

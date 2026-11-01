@@ -36,7 +36,7 @@ export function isAutotestSeedEnabled(at) {
  * @returns {{soak:number, soakBv:string, liveOnly:boolean, liveRoom:number,
  *            wbiStress:number, liveHold:number, pollEvery:number, playProbe:number,
  *            noKeep:boolean, probeSeek:number, probePause:number, probeRect:boolean,
- *            probeLiveEnd:boolean}}
+ *            probePauseRect:boolean, probeLiveEnd:boolean}}
  */
 export function readAutotestSeed(at) {
   const o = at && typeof at === 'object' ? at : {};
@@ -63,6 +63,11 @@ export function readAutotestSeed(at) {
     probeSeek: intOf(o.probeSeek, 0),
     probePause: intOf(o.probePause, 0),
     probeRect: o.probeRect === true,
+    // probePauseRect：暂停态键盘避让（SET_RECT）探针。
+    // 必须与 probeRect 分开：render-rectangle 是 write-only 属性，kmssink 只在
+    // 重新 configure plane 时才读它，PAUSED 下不 reconfigure —— 播放态能隐藏、
+    // 暂停态完全无效（真机实测）。用户报的正是暂停态，所以单列一个开关。
+    probePauseRect: o.probePauseRect === true,
     // probeLiveEnd：直播「下播」判据的引擎级自证（纯计算，不取流不播放不亮屏）。
     // 为什么单独一个开关：真实下播没法随时复现，而判据跑在真机 QuickJS 上，
     // 需要一条能在真机上一秒跑完、结论可 grep 的自证路径。

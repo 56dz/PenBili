@@ -28,6 +28,30 @@
 #define PB2_KMS_PLANE_ID 76
 #define PB2_PANEL_RATE "1497/25"
 #define PB2_MAX_LATENESS 40
+/*
+ * ============ 【起播/seek 后迟到宽限】============
+ *
+ * 真机取证（GST_DEBUG=basesink:7，2026-11-01）：
+ *   279 条 `basesink gstbasesink.c:4028:<vsink> buffer late, dropping`
+ *   （另有 230 条 asink 的 `frame dropping disabled`，音频不丢，正常）
+ * 时间集中在 running_time 0:00:04.905 和 0:00:08.843~08.937，
+ * 后者 94ms 内连续丢 276 帧（≈9 秒内容）。
+ *
+ * 机制：sink 的 preroll 在音频分支就完成了，管线时钟随即起跑；
+ * 而视频分支（mppvideodec 首帧 + queue 排空）要晚 900~2100ms 才出帧。
+ * 这批帧的 PTS 相对已经跑起来的时钟全部「迟到 > 40ms」，
+ * 被 max-lateness=40 + qos=true 成批丢弃 → 用户看到的是
+ * 「起播不是从头开始，大概从第 1 秒开始」（用户反馈）。
+ *
+ * 修法：**起播和 seek 之后的一小段窗口内不判迟到**（max-lateness=-1,
+ * qos=false），让积压的帧按 PTS 正常翻页；窗口过后再切回严格的 40/true。
+ * 暂停恢复**不给宽限** —— 那是另一个已知问题（恢复瞬间 400 帧爆发），
+ * 必须继续靠 40/true 丢积压，所以 RESUME 里会立刻取消宽限。
+ *
+ * 排查开关：/tmp/pb2_nolate.on 存在时永远不切回 40/true（A/B 对照）。
+ * 宽限时长可用 /tmp/pb2_lategrace 覆盖（毫秒，默认 3000）。
+ */
+#define PB2_LATE_GRACE_MS 3000
 
 /* ---------------- 时间常量（毫秒） ---------------- */
 #define PB2_SEEK_DEBOUNCE_MS 250   /* 背靠背 seek 合并窗口（实测需 200~300） */
@@ -204,6 +228,19 @@ typedef struct {
      * 隐藏是**我们自己主动做的**，不是故障，所以巡检要整个跳过。
      */
     int rect_hidden;
+    /*
+     * 【起播迟到宽限】宽限截止时刻（墙钟 ms）。> 0 表示仍处于宽限窗口，
+     * worker tick 到点后会把 kmssink 的 max-lateness 从 -1 切回 40 并
+     * qos 从 false 切回 true，然后清零。见 PB2_LATE_GRACE_MS 的长注释。
+     */
+    long long late_grace_until_ms;
+    /*
+     * 1 = 本次「等首帧」窗口允许迟到宽限（只有 OPEN 会置 1）。
+     * seek 之后 frame_epoch_ms 同样 > 0，但**不能**给宽限：实测给宽限会把
+     * seek 首帧从 516ms 恶化到 2480ms（sink 把 K..T 的积压逐帧播完才到 T）。
+     * 所以用这个标志把「OPEN 等首帧」和「seek 等首帧」区分开。
+     */
+    int late_grace_armed;
     GstElement *asink;      /* 音频分支的 alsasink */
     /*
      * 音频输出设备名。空串 = 走 ALSA 默认（pcm.!default -> speaker -> hw:1,0）。
@@ -528,6 +565,8 @@ static int on_video_buffer(GstPad *pad, GstPadProbeInfo *info, void *ud);
 static int on_video_src_probe(GstPad *pad, GstPadProbeInfo *info, void *ud);
 static int on_audio_buffer(GstPad *pad, GstPadProbeInfo *info, void *ud);
 static int on_audio_list(GstPad *pad, GstPadProbeInfo *info, void *ud);
+/* 起播/seek 后的迟到宽限（实现见 check_plane 之前） */
+static void arm_late_grace(void);
 static void apply_volume_now(void);
 /*
  * 【直播】refresh_audio_route() 在 teardown/build 之前就定义了，
@@ -641,6 +680,8 @@ static void live_rebuild_pipeline(const char *why) {
         GstState cur = GST_STATE_NULL;
         GstState pend = GST_STATE_NULL;
         GstStateChangeReturn sr = gst_element_set_state(g_w.pipe, GST_STATE_PLAYING);
+        g_w.late_grace_until_ms = 0; /* 直播重建后要快速追上直播点，不丢帧反而拖慢 */
+        g_w.late_grace_armed = 0;
         pb2_logf("live: rebuild(%s) set_state(PLAYING) -> %d (+%lldms)", why ? why : "?", sr,
                  pb2_now_ms() - t0);
         if (sr == GST_STATE_CHANGE_FAILURE) {
@@ -816,11 +857,22 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
                      "%s"
                      "videorate ! video/x-raw,framerate=%s ! "
                      "kmssink name=vsink plane-id=%d driver-name=rockchip sync=true "
+                     /*
+                      * 默认严格（PB2_MAX_LATENESS / qos=true）。起播时的
+                      * 迟到宽限由 arm_late_grace() 在 set_state(PLAYING) 之后
+                      * 用 gst_util_set_object_arg 运行时下发，到点由
+                      * update_late_policy() 收紧回来。
+                      *
+                      * 为什么不在 desc 里写 -1/false 再收紧：seek 重建管线时
+                      * 不 arm 宽限（会给 seek 带来 4~5 倍首帧延迟），此时
+                      * update_late_policy() 直接 return，sink 就**永远**停在
+                      * -1/false —— 实测 seek 落点耗时从 412ms 恶化到 1398~2485ms。
+                      */
                      "max-lateness=%d qos=true force-aspect-ratio=false skip-vsync=true "
                      "render-rectangle=%s",
                      qbufs, qbytes, qns,
-                     g_w.rotate, fpscap, PB2_PANEL_RATE, PB2_KMS_PLANE_ID, PB2_MAX_LATENESS,
-                     g_w.rect);
+                     g_w.rotate, fpscap, PB2_PANEL_RATE, PB2_KMS_PLANE_ID,
+                     PB2_MAX_LATENESS, g_w.rect);
         } else if (strstr(cn, "h265") || strstr(cn, "hevc")) {
             snprintf(desc, sizeof(desc),
                      "queue max-size-buffers=%d max-size-bytes=%d "
@@ -829,11 +881,22 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
                      "%s"
                      "videorate ! video/x-raw,framerate=%s ! "
                      "kmssink name=vsink plane-id=%d driver-name=rockchip sync=true "
+                     /*
+                      * 默认严格（PB2_MAX_LATENESS / qos=true）。起播时的
+                      * 迟到宽限由 arm_late_grace() 在 set_state(PLAYING) 之后
+                      * 用 gst_util_set_object_arg 运行时下发，到点由
+                      * update_late_policy() 收紧回来。
+                      *
+                      * 为什么不在 desc 里写 -1/false 再收紧：seek 重建管线时
+                      * 不 arm 宽限（会给 seek 带来 4~5 倍首帧延迟），此时
+                      * update_late_policy() 直接 return，sink 就**永远**停在
+                      * -1/false —— 实测 seek 落点耗时从 412ms 恶化到 1398~2485ms。
+                      */
                      "max-lateness=%d qos=true force-aspect-ratio=false skip-vsync=true "
                      "render-rectangle=%s",
                      qbufs, qbytes, qns,
-                     g_w.rotate, fpscap, PB2_PANEL_RATE, PB2_KMS_PLANE_ID, PB2_MAX_LATENESS,
-                     g_w.rect);
+                     g_w.rotate, fpscap, PB2_PANEL_RATE, PB2_KMS_PLANE_ID,
+                     PB2_MAX_LATENESS, g_w.rect);
         } else {
             pb2_logf("pad-added: unsupported video caps %s", cn);
             return;
@@ -1592,6 +1655,9 @@ static void teardown_pipeline_ex(int close_src) {
     g_w.vsink_el = NULL;
     g_w.vsink_el_owned = 0;
     g_w.rect_hidden = 0;
+    /* 管线没了，迟到宽限自然失效；不清会让下一次 arm 之前误判「已过期」 */
+    g_w.late_grace_until_ms = 0;
+    g_w.late_grace_armed = 0;
     g_w.asink = NULL;   /* 同 vsink：floating 引用已被 gst_bin_add sink 掉，借用指针不 unref */
     if (g_w.vvol) {
         gst_object_unref(g_w.vvol);
@@ -2291,6 +2357,8 @@ static void do_open(pb2_open_req_t *req) {
     pb2_stats_patch_state(&g_w.stats, PB2_STATE_PLAYING);
     pb2_mp3_marker_set();
     g_w.last_marker_ms = pb2_now_ms();
+    /* 【起播迟到宽限】视频分支晚 900~2100ms 才出帧，这段时间不判迟到 */
+    arm_late_grace();
     pb2_logf("OPEN done in %lldms", pb2_now_ms() - t0);
 }
 
@@ -2511,6 +2579,21 @@ static void do_seek(long long target_ms) {
         g_w.paused = was_paused;
         pb2_stats_patch_state(&g_w.stats,
                               was_paused ? PB2_STATE_PAUSED : PB2_STATE_PLAYING);
+        /*
+         * 【seek 后**不给**迟到宽限】
+         *
+         * 真机 A/B（同一台设备、同一个稿件、同一条 seek 序列）：
+         *   给宽限   seek 落点耗时 2081/2582ms，首帧 3617/1960ms
+         *   不给宽限 seek 落点耗时  412/413ms，首帧  516/621ms
+         * 差了 4~5 倍。原因：seek 后 sink 里积压的是「从关键帧 K 到目标 T」
+         * 这几秒的帧，宽限让它们一帧不丢地按序翻页，等于先把 K..T 全播一遍
+         * 才轮到用户要看的画面；而丢迟到帧时 sink 直接跳到 T，正是 seek 想要的。
+         *
+         * 用户报的是「**起播**不是从头开始」（OPEN），不是 seek，所以宽限只给 OPEN。
+         * 另外 seek 后 A/V 同步由 -copyts 保证（见 src_http.c），不依赖宽限。
+         */
+        g_w.late_grace_until_ms = 0;
+        g_w.late_grace_armed = 0;
         pb2_logf("seek(restart) done total=%lldms base=%lld", pb2_now_ms() - t0, g_w.base_ms);
         g_w.last_pos_ms = clamped;
         pb2_stats_patch_position(&g_w.stats, clamped, dur);
@@ -3003,6 +3086,99 @@ static void refresh_fps(void) {
  * 息屏期间平面消失是完全正常的（内核 disable crtc），而且实测只要进程活着，
  * 唤醒后平面会自动回到 ACTIVE，所以这里**绝不重建管线**，只记日志 + lastError。
  */
+/*
+ * ============ 起播/seek 后的迟到宽限 ============
+ *
+ * arm_late_grace() 在 OPEN 与每次 seek 重建管线后调用，把截止时刻设到
+ * now + 宽限；update_late_policy() 由 worker tick 每轮检查，到点就把
+ * kmssink 的 max-lateness/qos 切回严格值。
+ *
+ * 为什么不用「重建管线时按剩余时间决定」：宽限是**运行时**属性，
+ * gst_util_set_object_arg 对已实例化的 sink 立即生效（spike 已验证
+ * render-rectangle 同样的用法），不需要重建。
+ */
+static void arm_late_grace(void) {
+    long long ms = PB2_LATE_GRACE_MS;
+    /* 诊断覆盖：/tmp/pb2_lategrace 里写毫秒数 */
+    {
+        FILE *f = fopen("/tmp/pb2_lategrace", "r");
+        if (f) {
+            long long v = 0;
+            if (fscanf(f, "%lld", &v) == 1 && v >= 0 && v <= 60000) ms = v;
+            fclose(f);
+        }
+    }
+    g_w.late_grace_until_ms = (ms > 0) ? (pb2_now_ms() + ms) : 0;
+    g_w.late_grace_armed = (ms > 0) ? 1 : 0;
+    if (ms <= 0) return;
+    /*
+     * 运行时把 sink 放宽成「不判迟到」。必须在这里做而不是写在 desc 里：
+     * desc 是 seek 重建时也会用的，而 seek 不能有宽限（见调用点注释）。
+     * 这里 arm 只在 OPEN 之后调用，sink 此时已实例化，set_object_arg 立即生效。
+     */
+    if (g_w.pipe && g_w.pipeline_alive && g_w.vsink_el) {
+        gst_util_set_object_arg(g_w.vsink_el, "max-lateness", "-1");
+        gst_util_set_object_arg(g_w.vsink_el, "qos", "false");
+    }
+    pb2_logf("late grace: armed %lldms (no late-drop until then)", ms);
+}
+
+static void update_late_policy(void) {
+    if (g_w.late_grace_until_ms <= 0) return;
+    /*
+     * 【关键】首帧还没上屏时绝不收紧。
+     *
+     * 宽限原本从 OPEN/seek 那一刻算 3 秒，但真机实测首帧有时要 4801ms
+     * 才到（网络抖动 + mppvideodec 首帧），那时宽限早已过期，积压的帧
+     * 照样被判迟到丢光 —— 等于白改。
+     *
+     * frame_epoch_ms > 0 表示「正在等首帧」。只要还在等，就必须保持
+     * -1/false，否则等来的第一帧就是「内容已过 1 秒」的那一帧，
+     * 正是用户报的「起播不是从头开始」。
+     *
+     * 首帧到达时 on_video_buffer() 会把 frame_epoch_ms 清零，这里才开始
+     * 按 late_grace_until_ms 计时（arm 时给的是 now+3000，如果首帧来得很晚，
+     * 到这一刻可能已经过期，所以首帧到达后还要再续一小段 —— 见下面的
+     * 续期逻辑）。
+     */
+    if (g_w.frame_epoch_ms > 0) {
+        /*
+         * 还在等首帧。只有 OPEN 置过 late_grace_armed 才顺延；seek 后
+         * armed=0，直接取消宽限（见 struct 里 late_grace_armed 的实测数据）。
+         */
+        if (!g_w.late_grace_armed) { g_w.late_grace_until_ms = 0; return; }
+        /* 把截止时刻顺延到「现在 + 宽限」，首帧一到就开始倒数 */
+        long long ms = PB2_LATE_GRACE_MS;
+        FILE *f = fopen("/tmp/pb2_lategrace", "r");
+        if (f) {
+            long long v = 0;
+            if (fscanf(f, "%lld", &v) == 1 && v >= 0 && v <= 60000) ms = v;
+            fclose(f);
+        }
+        if (ms <= 0) { g_w.late_grace_until_ms = 0; return; }
+        g_w.late_grace_until_ms = pb2_now_ms() + ms;
+        return;
+    }
+    if (pb2_now_ms() < g_w.late_grace_until_ms) return;
+    /* 到点：切回严格的迟到策略 */
+    g_w.late_grace_until_ms = 0;
+    g_w.late_grace_armed = 0;
+    if (!(g_w.pipe && g_w.pipeline_alive && g_w.vsink_el)) return;
+    /* 诊断开关：/tmp/pb2_nolate.on 存在则永不收紧（A/B 对照用） */
+    if (access("/tmp/pb2_nolate.on", F_OK) == 0) {
+        pb2_logf("late grace: expired but /tmp/pb2_nolate.on present -> keep -1/false");
+        return;
+    }
+    {
+        char late[16], qos[12];
+        snprintf(late, sizeof(late), "%d", PB2_MAX_LATENESS);
+        snprintf(qos, sizeof(qos), "true");
+        gst_util_set_object_arg(g_w.vsink_el, "max-lateness", late);
+        gst_util_set_object_arg(g_w.vsink_el, "qos", qos);
+        pb2_logf("late grace: expired -> max-lateness=%d qos=true (strict)", PB2_MAX_LATENESS);
+    }
+}
+
 static void check_plane(void) {
     long long now = pb2_now_ms();
     int active;
@@ -3332,6 +3508,14 @@ static void process_cmd(pb2_cmd_t *c) {
                 }
                 g_w.pause_started_ms = 0;
                 g_w.paused = 0;
+                /*
+                 * 【暂停恢复绝不能给迟到宽限】
+                 * 恢复瞬间 PTS 全部过期的积压必须被 max-lateness=40 + qos=true
+                 * 丢掉，否则一秒内涌出 400+ 帧（v3.5.2 修过的「恢复后卡一下」
+                 * 回归）。这里顺手把可能还在的宽限清掉。
+                 */
+                g_w.late_grace_until_ms = 0;
+                g_w.late_grace_armed = 0;
                 g_w.last_fps_ms = t0;
                 g_w.fps_frames_base =
                     atomic_load_explicit(&g_w.probe.frames, memory_order_relaxed);
@@ -3395,122 +3579,153 @@ static void process_cmd(pb2_cmd_t *c) {
             pb2_stats_patch_seek(&g_w.stats, 1, c->i64);
             break;
         case PB2_CMD_SET_RECT:
+        {
             /*
-             * 【键盘避让】运行时改 render-rectangle，不重建管线。
-             * i64 = x | y<<16 | w<<32 | h<<48（见 queue.h）。
-             * gst_util_set_object_arg 实测（spike-report §12）立即生效，
-             * 帧率不受影响。w/h 传 0（隐藏意图）会被下面提升成 1x1 —— 真机
-             * 实测 0x0 会被 kmssink 当成「未设置」而回退全屏，见下方注释。
-             * 只在管线活着且 vsink 存在时执行；JS 侧在 open 前/后任意时刻
-             * 都可以发，worker 空闲时处理，零阻塞。
+             * 键盘避让：运行时改 render-rectangle，不重建管线。
+             * i64 = x | y<<16 | w<<32 | h<<48（见 core/queue.h）。
              *
-             * 【必须加面板偏移】JS 传的 x 与 open 下发的 req->x 同一坐标系
-             * （都是「视频逻辑区左缘」），而 build_pipeline 拼 g_w.rect 时会加
-             * PB2_PANEL_X_OFFSET（见上面那个 snprintf）。这里若直接用 rx，
-             * 恢复原矩形时画面会左移 107 像素。真机实测过：不加偏移打出
-             * `<0,299,240,427>`，而 open 时建的是 `<107,299,240,427>`。
+             * 单一出口：所有分支（含直播重建）都必须走到本块末尾的
+             * 脉冲收尾，否则「暂停态 + 直播 + 键盘恢复」会让管线
+             * 永远停在 PLAYING。
              */
-            if (g_w.pipe && g_w.pipeline_alive && g_w.vsink_el) {
-                int rx = (int)(short)((c->i64 >> 0) & 0xFFFF);
-                int ry = (int)(short)((c->i64 >> 16) & 0xFFFF);
-                int rw = (int)(unsigned short)((c->i64 >> 32) & 0xFFFF);
-                int rh = (int)(unsigned short)((c->i64 >> 48) & 0xFFFF);
-                int want_hide;
-                char rect[48];
-                long long t0_rect = pb2_now_ms();
+            int rect_pulsed = 0;   /* 已经为本次 SET_RECT 临时切到 PLAYING */
+            int rect_rebuilt = 0;  /* 走了重建路径，管线状态由重建方负责 */
+            int rx, ry, rw, rh, want_hide;
+            char rect[48];
+            long long t0_rect = pb2_now_ms();
 
-                /*
-                 * 【隐藏平面必须用 1x1，绝不能用 0x0】真机实测
-                 * （/tmp/rect3.sh，videotestsrc + kmssink plane-id=76，
-                 *  每轮读 /sys/kernel/debug/dri/0/summary 的 Esmart1-win0 段）：
-                 *   <107,0,240,427> → dst pos[107,0] rect[240 x 427]  正常
-                 *   <0,0,0,0>       → dst pos[0,0]   rect[480 x 960]  **全屏！**
-                 *   <0,0,1,1>       → dst pos[0,0]   rect[1 x 1]      真正不可见
-                 * 四种情况全都 rc=0、无 error/warn —— kmssink 对零宽高既不报错
-                 * 也不隐藏，而是回退成「未设置矩形 ⇒ 全屏」。键盘避让期间若
-                 * 传 0x0，视频平面会盖住整个 falcon 键盘（960x266 全屏 miniapp），
-                 * 用户连候选词都点不到。所以这里把 0（以及任何 <1 的值）
-                 * 统一提升成 1x1：几何合法、单个像素在 480x960 面板上不可见。
-                 */
-                if (rw < 1) rw = 1;
-                if (rh < 1) rh = 1;
-                /* 隐藏时也不要加面板偏移，免得 1x1 被推到非零坐标 */
-                if (rw > 1 || rh > 1) rx += PB2_PANEL_X_OFFSET;
-                want_hide = (rw <= 1 && rh <= 1) ? 1 : 0;
-                snprintf(rect, sizeof(rect), "<%d,%d,%d,%d>", rx, ry, rw, rh);
+            if (!(g_w.pipe && g_w.pipeline_alive && g_w.vsink_el)) {
+                pb2_logf("SET_RECT ignored: no live pipeline");
+                break;
+            }
 
+            rx = (int)(short)((c->i64 >> 0) & 0xFFFF);
+            ry = (int)(short)((c->i64 >> 16) & 0xFFFF);
+            rw = (int)(unsigned short)((c->i64 >> 32) & 0xFFFF);
+            rh = (int)(unsigned short)((c->i64 >> 48) & 0xFFFF);
+
+            /*
+             * 【隐藏平面必须用 1x1，绝不能用 0x0】真机实测：
+             *   <107,0,240,427> -> dst pos[107,0] rect[240 x 427]  正常
+             *   <0,0,0,0>       -> dst pos[0,0]   rect[480 x 960]  **全屏！**
+             *   <0,0,1,1>       -> dst pos[0,0]   rect[1 x 1]      真正不可见
+             * kmssink 对零宽高既不报错也不隐藏，而是回退成「未设置矩形
+             * => 全屏」，键盘避让期间会把 falcon 键盘整个盖住。
+             * 所以 0（及任何 <1 的值）统一提升成 1x1。
+             */
+            if (rw < 1) rw = 1;
+            if (rh < 1) rh = 1;
+            /* 隐藏时不加面板偏移，免得 1x1 被推到非零坐标 */
+            if (rw > 1 || rh > 1) rx += PB2_PANEL_X_OFFSET;
+            want_hide = (rw <= 1 && rh <= 1) ? 1 : 0;
+            snprintf(rect, sizeof(rect), "<%d,%d,%d,%d>", rx, ry, rw, rh);
+
+            /*
+             * ================== kmssink render-rectangle 是单向棘轮 ==================
+             *
+             * 真机实测（.tmp/mkv/rect35.c，真实管线结构）：
+             *   240x427 --直接 set--> 1x1        生效
+             *   1x1 --直接 set--> 240x427        **无效**（6 轮全部停在 1x1）
+             *   1x1 --pipe PAUSED 循环--> 240x427 **无效**（rect38，5 轮全失败）
+             *   1x1 --sink READY/PLAYING--> 240x427 **无效**（rect33，平面 RELEASED 不回来）
+             *   1x1 --sink NULL--> 240x427       **无效**（rect36(b)，RELEASED）
+             *   1x1 --pipe READY -> set rect -> pipe PLAYING--> 240x427  **有效**（rect36(a)）
+             *
+             * 即：**只能缩小，不能放大**；唯一可靠的「放大」途径是让整条
+             * 管线过一次 READY 重置。而 pipe READY 会关掉 filesrc 的 FIFO
+             * 读端、流位置全部丢失 —— 对「ffmpeg -> FIFO -> filesrc」的边下
+             * 边播架构等价于「按当前播放位置重新拉一路源」，也就是走已经
+             * 充分验证过的 do_seek 重启路径（三跳 drift=0ms、first frame
+             * 413~516ms）。所以分支策略：
+             *   1) 请求隐藏 -> 直接 set 1x1（~0ms，实测有效），记 rect_hidden
+             *   2) 请求恢复且当前是隐藏态 -> 更新 g_w.rect 并投递一次原地 seek，
+             *      build_pipeline 用新 g_w.rect 建管线，平面按正确矩形重建
+             *   3) 请求改矩形且从未隐藏过 -> 直接 set（正常尺寸之间不触发棘轮）
+             *
+             * 为什么 1x1 之后必须走 seek 而不能「重设 render-rectangle 再让
+             * kmssink 自己重配」：render-rectangle 是 **write-only** 属性
+             * （g_object_get 报 "property 'render-rectangle' of object class
+             * 'GstKMSSink' is not readable"），kmssink 只在重新 configure
+             * （分配 plane）时才读它，而 1x1 之后 sink 不再 configure。
+             */
+
+            /*
+             * ============ 【暂停态必须脉冲一次 PLAYING】============
+             *
+             * 真机实测（2026-11-01 18:36，debugfs 读 Esmart1-win0 的 dst）：
+             *   播放态  set <0,0,1,1>  ->  dst pos[0,0] rect[1 x 1]       ✅ 生效
+             *   暂停态  set <0,0,1,1>  ->  dst pos[107,299] rect[240x426] ❌ 完全无效
+             *
+             * 根因同上：write-only 属性 + PAUSED 不 reconfigure。暂停态要改
+             * 矩形，先临时 set_state(PLAYING) 触发一次 reconfigure，设完立刻
+             * set_state(PAUSED) 冻回去。PLAYING 期间最多多渲染 1 帧（几十 ms），
+             * 用户感知不到；不这么做的话「暂停后点评论框」时视频平面会一直
+             * 盖在系统键盘上（用户反馈）。
+             *
+             * 只对暂停态脉冲：播放态本来就会 reconfigure，加脉冲纯属多余
+             * 且可能引起掉帧。
+             */
+            if (g_w.paused) {
+                gst_element_set_state(g_w.pipe, GST_STATE_PLAYING);
+                /* 等 sink 真的完成 configure（实测 30~60ms） */
+                pb2_sleep_ms(60);
+                rect_pulsed = 1;
+            }
+
+            if (want_hide) {
+                gst_util_set_object_arg(g_w.vsink_el, "render-rectangle", rect);
+                g_w.rect_hidden = 1;
+                pb2_logf("SET_RECT %s (hide) took %lldms%s", rect,
+                         pb2_now_ms() - t0_rect,
+                         rect_pulsed ? " [paused->pulse PLAYING]" : "");
+            } else if (g_w.rect_hidden) {
                 /*
-                 * ================== kmssink render-rectangle 是单向棘轮 ==================
+                 * 恢复：把目标矩形写进 g_w.rect（build_pipeline 用它），
+                 * 然后重建管线让平面按新矩形重配。
                  *
-                 * 真机实测（.tmp/mkv/rect35.c，**真实管线结构**：kmssink 在
-                 * parse_bin 出来的分支 bin 内、sync=true、videorate 上游）：
+                 * 【直播】不能走 seek 通道 —— 直播 seek 恒被忽略，那样键盘
+                 * 收起后画面会永远停在 1x1。改用 live_rebuild_pipeline()，
+                 * 它 teardown 后重新建管线，build_pipeline 会读新的 g_w.rect。
                  *
-                 *   240x427 --直接 set--> 1x1        生效（pos[0,0] rect[1x1]）
-                 *   1x1 --直接 set--> 240x427        **无效，6 轮全部停在 1x1**
-                 *   1x1 --pipe PAUSED 循环--> 240x427 **无效**（rect38，5 轮全失败）
-                 *   1x1 --sink READY/PLAYING--> 240x427 **无效**（rect33，平面直接 RELEASED 不回来）
-                 *   1x1 --sink NULL--> 240x427       **无效**（rect36(b)，RELEASED）
-                 *   1x1 --pipe READY -> set rect -> pipe PLAYING--> 240x427  **有效**（rect36(a)）
-                 *
-                 * 即：**只能缩小，不能放大**；唯一可靠的「放大」途径是让整条管线
-                 * 过一次 READY 重置。而 pipe READY 会关掉 filesrc 的 FIFO 读端、
-                 * 流位置全部丢失 —— 对我们这种「ffmpeg → FIFO → filesrc」的边下
-                 * 边播架构来说，等价于「按当前播放位置重新拉一路源」，也就是
-                 * 走已经充分验证过的 do_seek 重启路径（三跳 drift=0ms、
-                 * first frame 413~516ms）。
-                 *
-                 * 所以这里的分支策略是：
-                 *   1) 请求隐藏  -> 直接 set 1x1（快，~0ms，实测有效），记 rect_hidden
-                 *   2) 请求恢复且当前是隐藏态 -> 更新 g_w.rect 并**投递一次原地 seek**，
-                 *      build_pipeline 会用新的 g_w.rect 建管线，平面按正确矩形重建
-                 *   3) 请求改矩形且从未隐藏过 -> 直接 set（正常尺寸之间不会触发棘轮）
-                 *
-                 * 为什么 1x1 之后必须走 seek 而不能「重设 render-rectangle 再让
-                 * kmssink 自己重配」：render-rectangle 是 **write-only** 属性
-                 * （g_object_get 报 "property 'render-rectangle' of object class
-                 * 'GstKMSSink' is not readable"），kmssink 只在 sink 重新
-                 * configure（分配 plane）时读取它，而 1x1 之后 sink 不再重新
-                 * configure，所以设什么值都不会被读。
+                 * 非直播仍走原来那条验证过的「原地 seek」通道
+                 * （seek_last_ms 回拨到过去，下一次 worker tick 立刻执行）。
                  */
-                if (want_hide) {
-                    gst_util_set_object_arg(g_w.vsink_el, "render-rectangle", rect);
-                    g_w.rect_hidden = 1;
-                    pb2_logf("SET_RECT %s (hide) took %lldms", rect, pb2_now_ms() - t0_rect);
-                } else if (g_w.rect_hidden) {
-                    /*
-                     * 恢复：把目标矩形写进 g_w.rect（build_pipeline 用它），
-                     * 然后重建管线让平面按新矩形重配。
-                     *
-                     * 【直播】不能走 seek 通道 —— 直播 seek 恒被忽略
-                     * （worker_main 里 SEEk 被丢弃），那样键盘收起后画面
-                     * 会永远停在 1x1。改用 live_rebuild_pipeline()，
-                     * 它 teardown 后重新 souphttpsrc ! flvdemux，
-                     * build_pipeline 会读新的 g_w.rect。
-                     *
-                     * 非直播仍走原来那条验证过的「原地 seek」通道
-                     * （seek_last_ms 回拨到过去，下一次 worker tick 立刻执行）。
-                     */
-                    snprintf(g_w.rect, sizeof(g_w.rect), "%s", rect);
-                    g_w.rect_hidden = 0;
-                    if (g_w.is_live) {
-                        pb2_logf("SET_RECT %s (restore: live rebuild, no seek path)", rect);
-                        live_rebuild_pipeline("rect restore");
-                        break;
-                    }
+                snprintf(g_w.rect, sizeof(g_w.rect), "%s", rect);
+                g_w.rect_hidden = 0;
+                if (g_w.is_live) {
+                    pb2_logf("SET_RECT %s (restore: live rebuild, no seek path)", rect);
+                    live_rebuild_pipeline("rect restore");
+                    rect_rebuilt = 1;
+                } else {
                     g_w.seek_target = g_w.last_pos_ms > 0 ? g_w.last_pos_ms : 0;
                     g_w.seek_pending = 1;
                     g_w.seek_last_ms = pb2_now_ms() - PB2_SEEK_DEBOUNCE_MS - 1;
                     pb2_stats_patch_seek(&g_w.stats, 1, g_w.seek_target);
                     pb2_logf("SET_RECT %s (restore: 1x1 无法放大，投递原地 seek@%lldms 重建管线)",
                              rect, g_w.seek_target);
-                } else {
-                    /* 正常尺寸之间改矩形：直接 set 即可，不会踩棘轮 */
-                    gst_util_set_object_arg(g_w.vsink_el, "render-rectangle", rect);
-                    snprintf(g_w.rect, sizeof(g_w.rect), "%s", rect);
-                    pb2_logf("SET_RECT %s took %lldms", rect, pb2_now_ms() - t0_rect);
+                    rect_rebuilt = 1;
                 }
+            } else {
+                /* 正常尺寸之间改矩形：直接 set 即可，不会踩棘轮 */
+                gst_util_set_object_arg(g_w.vsink_el, "render-rectangle", rect);
+                snprintf(g_w.rect, sizeof(g_w.rect), "%s", rect);
+                pb2_logf("SET_RECT %s took %lldms%s", rect,
+                         pb2_now_ms() - t0_rect,
+                         rect_pulsed ? " [paused->pulse PLAYING]" : "");
+            }
+
+            /*
+             * 单一出口的脉冲收尾：只有本次真的脉冲过、管线还活着、
+             * 会话仍是暂停态、且没走重建路径（重建方自己决定状态）时，
+             * 才把状态冻回 PAUSED。
+             */
+            if (rect_pulsed && !rect_rebuilt &&
+                g_w.paused && g_w.pipe && g_w.pipeline_alive) {
+                gst_element_set_state(g_w.pipe, GST_STATE_PAUSED);
+                pb2_logf("SET_RECT: pulse done -> back to PAUSED");
             }
             break;
+        }
         case PB2_CMD_STOP:
             pb2_logf("STOP");
             teardown_pipeline();
@@ -3631,6 +3846,8 @@ static void *worker_main(void *arg) {
             refresh_position();
             refresh_fps();
             refresh_audio_route();
+            /* 【起播迟到宽限】到点把 kmssink 切回严格迟到策略 */
+            update_late_policy();
             check_plane();
             /* 【P0-1】首帧看门狗：15s 无帧或源先死 → error（含拆管线） */
             check_first_frame();
