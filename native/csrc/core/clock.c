@@ -1,5 +1,6 @@
 #include "clock.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,6 +32,17 @@ long long pb2_now_us(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (long long)ts.tv_sec * 1000000LL + (long long)(ts.tv_nsec / 1000L);
+}
+
+void pb2_sleep_ms(long long ms) {
+    struct timespec req, rem;
+    if (ms <= 0) return;
+    req.tv_sec = (time_t)(ms / 1000);
+    req.tv_nsec = (long)((ms % 1000) * 1000000L);
+    while (nanosleep(&req, &rem) != 0) {
+        if (errno != EINTR) return;
+        req = rem; /* 被信号打断：睡剩下的 */
+    }
 }
 
 int pb2_read_small_file(const char *path, char *buf, size_t cap) {

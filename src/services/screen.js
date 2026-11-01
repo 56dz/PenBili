@@ -340,6 +340,16 @@ export function needsBrightRestore(bright, state) {
   return bright != null && isFinite(n) && n <= KEEP_BRIGHT_MIN; // state 拿不到时退回亮度判据
 }
 
+/* keepScreenOn() 之后是否需要再补一次（深熄态下的确定性问题）。
+ * 真机实测（2026-11-01，hal-screen keep 单独验证）：从 bp=4（背光断电）状态，
+ * 第 1 次 keep 只把 /tmp/.screen_state 置 1、bp 仍是 4、brightness 变 113；
+ * **第 2 次 keep 才把 bp 拉回 0**（真正点亮）。所以 keep 完复检 state，
+ * 仍是 OFF(1) 就再补一次。抽成纯函数是为了能单测（Node 里没有 JSAPI 后端）。 */
+export function keepRetryNeeded(state) {
+  if (state == null) return false; // 拿不到状态时无从判断，交给 ③ 兜底
+  return Number(state) === 1;
+}
+
 /* 设置息屏超时（一次性，管很久）。真机实测 hal-screen bright_time 本身
  * 改不动 input-event-daemon 的 [Idle] 30s/60s，所以这只是额外一层保险：
  * 系统若认 JSAPI 这个值，就能少触发几次 idle。返回给日志用的注记串。 */
@@ -596,6 +606,7 @@ export function keepScreenOnce() {
   }
 
   // ② 每次续 30s 窗口 —— 这才是保活的真正手段（等价 hal-screen keep，但不恢复亮度）
+  let retryNote = '';
   if (typeof b.keep === 'function') {
     try {
       const r = b.keep();
@@ -605,6 +616,24 @@ export function keepScreenOnce() {
       errs.push('keepScreenOn 抛错 ' + errText(e));
     }
   }
+  /* ②b 深熄时单次 keep 不保证能上电 —— 真机实测（2026-11-01，hal-screen keep）：
+   * 从 bp=4（背光断电）状态，第 1 次 keep 只把 /tmp/.screen_state 置成 1、bp 仍是 4、
+   * brightness 变成 113；**第 2 次 keep 才把 bp 拉回 0**（即真正点亮）。
+   * 所以这里 keep 完立刻复检一次 state：仍是 OFF(1) 就再补发一次 keep。
+   * 多花一次 JSAPI 调用换"一次 tick 内点亮"的确定性，比等下一个 20s 周期划算。 */
+  let midState = readState();
+  if (typeof b.keep === 'function' && keepRetryNeeded(midState)) {
+    try {
+      const r2 = b.keep();
+      if (r2 === false) retryNote = ' retry=1(返回false)';
+      else {
+        retryNote = ' retry=1';
+        midState = readState();
+      }
+    } catch (e) {
+      retryNote = ' retry=1(抛错 ' + errText(e) + ')';
+    }
+  }
 
   // ③ 硬兜底：状态/亮度采样 + 恢复。keepScreenOn() 只续 30s 空闲窗口，不保证
   //    把已经被 idle 调暗/断电的屏幕拉回来，所以每轮都采样 getScreenState()+getBrightness()：
@@ -612,7 +641,9 @@ export function keepScreenOnce() {
   //      OFF(1)  → screenOnOff(1) 给背光上电（实测 setBrightness 不能上电，只能改档位）
   //    注意 getBrightness() 读的是配置档位、被调暗时仍是 80，所以主判据是 state。
   const bright = readBright();
-  const state = readState();
+  /* 复用 ②b 复检拿到的 state（retry 后已刷新），省一次 JSAPI 调用；
+   * midState 为 null（后端没有 getScreenState）时才回退再读。 */
+  const state = midState != null ? midState : readState();
   let fix = '';
   if (needsBrightRestore(bright, state)) {
     const sNum = state == null ? null : Number(state);
@@ -649,7 +680,7 @@ export function keepScreenOnce() {
     'keep #' + n + ' backend=' + b.name + ' ' + (ok ? 'ok' : 'err=' + (errs.length ? errs.join('；') : '未知')) +
     ' bright=' + numText(bright) +
     ' state=' + numText(state) + (state == null ? '' : '(' + screenStateName(state) + ')') +
-    alwaysNote + closeNote + fix
+    alwaysNote + closeNote + retryNote + fix
   );
   return ok;
 }

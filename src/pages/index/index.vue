@@ -25,7 +25,14 @@
         </div>
         <text class="ptitle">{{ infoTitle }}</text>
         <text class="pup">{{ infoUp }}</text>
-        <text class="pdesc">{{ playDesc }}</text>
+        <!-- 简介必须可滚动（用户反馈：「播放界面出现长简介时，简介栏无法上下滑动，查看全部的」）。
+             以前是 <text class="pdesc" lines:5>，超过 5 行直接省略号截断，用户没有任何办法看到全文。
+             改成 scroller 后高度仍是 72px（192px 的左列预算是固定的，见 base.less .pleft-info
+             注释），但内容可以上下滑动。内层 text 不能带 lines —— 带 lines 会在 scroller 里
+             先被截断再滚，等于白滚。 -->
+        <scroller class="pdesc">
+          <text class="pdesc-text">{{ playDesc }}</text>
+        </scroller>
         <!-- 播放提示（「定位中…」「加载中…」「音画不同步，正在恢复…」等）。
              为什么要单独一行：这些 note 以前只赋值给 this.play.note，**模板里从来没有渲染过**，
              用户完全看不到（P0-2 要求 2 的真实缺口）。而 .pvideo 里是 <hole>（透明挖孔，让 KMS
@@ -430,6 +437,8 @@ import {
   formatCount
 } from '../../services/feed.js';
 import { fetchViewState, fetchFavFolders, setLike, addCoin, dealFav } from '../../services/bili/action.js';
+// 自检种子守卫：判断是否真该自动播（双开关），纯函数可单测 —— 详见该文件头注释
+import { isAutotestSeedEnabled, readAutotestSeed } from '../../services/autotest_seed.js';
 // 主页网格列数 + 尾部裁剪（用户要求 m11950-3：加载更多后条目数必须能被列数整除）
 import {
   GRID_COLS,
@@ -495,6 +504,8 @@ import {
   closeSession,
   describePlayError,
   ensureMixinResult,
+  isStreamEnded,
+  num,
   SEEK_STEP_MS,
   SEEK_FRAME_RETRY_DEADLINE_MS
 } from '../../services/play_session.js';
@@ -898,43 +909,47 @@ export default {
        * 背景：测试期靠 bili_autotest={playProbe:N} 让 App 启动即自动播放，
        * 但正式包若用户存储里残留这份种子，普通用户一进软件就自动播视频（用户实测反馈）。
        * 现在改为：只有 enabled===true 且 autotest===true 才进自动流程；
-       * 只有 playProbe 数值、没有 autotest:true 的种子一律视为残留，走正常首屏。 */
-      const atOn = at && (at === true || (at.enabled === true && at.autotest === true));
+       * 只有 playProbe 数值、没有 autotest:true 的种子一律视为残留，走正常首屏。
+       * 判断本身抽到 services/autotest_seed.js —— 它是纯函数，单测能钉住
+       * 「布尔 true / 字符串 'true' / 缺 autotest 的种子都不许自动播」。
+       * 这里不再接受旧的布尔 `bili_autotest=true` 写法（历史遗留，等于给残留开后门）。 */
+      const atOn = isAutotestSeedEnabled(at);
       if (atOn) {
-        const soakSec = at && typeof at === 'object' ? Number(at.soak) || 0 : 0;
+        const seed = readAutotestSeed(at);
+        const soakSec = seed.soak;
         // soakBv：把 soak 固定到指定稿件（跨轮可复现同一稿件 → 才能做换网/换版本的 A/B 对比）
-        const soakBv = at && typeof at === 'object' && /^BV[0-9A-Za-z]{10}$/.test(at.soakBv || '') ? at.soakBv : '';
+        const soakBv = seed.soakBv;
         // liveOnly：只跑直播专项（跳过视频全流程），用于直播链路真机验证
-        const liveOnly = at && typeof at === 'object' && at.liveOnly === true;
-        const liveRoom = at && typeof at === 'object' ? Math.floor(Number(at.liveRoom) || 0) : 0;
+        const liveOnly = seed.liveOnly;
+        const liveRoom = seed.liveRoom;
         // wbiStress：连打 N 次 nav 取 WBI 密钥，统计失败率与走的传输（诊断 nav 间歇失败用）
-        const wbiStress = at && typeof at === 'object' ? Math.floor(Number(at.wbiStress) || 0) : 0;
+        const wbiStress = seed.wbiStress;
         // liveHold：直播自检的取证窗口（ms，默认 15000）——诊断时拉长便于外部干预
-        const liveHold = at && typeof at === 'object' ? Math.floor(Number(at.liveHold) || 0) : 0;
+        const liveHold = seed.liveHold;
         // pollEvery：巡检打点间隔秒数（默认 5）——诊断时设 1 便于看时序
-        this._pollEvery = at && typeof at === 'object' ? Math.max(1, Math.floor(Number(at.pollEvery) || 5)) : 5;
+        this._pollEvery = seed.pollEvery;
         /* playProbe：只做「起播 + 按秒采样」，不跑全链路自检（缺陷 C / 屏幕保活取证用）。
          * 种子 {enabled:true, playProbe:90} → 起播推荐首个稿件，持续 90s 每秒打一行
          * [bili] probe，包含 frames/positionMs/videoStallMs/保活后端/屏幕电源态。
          * 这样就能在**关屏**状态下验证：息屏期间看门狗有没有误杀管线（缺陷 C 根因）。 */
-        const playProbe = at && typeof at === 'object' ? Math.max(0, Math.floor(Number(at.playProbe) || 0)) : 0;
+        const playProbe = seed.playProbe;
         /* noKeep：诊断用，强制关掉屏幕保活。
          * 为什么需要：验证「息屏期间看门狗有没有误杀管线」必须让屏幕**保持关闭**，
          * 而保活生效后每 20s 会把屏幕点亮（实测 hal-screen keep 能把 bp 4→0、br 5→113），
          * 既烧屏又让"息屏"这个前提不成立。只在种子显式给出时生效，正常路径不受影响。 */
-        this._noKeep = at && typeof at === 'object' && at.noKeep === true;
+        this._noKeep = seed.noKeep;
         if (this._noKeep) logWarn('[bili] noKeep=1 → 本次运行关闭屏幕保活（仅诊断用）');
         // probeSeek：探针收尾时连打 N 次绝对定位，量 JS 侧往返耗时（验证 seek 不阻塞主线程）
-        this._probeSeek = at && typeof at === 'object' ? Math.max(0, Math.floor(Number(at.probeSeek) || 0)) : 0;
+        this._probeSeek = seed.probeSeek;
         /* probePause：探针收尾时做 N 轮「暂停 1.2s → 恢复」，量缺陷 A（暂停后恢复卡顿）。
          * 判据不是"能不能恢复"，而是**恢复后帧率立刻回到满速、没有大空档**：
          * 旧实现恢复后 fps 掉到 10、出现 1127/540/293ms 的空档、要 10 秒才收敛。 */
-        this._probePause = at && typeof at === 'object' ? Math.max(0, Math.floor(Number(at.probePause) || 0)) : 0;
+        this._probePause = seed.probePause;
         /* probeRect：探针收尾时验证键盘避让（SET_RECT）全链路真的通了。
          * 判据不在 JS 侧——JS 拿到 ok:1 只证明命令入队成功。真正的证据是
          * native 日志里出现 `SET_RECT <x,y,w,h>`（= process_cmd 真的执行了
          * gst_util_set_object_arg），以及恢复时出现原矩形。 */
-        this._probeRect = at && typeof at === 'object' && at.probeRect === true;
+        this._probeRect = seed.probeRect;
         logWarn('[bili] autotest seeded → ' + (liveOnly
           ? 'liveOnly room=' + (liveRoom || '-')
           : wbiStress > 0 ? 'wbiStress n=' + wbiStress
@@ -1390,6 +1405,21 @@ export default {
     async tryRecover(myGen, st, tag) {
       const ctx = this.makeCtx(myGen);
       const pos = Math.max(0, Number(st && st.positionMs) || 0);
+      /* n9 前置判据：已经播完就别救。旧实现无条件原地 seek(pos)，而末尾时
+       * pos 已越过时长（真机 pos=118776 / dur=114900），seek 会被 native clamp 到
+       * 113900，重开 ffmpeg 读 1 秒又死 → 每 60s 一次的无限自愈循环。
+       * 这里直接收尾：置 ended、清提示、停轮询，与 tick 里的末尾判据同一出口。 */
+      const durMs = num(st && st.durationMs, this.play.session && this.play.session.durationMs);
+      if (isStreamEnded(st, durMs)) {
+        this.play.state = 'ended';
+        this.play.note = '';
+        this.stopPoll();
+        logWarn(
+          '[bili] ' + tag + ' 判定为正常播完（pos=' + pos + ' dur=' + durMs +
+          ' alive=' + (st && st.pipelineAlive ? 1 : 0) + '）→ 不做自愈 seek'
+        );
+        return;
+      }
       const r = await recoverSession(ctx);
       if (this.gen !== myGen) return;
       if (r.ok) {
@@ -1398,7 +1428,7 @@ export default {
       }
       if (r.code === 'PLAYER_UNSUPPORTED') {
         // v2 契约里没有 recover() → 退化到原地 seek（不重启管线，只重新解当前帧）
-        const rr = await seekBy(ctx, pos, Number(st && st.durationMs) || 0, 0);
+        const rr = await seekBy(ctx, pos, durMs, 0);
         if (this.gen !== myGen) return;
         if (rr.ok) {
           logWarn('[bili] ' + tag + ' 自愈: 原地 seek(' + pos + 'ms) ok（无 recover()）');
@@ -1528,6 +1558,27 @@ export default {
          * frames 停涨，这在看门狗看来和"卡死"一模一样。若不放行，用户每拖一次进度条就
          * 可能被自愈逻辑再补一次 seek（雪上加霜，且耗尽 3 次配额）。 */
         const seekBusy = this._seekNoteAt > 0;
+        /* ---------- 流末尾判据（n9，必须在所有自愈看门狗之前） ----------
+         * 播到结尾时源 ffmpeg 正常退出但 EOS 可能一直不到，native 的 state 会永远
+         * 停在 playing、只把 pipelineAlive 置 0。若先跑看门狗，就会被判成"假死"而
+         * 原地 seek 回末尾 → 重开 ffmpeg 读 1 秒又死 → 无限循环（真机 08:22 实锤）。
+         * 所以这里先确认"其实已经播完了"，直接收尾并停轮询。 */
+        const durMs = num(st.durationMs, this.play.session && this.play.session.durationMs);
+        /* 只在 playing 态判末尾：暂停在最后一秒（用户拖到末尾后按了暂停）不该被判成
+         * "已播完" —— 那会清提示、停轮询，用户再点播放就没轮询跟进了。 */
+        if (!seekBusy && st.state === 'playing' && isStreamEnded(st, durMs)) {
+          this.play.state = 'ended';
+          this.play.note = ''; // 播完不保留"网络不稳定/加载中"之类残留提示
+          this.play.frames = st.frames;
+          this.play.positionMs = durMs > 0 ? Math.min(st.positionMs, durMs) : st.positionMs;
+          this.stopPoll();
+          logWarn(
+            '[bili] video ended（末尾判据）pos=' + st.positionMs + ' dur=' + durMs +
+            ' frames=' + st.frames + ' alive=' + (st.pipelineAlive ? 1 : 0) +
+            ' → 停轮询，不再自愈 seek'
+          );
+          return;
+        }
         // 息屏期间画面停滞是正常现象，不判故障（但仍然每 5s 打一行日志留证据）
         if (screenOff && st.state === 'playing' && st.videoStallMs > 8000 && !this._screenOffStallLogged) {
           this._screenOffStallLogged = true;
@@ -2153,23 +2204,30 @@ export default {
       const myGen = this.gen;
       // 系统输入法会触发宿主 onHide —— 同 onOpenInput 用 imBusy 守卫，防 teardown 作废本次输入
       this.imBusy = true;
-      // 键盘避让（问题 2，goal-b29d60aa）：falcon 输入法是独立系统 app，从屏幕底部弹出，
-      // 会盖住物理面板下半部 —— 而视频平面（kmssink render-rectangle）正压在下半区。
-      // 输入前把视频缩到面板上部（y 0~260 区域），关闭输入法后恢复原矩形。
-      // 坐标系：传的 x 与 open 时下发的 x 同系（视频逻辑区左缘，不含面板偏移）；
-      // 面板偏移 PB2_PANEL_X_OFFSET 由 native 统一加（build_pipeline 与 SET_RECT 都加），
-      // 这样 JS 不必知道面板几何。真机实测 orig.x=0 → 管线里是 107。
+      // 键盘避让（问题 2，goal-b29d60aa）：falcon 输入法是**独立的全屏系统 miniapp**，
+      // 占满整个 960x266 逻辑画布（真机截图实测：键盘从逻辑 y=0 铺到 y=266，无留白）。
+      // 而视频走 KMS overlay 平面，**盖在 falcon UI 之上** —— 所以只要平面还可见，
+      // 无论缩到哪个位置都会遮住键盘的某一块（真机实测：缩到 y 0~260 后键盘顶部
+      // 那一条仍被视频压住，用户根本没法点最上面一排候选词）。
+      //
+      // 结论：键盘弹出期间必须**把平面缩到 1x1**（等价隐藏），而不是缩小到上半部。
+      // ⚠️ 不能用 w=h=0：native2 真机实测 kmssink 对零宽高**既不报错也不隐藏**，
+      //    而是回退成「未设置矩形」⇒ 平面铺满 480x960，把键盘整个盖掉。
+      //    1x1 才是真正不可见的合法几何（实测 `dst: pos[0,0] rect[1 x 1]`）。
+      //    放左上角 (0,0)：面板上那一个像素在逻辑坐标 y=107 处的边缘，肉眼不可见。
+      //
+      // 关闭输入法后恢复原矩形。代价是输入时看不到画面，但这本来就是系统输入法的
+      // 全屏行为（v1 老实现也是被完全遮住的，只是那时画面在下面透不出来而已）。
+      //
+      // 坐标系：传的 x/y 与 open 时下发的同系（视频逻辑区左缘，不含面板偏移）；
+      // 面板偏移 PB2_PANEL_X_OFFSET 由 native 统一加（build_pipeline 与 SET_RECT 都加）。
+      // 真机实测 orig.x=0 → 管线里是 107；1x1 时 native 不加偏移（见 session.c 防呆）。
       const phys = this.play.session && this.play.session.rectPhysical;
-      let rectShrunk = false;
+      let rectHidden = false;
       try {
         if (phys && phys.width > 0 && player.setVideoRect) {
-          /* 输入框（.pinput-box）在播放态右栏底部：逻辑 y≈240~266、x≈682~960。
-           * 换算成物理面板坐标大约是 x∈[0,94]（面板左缘）一带 —— 键盘从面板 y 大约 300 起
-           * 向下弹出。视频缩到 y 0~280 就必然在键盘之上；宽度保持 240，高度按信箱比收窄。 */
-          const w = phys.width;
-          const h = Math.round((w * phys.height) / Math.max(1, phys.width * 1.6));
-          await player.setVideoRect(phys.x, 0, w, Math.max(120, Math.min(h, 260)));
-          rectShrunk = true;
+          await player.setVideoRect(0, 0, 1, 1);
+          rectHidden = true;
         }
       } catch (e) { /* v1 无 setRect 能力（PLAYER_UNSUPPORTED）：接受遮挡，不阻塞输入 */ }
       try {
@@ -2188,8 +2246,11 @@ export default {
         this.replyStatus = this.cinText ? '' : this.replyStatus;
       } finally {
         this.imBusy = false;
-        if (rectShrunk) {
-          // 无论正常返回、取消还是出错，都把视频恢复到 open 时的原矩形
+        if (rectHidden) {
+          // 无论正常返回、取消还是出错，都把视频恢复到 open 时的原矩形。
+          // 用 session 里存的 rectPhysical（含面板偏移的物理坐标）原样回传 ——
+          // 与 native build_pipeline 拼出的 rect 完全一致（真机日志核对过
+          // <107,299,240,427> 两次相同）。
           try { await player.setVideoRect(phys.x, phys.y, phys.width, phys.height); } catch (e) { /* 恢复失败只影响画面位置 */ }
         }
       }

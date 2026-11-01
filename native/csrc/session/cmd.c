@@ -425,38 +425,195 @@ static int mixer_one(int card, const char *ctl, const char *val, const char *exp
 }
 
 /*
- * 打开声音。
+ * 读取某个 enum 控件的当前选中项（返回不带引号的值，如 "OFF" / "SPK"）。
  *
- * 【全局静音】静音开关为真时**一条 amixer 都不执行**，直接返回 0：
- * 不去设 Playback Path=SPK，也不去设 Master=100%。这是修「一会儿有声音
- * 一会儿没声音」的关键 —— 每次 open/seek 都不再擅自打开扬声器。
+ * 为什么需要：修「音量特别大 / 关了声音还有声」时不能无脑把 Playback Path
+ * 设成 SPK —— 用户可能已经选了 HP / BT / SPK_HP，或者明确设成 OFF（静音）。
+ * 必须先读再决定，才能做到「只补必要的、绝不覆盖用户的选择」。
+ *
+ * 解析目标：amixer sget 输出里的 `Item0: 'SPK'` 行，取出单引号内内容。
+ * 返回 0 = 读到，-1 = 读不到（调用方应保守不动）。
+ */
+static int mixer_get(int card, const char *ctl, char *out, size_t outsz) {
+    char buf[2048];
+    char *argv0[8];
+    const char *item;
+    size_t n = 0;
+
+    if (!out || outsz == 0) return -1;
+    out[0] = '\0';
+    buf[0] = '\0';
+
+    argv0[0] = (char *)"/usr/bin/amixer";
+    argv0[1] = (char *)"-c";
+    argv0[2] = (char *)(card == 0 ? "0" : "1");
+    argv0[3] = (char *)"sget";
+    argv0[4] = (char *)ctl;
+    argv0[5] = NULL;
+    if (pb2_run(argv0, buf, sizeof(buf), 1500) != 0) {
+        argv0[0] = (char *)"/bin/amixer";
+        buf[0] = '\0';
+        if (pb2_run(argv0, buf, sizeof(buf), 1500) != 0) return -1;
+    }
+
+    item = strstr(buf, "Item0:");
+    if (!item) return -1;
+    item = strchr(item, '\'');
+    if (!item) return -1;
+    item++;
+    while (*item && *item != '\'' && n + 1 < outsz) out[n++] = *item++;
+    out[n] = '\0';
+    return n > 0 ? 0 : -1;
+}
+
+/*
+ * 读取 pvolume 类控件（如 card1 Master）的当前百分比，返回 0-100，读不到返回 -1。
+ *
+ * 为什么不能用 mixer_get：mixer_get 解析的是 enum 控件的 `Item0: 'SPK'` 行，
+ * 而 pvolume 控件（Master）输出的是
+ *     Front Left: Playback 142 [56%] [-20.52dB]
+ * 没有 Item0 行。所以必须单独解析 `[NN%]`。
+ *
+ * 用途：判断用户是否在系统设置里「关闭声音」。真机实测系统关闭声音 =
+ * `hal-audio -s 0` → card1 Master=0，而 Playback Path 仍是 SPK。
+ * 所以「是否静音」只能看 Master 百分比，不能看 Path。
+ */
+static int mixer_get_pct(int card, const char *ctl) {
+    char buf[2048];
+    char *argv0[8];
+    const char *p;
+
+    buf[0] = '\0';
+    argv0[0] = (char *)"/usr/bin/amixer";
+    argv0[1] = (char *)"-c";
+    argv0[2] = (char *)(card == 0 ? "0" : "1");
+    argv0[3] = (char *)"sget";
+    argv0[4] = (char *)ctl;
+    argv0[5] = NULL;
+    if (pb2_run(argv0, buf, sizeof(buf), 1500) != 0) {
+        argv0[0] = (char *)"/bin/amixer";
+        buf[0] = '\0';
+        if (pb2_run(argv0, buf, sizeof(buf), 1500) != 0) return -1;
+    }
+
+    /* 找第一个 "[NN%]"（Front Left；左右声道通常一致） */
+    p = buf;
+    while ((p = strchr(p, '[')) != NULL) {
+        const char *q = p + 1;
+        int v = 0;
+        int got = 0;
+        while (*q >= '0' && *q <= '9') {
+            v = v * 10 + (*q - '0');
+            q++;
+            got = 1;
+            if (v > 1000) break;
+        }
+        if (got && *q == '%') return v;
+        p++;
+    }
+    return -1;
+}
+
+/*
+ * 打开声音通路 —— 但**绝不碰音量**。
+ *
+ * 【用户反馈（2026-11-01）】「开始播放时音量默认是特别大的，不管我在系统设置里
+ * 是多少，就算是关闭声音，在播放时也会出现声音」。
+ *
+ * 根因就是这里原来无条件执行：
+ *     mixer_one(1, "Master", "100%", "[100%]")   ← 把用户音量覆盖成 100%
+ *     mixer_one(0, "Playback Path", "SPK", ...)  ← 把用户"关闭声音"(OFF)覆盖成扬声器
+ * 两条都会覆盖用户在系统设置里的选择，而且每次 open/seek 重建管线都重跑一遍。
+ *
+ * 现在的语义：**播放器只负责"通路选通"，音量完全由用户/系统决定**。
+ *   - card1 Master（功放增益）**一个字都不改**，用户设多少就是多少；
+ *     用户设 0（静音）时我们保持 0，绝不拉回 100%。
+ *   - card0 Playback Path 只在**当前是 OFF 且用户没有主动静音**时才切到 SPK
+ *     （因为 OFF 意味着"没有任何输出通路"，不切就完全没声；这不是音量问题
+ *     而是路由问题）。用户若把 Path 设成 HP/BT 等其它通路，我们尊重不动。
+ *
+ * 所以本函数现在只做一件事：**确保输出通路不是 OFF**，其余一概不碰。
+ * 静音开关（/tmp/pb2_mute 等）仍然优先于一切：静音时连通路都不碰。
  */
 int pb2_mixer_setup(void) {
-    int ok0;
-    int ok1;
-    int ok;
+    int path_ok = 1;
 
     if (pb2_mute_enabled()) {
         pb2_logf("mixer: muted=1 (source=%s) -> skipped (no amixer ran)", pb2_mute_reason());
         return 0;
     }
 
-    ok0 = mixer_one(0, "Playback Path", "SPK", "'SPK'");
-    ok1 = mixer_one(1, "Master", "100%", "[100%]");
     /*
-     * 【P1-12】必须是 AND。原来写成 `(ok0 && ok1) ? 1 : ((ok0 || ok1) ? 1 : 0)`
-     * 化简后等于 `ok0 || ok1` —— 只成功一半（比如 card0 设上了 SPK 但 card1
-     * Master 仍是 0）也会记成完全成功，日志骗人，上层也无从判断。
-     * 现在日志的 path/master 两列与 ok 严丝合缝：ok=1 当且仅当两列都是 1。
+     * 【关键：用户静音时什么都不做】
+     *
+     * 系统「关闭声音」的实现是 `hal-audio -s 0` → card1 Master=0，而
+     * **Playback Path 仍然是 SPK**（真机实测：hal-audio -s 0 后
+     * path=Item0: 'SPK'，card1 values=0,0）。
+     *
+     * 所以「Playback Path == OFF」并不代表用户想静音 —— 它只代表"当前没有
+     * 任何输出通路"（通常是上一个 app 收尾时设的）。而用户真正表达"关闭声音"
+     * 的方式是 Master=0。
+     *
+     * 因此顺序必须是：**先看 Master，Master=0 就一个字节都不改**。
+     * 否则我们会把 Path 从 OFF 切成 SPK，虽然 Master=0 时理论上仍无声，
+     * 但这会让"用户已静音"的状态变得不可解释（路径被打开、音量却为 0），
+     * 也让 /tmp/pb2_mute 之外多出一条"隐式静音"路径。
      */
-    ok = (ok0 && ok1) ? 1 : 0;
-    pb2_logf("mixer setup done ok=%d (path=%d master=%d) muted=0", ok, ok0, ok1);
-    return ok ? 0 : -1;
+    {
+        int pct = mixer_get_pct(1, "Master");
+        if (pct < 0) {
+            /*
+             * 读不到 Master 就保守不动。宁可没声（用户可手动调），
+             * 也不要覆盖用户设置。
+             */
+            pb2_logf("mixer: master read failed -> leave everything untouched");
+            return 0;
+        }
+        if (pct == 0) {
+            pb2_logf("mixer: master=0%% (user muted via system) -> leave path untouched");
+            return 0;
+        }
+        pb2_logf("mixer: master=%d%% (user volume, untouched)", pct);
+    }
+
+    /*
+     * 只在通路确实是 OFF 时才选通 SPK。
+     * 用 sget 先读，避免无谓地覆盖用户设置的 HP / BT / SPK_HP 等通路。
+     */
+    {
+        char cur[64];
+        cur[0] = '\0';
+        if (mixer_get(0, "Playback Path", cur, sizeof(cur)) == 0) {
+            if (strcmp(cur, "OFF") == 0) {
+                path_ok = mixer_one(0, "Playback Path", "SPK", "'SPK'");
+                pb2_logf("mixer: path was OFF -> set SPK rc=%d", path_ok);
+            } else {
+                pb2_logf("mixer: path=%s kept (user/system choice, not touching)", cur);
+            }
+        } else {
+            /* 读不到就保守不动 —— 宁可能不出声也不要覆盖用户设置 */
+            pb2_logf("mixer: path read failed -> leave untouched");
+        }
+    }
+
+    /*
+     * 【绝不设置 Master】用户的音量就是最终音量。
+     * 历史：这里曾是 `mixer_one(1, "Master", "100%", "[100%]")`，是"音量特别大"
+     * 的直接原因（系统配置 /data/cfg/sys_config.conf 里 spk_volume=35，对应
+     * card1 Master=142；我们曾把它拉到 255 = 100%）。
+     * 删除后播放器不再有任何改动音量的路径（除静音开关）。
+     */
+    pb2_logf("mixer setup done (path_ok=%d, master=untouched)", path_ok);
+    return path_ok ? 0 : -1;
 }
 
 /*
- * 强制静音：两条都设上，忽略静音开关（幂等，重复调用无害）。
- * release / 退出时也要走这里，保证会话结束后设备仍是静音。
+ * 强制静音：只切**路由**（card0 Playback Path=OFF），不碰 card1 Master。
+ *
+ * 为什么不再设 Master=0：Master 是用户/系统的音量设置，把它压到 0 就等于
+ * 销毁用户的设置 —— 静音结束后无法还原，用户下次播放会发现"音量变了"。
+ * 而 Playback Path=OFF 是纯路由开关（没有任何输出通路），已经足够静音，
+ * 且完全不改变音量数值。这样 mute 与音量彻底解耦。
  */
 int pb2_mixer_mute(void) {
     int ok;
@@ -470,43 +627,37 @@ int pb2_mixer_mute(void) {
         r0 = pb2_run(argv0, NULL, 0, 1500);
         if (r0 != 0) r0 = pb2_run(argv1, NULL, 0, 1500);
     }
-    {
-        char *argv0[] = {(char *)"/usr/bin/amixer", (char *)"-c", (char *)"1",
-                         (char *)"sset", (char *)"Master", (char *)"0", NULL};
-        char *argv1[] = {(char *)"/bin/amixer", (char *)"-c", (char *)"1",
-                         (char *)"sset", (char *)"Master", (char *)"0", NULL};
-        r1 = pb2_run(argv0, NULL, 0, 1500);
-        if (r1 != 0) r1 = pb2_run(argv1, NULL, 0, 1500);
-    }
-    /* 【P1-12】同 setup：两路都成功才算静音成功（原来是 || 语义） */
-    ok = (r0 == 0 && r1 == 0) ? 1 : 0;
-    pb2_logf("mixer mute done ok=%d (path=%d master=%d)", ok, r0, r1);
+    (void)r1;
+    ok = (r0 == 0) ? 1 : 0;
+    pb2_logf("mixer mute done ok=%d (path=%d, master untouched)", ok, r0);
     return ok ? 0 : -1;
 }
 
 /*
- * 【OPEN 前的同步兜底静音】
+ * 【OPEN 前的同步兜底】
  *
- * mixer 的完整版（带回读校验，4 次 amixer ≈150ms）已经移到 worker 空闲 tick，
- * 好处是 OPEN 从 186ms 回到 13ms，坏处是「起播那一刻」有个几十到几百毫秒的
- * 窗口 mixer 还没跑。如果设备当时不是静音态（用户手工调过 / 上个 app 留下
- * Master=100%），这段窗口就会漏声。
+ * 历史：这里原本同步设 card1 Master=0（约 10ms），目的是在完整 mixer 跑到
+ * 之前把增益压到 0，防止"起播那一刻漏声"。
  *
- * 所以 OPEN 之前先同步跑一条最便宜的静音（只设 card1 Master=0，约 10ms，
- * 不回读校验 —— 兜底不需要证明，只需要尽快把增益降到 0）。
- * card0 Playback Path 由 tick 里的完整版负责，避免这里再多花 17ms。
+ * 【现在不需要了】因为 pb2_mixer_setup() 已经**不再碰 Master**，播放器全程
+ * 不改变音量，也就不存在"增益被拉到 100% 需要紧急压回"的窗口。真正需要
+ * 兜底的是路由（Playback Path 是 OFF 时没声），而那由 setup 在 worker tick
+ * 里处理，且用户可感知的延迟只有几十毫秒，不影响正确性。
+ *
+ * 保留函数（供静音开关场景使用）：静音模式下确实要立刻断掉输出通路。
+ * 注意这里也只切路由，不动 Master —— 与 pb2_mixer_mute() 保持一致。
  */
 int pb2_mixer_pre_mute(void) {
     int rc;
     {
-        char *a0[] = {(char *)"/usr/bin/amixer", (char *)"-c", (char *)"1",
-                      (char *)"sset", (char *)"Master", (char *)"0", NULL};
-        char *a1[] = {(char *)"/bin/amixer", (char *)"-c", (char *)"1",
-                      (char *)"sset", (char *)"Master", (char *)"0", NULL};
+        char *a0[] = {(char *)"/usr/bin/amixer", (char *)"-c", (char *)"0",
+                      (char *)"sset", (char *)"Playback Path", (char *)"OFF", NULL};
+        char *a1[] = {(char *)"/bin/amixer", (char *)"-c", (char *)"0",
+                      (char *)"sset", (char *)"Playback Path", (char *)"OFF", NULL};
         rc = pb2_run(a0, NULL, 0, 1500);
         if (rc != 0) rc = pb2_run(a1, NULL, 0, 1500);
     }
-    pb2_logf("mixer: pre-mute at open (rc=%d, card1 Master=0)", rc);
+    pb2_logf("mixer: pre-mute at open (rc=%d, Playback Path=OFF, master untouched)", rc);
     return rc == 0 ? 0 : -1;
 }
 

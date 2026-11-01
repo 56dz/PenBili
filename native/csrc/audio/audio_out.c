@@ -109,12 +109,16 @@ void pb2_audio_restore(void) {
         pb2_logf("audio: restore -> forced MUTE (source=%s)", pb2_mute_reason());
         return;
     }
-    {
-        char *a0[] = {(char *)"/usr/bin/amixer", (char *)"-c", (char *)"1",
-                      (char *)"sset", (char *)"Master", (char *)"100%", NULL};
-        char *b0[] = {(char *)"/bin/amixer", (char *)"-c", (char *)"1",
-                      (char *)"sset", (char *)"Master", (char *)"100%", NULL};
-        if (pb2_run(a0, NULL, 0, 1500) != 0) pb2_run(b0, NULL, 0, 1500);
-        pb2_logf("audio: restored -> Master 100%% (muted=0)");
-    }
+    /*
+     * 【绝不恢复音量】用户反馈（2026-11-01）「开始播放时音量默认是特别大的，
+     * 不管我在系统设置里是多少，就算是关闭声音，在播放时也会出现声音」。
+     *
+     * 原来这里在非静音模式会把 card1 Master 拉回 100%，是"音量特别大"的
+     * 第二个元凶（第一个是 pb2_mixer_setup 里同样的写法）。播放器不该拥有
+     * 音量主权 —— 用户/系统设多少就是多少，stop/release 后更不能篡改。
+     *
+     * 所以现在这里什么都不做，只记一行日志。真正需要清理的是静音开关
+     * （走上面的 mute 分支），不是音量。
+     */
+    pb2_logf("audio: restore -> volume untouched (player never owns volume)");
 }

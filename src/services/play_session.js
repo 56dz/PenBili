@@ -86,6 +86,44 @@ export function normalizeState(raw, ctx) {
   return 'error';
 }
 
+/* ================= 流末尾判据（n9，播放到结尾的自愈死循环） =================
+ *
+ * 背景（真机 2026-11-01 08:22 实测的死循环）：
+ *   `dur=114900ms` 的视频播到 114879ms 后，源 ffmpeg 正常读完退出（"source died
+ *   after first frame"），但 **demuxer 一直没发 EOS** → native 的
+ *   check_src_after_first_frame() 3 秒后只 `patch_alive(0)`，**不改 state** →
+ *   `state` 永远停在 `playing`。JS 看门狗看到「videoStall 持续增长 + 音频冻结」，
+ *   判定假死，执行原地 seek(pos)（此时 pos 已到 118776 > dur，被 clamp 到 113900）
+ *   → 重开 ffmpeg 读 1 秒又死 → **无限循环，界面永远不显示「已播完」**。
+ *
+ * 为什么不能只靠 state：native 只在真正收到 EOS 时才 patch_state(STOPPED)
+ * （native/csrc/session/session.c:1608），而这条路径上 EOS 根本没来；即使来了，
+ * `stopped` 也会被 normalizeState 归一成 'idle'（那是 stop() 的正常态），
+ * 页面等的 `'ended'` 在 native 白名单里不存在 —— 三者叠加，末尾永远无信号。
+ *
+ * 所以必须在 JS 侧用**可得的量**推断「这是正常播完，不是卡死」：
+ *   1) 位置已经走到时长尾部（`dur - END_TAIL_MS` 以内）→ 正常播完；
+ *   2) 管线已死（`pipelineAlive === false`，即 native 的 alive=0）且位置已到
+ *      `dur - END_DEAD_TAIL_MS` 以内 → 源读完退出的典型形态，也按播完处理；
+ *      更靠前的位置判死不成立（那才是真故障，交给看门狗）。
+ * 直播（durationMs <= 0）**永远不判末尾**：时长未知，位置没有参照。
+ */
+export const END_TAIL_MS = 1000; // 位置进到最后 1s 即算播完
+export const END_DEAD_TAIL_MS = 3000; // 管线已死时放宽到 3s（源退出到 EOS 的窗口）
+
+export function isStreamEnded(st, durationMs) {
+  if (!st || typeof st !== 'object') return false;
+  const dur = num(durationMs !== undefined ? durationMs : st.durationMs, 0);
+  if (dur <= 0) return false; // 直播/时长未知：不判末尾
+  const pos = num(st.positionMs, 0);
+  if (pos <= 0) return false; // 还没起来，交给「无首帧」看门狗
+  if (pos >= dur - END_TAIL_MS) return true;
+  /* pipelineAlive 只有在明确为 false 时才算已知死亡；老 native 没有该字段时
+   * readStatus 已经补成 true，这里再挡一层 undefined/null，避免误判。 */
+  if (st.pipelineAlive === false && pos >= dur - END_DEAD_TAIL_MS) return true;
+  return false;
+}
+
 /* 解码像素预算的历史默认值（= 1080p 全尺寸），保留导出供测试/诊断引用。
  * 真正生效的预算现在来自「我的 → 视频调节 → 分辨率」（pixelBudgetFor）。
  *
@@ -562,6 +600,11 @@ export async function readStatus(ctx) {
     planeActive: st.planeActive === undefined ? true : !!st.planeActive,
     pipelineAlive: st.pipelineAlive === undefined ? true : !!st.pipelineAlive,
     nativeDurationMs: num(st.durationMs, 0),
+    /* durationMs：native 侧时长的**同名别名**（n10）。
+     * 起因：页面 tryRecover() 写的是 `Number(st && st.durationMs) || 0`，而这里只导出
+     * nativeDurationMs → 取到 undefined → 恒 0 → seekBy 不设上界，播完还往前 seek。
+     * 保留 nativeDurationMs 是为了不破坏既有单测与调用点，两个字段同值。 */
+    durationMs: num(st.durationMs, 0),
     nativeFps: num(st.fps, 0),
     hasAudio: st.hasAudio === undefined ? true : !!st.hasAudio,
     /* lastError 是 native 的 errno，真机见过 -5（EIO）→ 走 numSigned 保留负号 */

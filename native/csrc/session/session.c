@@ -60,8 +60,54 @@
 #define PB2_PLANE_GRACE_MS 2000
 /* 连续丢失达到这个次数且屏幕亮着才报异常（P0-2） */
 #define PB2_PLANE_LOST_REPORT 3
-/* seek 端到端目标（下发 -> 第一帧上屏），仅用于日志判定 */
-#define PB2_SEEK_TARGET_MS 800
+/*
+ * seek 端到端目标（下发 -> 第一帧上屏），仅用于日志判定。
+ *
+ * 800 -> 1500：单 FIFO 双输入方案下，一个 ffmpeg 要串行建两路 HTTP 连接，
+ * 实测首帧 926~1193ms（旧双 ffmpeg 并行是 490~650ms）。这是架构换来的
+ * 代价，仍在人眼可接受范围。若继续用 800 判定，日志会一直 SLOW，
+ * 真回归反而看不出来。
+ */
+#define PB2_SEEK_TARGET_MS 1500
+
+/*
+ * 视频队列的限界方式 —— 这是一个踩了两天的死锁，务必别改回按 buffer 个数。
+ *
+ * 【现象】改成「单 ffmpeg 双输入 + 单 matroskademux」之后，seek 一过音频就
+ * 再也不到（`av: first audio packet` 一行都没有、`ab=0`），frames 冻结在
+ * 21~25，ffmpeg 进程停在 S 态（阻塞在写 FIFO）。起播正常，只有 seek 后死。
+ *
+ * 【根因】seek 后两路首包 PTS 不同：视频从关键帧 K 开始（-ss 之前最近的
+ * 关键帧），音频从 T 开始。实测 T-K = 3.843s（视频 946.044 / 音频 949.867）。
+ * matroskademux 在流式模式下必须「把落后的那一路推进到对齐点」才能开始
+ * interleave，GST_DEBUG 里能看到：
+ *     gst_matroska_demux_sync_streams:<d> Synchronizing stream 1 with other
+ *     by advancing time from 0:00:00.000000000 to 0:15:43.577000000
+ * 它要把音频从 0 推到 943.577s。这期间音频包被丢弃/跳过，但**视频包会被
+ * 往前推**。视频队列若按「8 个 buffer」限界（8×33.37ms≈267ms），远装不下
+ * 3.84s 的推进量 -> queue 满 -> demuxer 阻塞 -> 整条管线死锁。
+ *
+ * 【实测矩阵】（同一个文件、同一条命令，只改 queue 参数，gst-launch 直跑）
+ *   视频 8 buffer        / 音频 32 buffer   -> 60s 超时（死锁）
+ *   视频 8 buffer        / 音频无界         -> 超时（死锁）
+ *   视频 无界            / 音频 32 buffer   -> 536ms 跑完  ✅
+ *   视频 无界            / 音频无界         -> 537ms 跑完  ✅
+ *   视频 time=2s         / 音频 32 buffer   -> 超时（死锁）
+ *   视频 time=3s         / 音频 32 buffer   -> 543ms 跑完  ✅
+ *   视频 bytes=2MB/6MB   / 音频 32 buffer   -> 545ms 跑完  ✅
+ * 结论：卡死的是**视频**队列，且必须给到「能装下 T-K 那段推进量」的容量。
+ * 按 buffer 个数限界是错的单位（buffer 时长随帧率变化，8 个在 30fps 只有
+ * 267ms）；按时间或字节限界才能表达「至少装下几秒的视频」这个需求。
+ *
+ * 【为什么取 8s / 6MB 而不是刚好 4s】
+ * 真机关键帧间隔实测 3.84s，但 B 站不同清晰度/不同视频的关键帧间隔可能更大
+ * （3s 才刚好过关说明余量很小）。8s 给 2 倍余量；再叠一个 6MB 字节上限兜住
+ * 「音频极少、视频极多」的极端情况（6MB 在 852x480 下约 10s 视频，够用且在
+ * 词典笔上完全可接受）。两个上限是「或」关系，谁先到算谁。
+ * 注意 audio 分支的 32 buffer 保持原样 —— 实测它不参与这个死锁。
+ */
+#define PB2_VIDEO_QUEUE_NS 8000000000LL
+#define PB2_VIDEO_QUEUE_BYTES 6000000
 
 /* ---------------- 全局状态（只在 worker 里改） ---------------- */
 typedef struct {
@@ -87,6 +133,15 @@ typedef struct {
     GstElement *pipe;
     GstElement *vsink;      /* 视频分支的 bin（ghost pad 挂 probe 用） */
     GstElement *vsink_el;   /* 分支内部名为 "vsink" 的 kmssink 元素（SET_RECT 用；bin 上没有 render-rectangle 属性） */
+    /*
+     * 平面是否被 SET_RECT 主动隐藏（键盘避让期间 1x1）。
+     * check_plane() 必须据此跳过巡检：隐藏时 kmssink 把平面缩成 1x1，
+     * 几何上看仍在 ACTIVE，但某些帧序下会短暂读到非 ACTIVE，
+     * 于是每秒误报一次 `plane missing ... streak=N -- reported` 并
+     * patch 出 PB2_E_PLANE_LOST，让 JS 侧弹「画面丢失」的假错误。
+     * 隐藏是**我们自己主动做的**，不是故障，所以巡检要整个跳过。
+     */
+    int rect_hidden;
     GstElement *asink;      /* 音频分支的 alsasink */
     GstBus *bus;
     int vbranch;
@@ -123,6 +178,13 @@ typedef struct {
      *   看门狗永远不触发 → 界面永久"加载中…"）。
      */
     long long frame_epoch_ms;
+    /*
+     * 【A/V 同步判据】本次 OPEN / seek 重建的下发时刻，专门给「音频首包延迟」
+     * 当日志基准。不能复用 frame_epoch_ms —— 那个字段在首帧到达时就被清零
+     * （它是给 check_first_frame 计时用的），而音频首包总是晚于视频首帧，
+     * 清零后就只能退回 t_start（整会话起点），打出来的差值毫无意义。
+     */
+    long long audio_epoch_ms;
     long long last_src_check_ms; /* ffmpeg 存活探测的上次时间（首帧之前用） */
     /*
      * 【P1-1】首帧之后的源存活探测。
@@ -138,6 +200,21 @@ typedef struct {
     int src_died;
     long long src_died_at_ms;
     int first_frame_logged;      /* 首帧到达日志只打一次 */
+    int first_audio_logged;      /* 首个音频包到达日志只打一次 */
+    /*
+     * 【avSkewMs 判据（2026-11-01，lead 定的量化口径）】
+     * 音画是否同步，不能看 JS 的 drift（那是 positionMs 与 seek 目标的差）。
+     * 真正可算的是「demuxer 时间轴位置」与「已送显内容时长」的差：
+     *     content_ms = (frames - seek_frames_base) / fps * 1000
+     *     avSkewMs   = (pos - base_ms) - content_ms
+     * 两路对齐时应稳定在 0 附近；音频比视频领先 (T-K) 时它停在 -(T-K)。
+     *
+     * 用标称 30fps（面板实际 29.67fps，1.1% 误差 ⇒ 每 5s 累积约 55ms），
+     * 所以只在 seek 后前几秒读它最有意义，不要拿十几秒后的值当绝对值。
+     */
+    unsigned long long seek_frames_base; /* seek/open 起点时的 probe.frames */
+    long long avskew_last_log_ms;
+    long long avskew_last_ms;            /* 最近一次算出的 avSkewMs（诊断） */
     int fps_cap;                 /* JS 传下来的帧率上限（0 = 不限制，P1-18） */
     /*
      * 【真机 2026-10-31】三连 seek 的第三跳视频 ffmpeg 秒退（CDN 掐流，
@@ -338,24 +415,29 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
         }
         if (strstr(cn, "h264")) {
             snprintf(desc, sizeof(desc),
-                     "queue max-size-buffers=8 max-size-bytes=0 max-size-time=0 ! "
+                     /* 视频队列必须按「时间/字节」限界，不能按 buffer 个数（见 PB2_VIDEO_QUEUE_*） */
+                     "queue max-size-buffers=0 max-size-bytes=%d "
+                     "max-size-time=%lld ! "
                      "h264parse ! mppvideodec rotation=%d ! "
                      "%s"
                      "videorate ! video/x-raw,framerate=%s ! "
                      "kmssink name=vsink plane-id=%d driver-name=rockchip sync=true "
                      "max-lateness=%d qos=true force-aspect-ratio=false skip-vsync=true "
                      "render-rectangle=%s",
+                     PB2_VIDEO_QUEUE_BYTES, (long long)PB2_VIDEO_QUEUE_NS,
                      g_w.rotate, fpscap, PB2_PANEL_RATE, PB2_KMS_PLANE_ID, PB2_MAX_LATENESS,
                      g_w.rect);
         } else if (strstr(cn, "h265") || strstr(cn, "hevc")) {
             snprintf(desc, sizeof(desc),
-                     "queue max-size-buffers=8 max-size-bytes=0 max-size-time=0 ! "
+                     "queue max-size-buffers=0 max-size-bytes=%d "
+                     "max-size-time=%lld ! "
                      "h265parse ! mppvideodec rotation=%d ! "
                      "%s"
                      "videorate ! video/x-raw,framerate=%s ! "
                      "kmssink name=vsink plane-id=%d driver-name=rockchip sync=true "
                      "max-lateness=%d qos=true force-aspect-ratio=false skip-vsync=true "
                      "render-rectangle=%s",
+                     PB2_VIDEO_QUEUE_BYTES, (long long)PB2_VIDEO_QUEUE_NS,
                      g_w.rotate, fpscap, PB2_PANEL_RATE, PB2_KMS_PLANE_ID, PB2_MAX_LATENESS,
                      g_w.rect);
         } else {
@@ -591,6 +673,47 @@ static int on_audio_buffer(GstPad *pad, GstPadProbeInfo *info, void *ud) {
     if (!buf) return GST_PAD_PROBE_OK;
     sz = gst_buffer_get_size(buf);
     atomic_fetch_add_explicit(&g_w.probe.abytes, (unsigned long long)sz, memory_order_relaxed);
+    /*
+     * 【A/V 同步判据（2026-11-01）】记首个音频包到达时刻。
+     *
+     * 单 FIFO 单 demux 下两路是同一个 pipe 的 interleave，到达时刻本来就
+     * 接近，所以这个差值只能证明"两路都真的在流动"，**不能**直接量化
+     * 音画偏差。量化靠两个量的交叉验证：
+     *   - pos（demuxer 时间轴，来自 query_position）
+     *   - frames / fps（真正送显的内容时长）
+     * 同步时 pos ≈ frames*1000/fps + baseMs。
+     */
+    if (!g_w.first_audio_logged) {
+        g_w.first_audio_logged = 1;
+        /*
+         * 【硬判据：音频首包距 seek/open 下发多长】
+         *
+         * 单 demux（本方案）：demuxer 只有一个 segment，segment.start = K
+         * （两路首帧 PTS 的最小值，即视频关键帧）。音频内容 T 的
+         * running_time = T - K，alsasink 必须等时钟走到 T-K 才消费，
+         * 于是 demuxer 的音频队列会先积压 -> 首包自然被推迟到 ~(T-K)。
+         * 实测 T-K 约 700~1300ms。
+         *
+         * 旧双 demux：音频 demuxer 的 segment.start = T，首包 running_time
+         * 从 0 起，几乎立刻被消费 -> 首包在 seek 后几十毫秒就到。
+         *
+         * 所以这个值落在 500ms 以上，就是「音频在等关键帧对齐」的物理证据，
+         * 不依赖 fps 精度、不依赖 avSkewMs 的推算。
+         */
+        {
+            /*
+             * 基准点必须用「本次 seek/open 的下发时刻」。
+             * seek 走的是重建管线，frame_epoch_ms 在 do_seek 里已被重置为本轮
+             * seek 的时刻；起播（do_open）同理。用 g_w.t_start 是错的 —— 那是
+             * 整个会话的启动时刻，seek 到第 3 次时差值会到 18000ms 以上，完全
+             * 失去意义（实测曾打出 +18640ms）。
+             */
+            long long ep = g_w.audio_epoch_ms > 0 ? g_w.audio_epoch_ms : g_w.t_start;
+            pb2_logf("av: first audio packet +%lldms after src start (size=%llu, "
+                     "expect>=500ms if waiting for keyframe sync)",
+                     pb2_now_ms() - ep, (unsigned long long)sz);
+        }
+    }
     return GST_PAD_PROBE_OK;
 }
 
@@ -674,6 +797,7 @@ static void teardown_pipeline_ex(int close_src) {
     }
     g_w.vsink = NULL;
     g_w.vsink_el = NULL;
+    g_w.rect_hidden = 0;
     g_w.asink = NULL;
     g_w.vbranch = 0;
     g_w.abranch = 0;
@@ -688,6 +812,8 @@ static void teardown_pipeline_ex(int close_src) {
     g_w.seek_pending = 0;
     g_w.seek_target = 0;
     pb2_probe_reset(&g_w.probe);
+    g_w.seek_frames_base = 0;
+    g_w.avskew_last_log_ms = 0;
     pb2_stats_patch_alive(&g_w.stats, 0);
     pb2_stats_patch_position(&g_w.stats, 0, 0);
     pb2_stats_patch_seek(&g_w.stats, 0, 0);
@@ -978,18 +1104,22 @@ static void do_open(pb2_open_req_t *req) {
      * pb2_session_stall_ms），也是 check_first_frame() 的 15s 计时基准。
      */
     g_w.frame_epoch_ms = t0;
+    g_w.audio_epoch_ms = t0;
     /* 【P1-1】新会话：清掉上一次的源死亡标记与独立节流器 */
     g_w.src_died = 0;
     g_w.src_died_at_ms = 0;
     g_w.last_src_check2_ms = 0;
     g_w.last_src_check_ms = 0;
     g_w.first_frame_logged = 0;
+    g_w.first_audio_logged = 0;
     g_w.first_frame_retries = 0; /* 每个新会话重新给满自愈配额 */
     /* 【P1-18】帧率上限：0 = 不限制，>0 时在 mppvideodec 之后插 videorate max-rate */
     g_w.fps_cap = req->fpsCap;
     pb2_stats_patch_resync(&g_w.stats, 0, 0);
 
     pb2_probe_reset(&g_w.probe);
+    g_w.seek_frames_base = 0;
+    g_w.avskew_last_log_ms = 0;
     pb2_stats_patch_state(&g_w.stats, PB2_STATE_OPENING);
     pb2_stats_patch_error(&g_w.stats, PB2_E_NONE, "");
     pb2_stats_patch_position(&g_w.stats, req->startMs, req->durationMs);
@@ -1189,7 +1319,9 @@ static void do_seek(long long target_ms) {
         pb2_stats_patch_error(&g_w.stats, PB2_E_NONE, "");
         pb2_logf("SEEK self-heal: rebuild ok, continue seek (+%lldms)", pb2_now_ms() - t0_pre);
         g_w.frame_epoch_ms = pb2_now_ms();
+        g_w.audio_epoch_ms = g_w.frame_epoch_ms;
         g_w.first_frame_logged = 0;
+        g_w.first_audio_logged = 0;
         g_w.last_src_check_ms = 0;
         g_w.last_src_check2_ms = 0; /* 【P1-1】重新探测新源 */
         g_w.src_died = 0;
@@ -1297,10 +1429,14 @@ static void do_seek(long long target_ms) {
         pb2_stats_patch_position(&g_w.stats, clamped, dur);
         pb2_stats_patch_seek(&g_w.stats, 0, clamped);
         pb2_probe_reset(&g_w.probe);
+        g_w.seek_frames_base = 0;
+        g_w.avskew_last_log_ms = 0;
         g_w.seek_frame_reported = 0; /* 首帧到达时由 on_video_buffer 报端到端耗时 */
         /* 【P0-1】seek 后重新等首帧（落点第一帧），超时/源先死同样判 error */
         g_w.frame_epoch_ms = pb2_now_ms();
+        g_w.audio_epoch_ms = g_w.frame_epoch_ms;
         g_w.first_frame_logged = 0;
+        g_w.first_audio_logged = 0;
         g_w.last_src_check_ms = 0;
         g_w.last_src_check2_ms = 0; /* 【P1-1】新源重新探测，清掉上一轮的死亡标记 */
         g_w.src_died = 0;
@@ -1404,6 +1540,8 @@ static void do_seek(long long target_ms) {
         pb2_stats_patch_seek(&g_w.stats, 0, real);
     }
     pb2_probe_reset(&g_w.probe);
+    g_w.seek_frames_base = 0;
+    g_w.avskew_last_log_ms = 0;
     g_w.fps_frames_base = 0;
     g_w.last_fps_ms = pb2_now_ms();
     g_w.fps_calc = 0;
@@ -1413,7 +1551,9 @@ static void do_seek(long long target_ms) {
      * 首帧一到（on_video_buffer）就自动清掉。
      */
     g_w.frame_epoch_ms = pb2_now_ms();
+    g_w.audio_epoch_ms = g_w.frame_epoch_ms;
     g_w.first_frame_logged = 0;
+    g_w.first_audio_logged = 0;
     g_w.last_src_check_ms = 0;
     g_w.last_src_check2_ms = 0; /* 【P1-1】新源重新探测 */
     g_w.src_died = 0;
@@ -1522,6 +1662,29 @@ static void refresh_position(void) {
     pb2_stats_patch_position(&g_w.stats, g_w.last_pos_ms, dur);
 
     /*
+     * 【avSkewMs】量化音画偏差（口径见 pb2_worker_t 里 seek_frames_base 注释）。
+     *
+     * 每 2 秒打一行，只在有帧之后算。判读方法：
+     *   - 起播/seek 后立即读：应该收敛到 0 附近（±100ms）
+     *   - 若稳定停在某个负值不动：视频落后音频，那个值 ≈ -(T-K)
+     *   - 随时间缓慢单调漂移 = fps 标称误差（29.67 vs 30），不是音画不同步
+     */
+    if (g_w.first_frame_logged) {
+        long long now2 = pb2_now_ms();
+        if (now2 - g_w.avskew_last_log_ms >= 2000) {
+            unsigned long long frames =
+                atomic_load_explicit(&g_w.probe.frames, memory_order_relaxed);
+            unsigned long long df = frames - g_w.seek_frames_base;
+            long long content_ms = (long long)((double)df * 1000.0 / 30.0 + 0.5);
+            long long avskew = (g_w.last_pos_ms - g_w.base_ms) - content_ms;
+            g_w.avskew_last_log_ms = now2;
+            g_w.avskew_last_ms = avskew;
+            pb2_logf("av: avSkewMs=%lld pos=%lld base=%lld frames=%llu content=%lldms",
+                     avskew, g_w.last_pos_ms, g_w.base_ms, frames, content_ms);
+        }
+    }
+
+    /*
      * audioBytes：把 probe 的原子计数搬到 stats 快照里。
      * status() 只读快照（无锁），所以必须在这里同步，不能让 JS 去读 probe。
      */
@@ -1611,6 +1774,12 @@ static void check_plane(void) {
     if (!g_w.pipeline_alive) return;
     if (!g_w.vbranch) return;
     if (g_w.eos) return;
+    /* 平面是我们自己隐藏的（键盘避让 1x1），不是丢失，直接跳过 */
+    if (g_w.rect_hidden) {
+        g_w.plane_lost_streak = 0;
+        pb2_stats_patch_plane(&g_w.stats, -1, 0); /* -1 = 未检查（主动隐藏） */
+        return;
+    }
 
     g_w.plane_lost_streak++;
     /* 连续丢失达到阈值才报异常；单次抖动只留一行 trace */
@@ -1679,6 +1848,7 @@ static void check_first_frame(void) {
                         g_w.frame_epoch_ms = pb2_now_ms();
                         g_w.last_src_check_ms = g_w.frame_epoch_ms;
                         g_w.first_frame_logged = 0;
+                        g_w.first_audio_logged = 0;
                         pb2_stats_patch_state(&g_w.stats, PB2_STATE_PLAYING);
                         pb2_stats_patch_error(&g_w.stats, PB2_E_NONE, "");
                         pb2_logf("first frame: retry restart done +%lldms (retries=%d)",
@@ -1823,7 +1993,8 @@ static void process_cmd(pb2_cmd_t *c) {
              * 【键盘避让】运行时改 render-rectangle，不重建管线。
              * i64 = x | y<<16 | w<<32 | h<<48（见 queue.h）。
              * gst_util_set_object_arg 实测（spike-report §12）立即生效，
-             * 帧率不受影响。w/h 为 0 时等效隐藏平面。
+             * 帧率不受影响。w/h 传 0（隐藏意图）会被下面提升成 1x1 —— 真机
+             * 实测 0x0 会被 kmssink 当成「未设置」而回退全屏，见下方注释。
              * 只在管线活着且 vsink 存在时执行；JS 侧在 open 前/后任意时刻
              * 都可以发，worker 空闲时处理，零阻塞。
              *
@@ -1838,12 +2009,88 @@ static void process_cmd(pb2_cmd_t *c) {
                 int ry = (int)(short)((c->i64 >> 16) & 0xFFFF);
                 int rw = (int)(unsigned short)((c->i64 >> 32) & 0xFFFF);
                 int rh = (int)(unsigned short)((c->i64 >> 48) & 0xFFFF);
+                int want_hide;
                 char rect[48];
-                /* w/h==0 表示隐藏平面，别让偏移把 0 宽矩形变成非零 */
-                if (rw > 0 && rh > 0) rx += PB2_PANEL_X_OFFSET;
+                long long t0_rect = pb2_now_ms();
+
+                /*
+                 * 【隐藏平面必须用 1x1，绝不能用 0x0】真机实测
+                 * （/tmp/rect3.sh，videotestsrc + kmssink plane-id=76，
+                 *  每轮读 /sys/kernel/debug/dri/0/summary 的 Esmart1-win0 段）：
+                 *   <107,0,240,427> → dst pos[107,0] rect[240 x 427]  正常
+                 *   <0,0,0,0>       → dst pos[0,0]   rect[480 x 960]  **全屏！**
+                 *   <0,0,1,1>       → dst pos[0,0]   rect[1 x 1]      真正不可见
+                 * 四种情况全都 rc=0、无 error/warn —— kmssink 对零宽高既不报错
+                 * 也不隐藏，而是回退成「未设置矩形 ⇒ 全屏」。键盘避让期间若
+                 * 传 0x0，视频平面会盖住整个 falcon 键盘（960x266 全屏 miniapp），
+                 * 用户连候选词都点不到。所以这里把 0（以及任何 <1 的值）
+                 * 统一提升成 1x1：几何合法、单个像素在 480x960 面板上不可见。
+                 */
+                if (rw < 1) rw = 1;
+                if (rh < 1) rh = 1;
+                /* 隐藏时也不要加面板偏移，免得 1x1 被推到非零坐标 */
+                if (rw > 1 || rh > 1) rx += PB2_PANEL_X_OFFSET;
+                want_hide = (rw <= 1 && rh <= 1) ? 1 : 0;
                 snprintf(rect, sizeof(rect), "<%d,%d,%d,%d>", rx, ry, rw, rh);
-                gst_util_set_object_arg(g_w.vsink_el, "render-rectangle", rect);
-                pb2_logf("SET_RECT %s", rect);
+
+                /*
+                 * ================== kmssink render-rectangle 是单向棘轮 ==================
+                 *
+                 * 真机实测（.tmp/mkv/rect35.c，**真实管线结构**：kmssink 在
+                 * parse_bin 出来的分支 bin 内、sync=true、videorate 上游）：
+                 *
+                 *   240x427 --直接 set--> 1x1        生效（pos[0,0] rect[1x1]）
+                 *   1x1 --直接 set--> 240x427        **无效，6 轮全部停在 1x1**
+                 *   1x1 --pipe PAUSED 循环--> 240x427 **无效**（rect38，5 轮全失败）
+                 *   1x1 --sink READY/PLAYING--> 240x427 **无效**（rect33，平面直接 RELEASED 不回来）
+                 *   1x1 --sink NULL--> 240x427       **无效**（rect36(b)，RELEASED）
+                 *   1x1 --pipe READY -> set rect -> pipe PLAYING--> 240x427  **有效**（rect36(a)）
+                 *
+                 * 即：**只能缩小，不能放大**；唯一可靠的「放大」途径是让整条管线
+                 * 过一次 READY 重置。而 pipe READY 会关掉 filesrc 的 FIFO 读端、
+                 * 流位置全部丢失 —— 对我们这种「ffmpeg → FIFO → filesrc」的边下
+                 * 边播架构来说，等价于「按当前播放位置重新拉一路源」，也就是
+                 * 走已经充分验证过的 do_seek 重启路径（三跳 drift=0ms、
+                 * first frame 413~516ms）。
+                 *
+                 * 所以这里的分支策略是：
+                 *   1) 请求隐藏  -> 直接 set 1x1（快，~0ms，实测有效），记 rect_hidden
+                 *   2) 请求恢复且当前是隐藏态 -> 更新 g_w.rect 并**投递一次原地 seek**，
+                 *      build_pipeline 会用新的 g_w.rect 建管线，平面按正确矩形重建
+                 *   3) 请求改矩形且从未隐藏过 -> 直接 set（正常尺寸之间不会触发棘轮）
+                 *
+                 * 为什么 1x1 之后必须走 seek 而不能「重设 render-rectangle 再让
+                 * kmssink 自己重配」：render-rectangle 是 **write-only** 属性
+                 * （g_object_get 报 "property 'render-rectangle' of object class
+                 * 'GstKMSSink' is not readable"），kmssink 只在 sink 重新
+                 * configure（分配 plane）时读取它，而 1x1 之后 sink 不再重新
+                 * configure，所以设什么值都不会被读。
+                 */
+                if (want_hide) {
+                    gst_util_set_object_arg(g_w.vsink_el, "render-rectangle", rect);
+                    g_w.rect_hidden = 1;
+                    pb2_logf("SET_RECT %s (hide) took %lldms", rect, pb2_now_ms() - t0_rect);
+                } else if (g_w.rect_hidden) {
+                    /*
+                     * 恢复：把目标矩形写进 g_w.rect（build_pipeline 用它），
+                     * 然后投递一次原地 seek 让管线带着新矩形重建。
+                     * 走 seek 的 debounce 通道（seek_last_ms 回拨到过去，
+                     * 下一次 worker tick 立刻执行），复用全部已验证代码。
+                     */
+                    snprintf(g_w.rect, sizeof(g_w.rect), "%s", rect);
+                    g_w.rect_hidden = 0;
+                    g_w.seek_target = g_w.last_pos_ms > 0 ? g_w.last_pos_ms : 0;
+                    g_w.seek_pending = 1;
+                    g_w.seek_last_ms = pb2_now_ms() - PB2_SEEK_DEBOUNCE_MS - 1;
+                    pb2_stats_patch_seek(&g_w.stats, 1, g_w.seek_target);
+                    pb2_logf("SET_RECT %s (restore: 1x1 无法放大，投递原地 seek@%lldms 重建管线)",
+                             rect, g_w.seek_target);
+                } else {
+                    /* 正常尺寸之间改矩形：直接 set 即可，不会踩棘轮 */
+                    gst_util_set_object_arg(g_w.vsink_el, "render-rectangle", rect);
+                    snprintf(g_w.rect, sizeof(g_w.rect), "%s", rect);
+                    pb2_logf("SET_RECT %s took %lldms", rect, pb2_now_ms() - t0_rect);
+                }
             }
             break;
         case PB2_CMD_STOP:

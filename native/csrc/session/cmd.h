@@ -42,28 +42,34 @@ int pb2_mute_enabled(void);
 const char *pb2_mute_reason(void);
 
 /*
- * 配置混音器：让声音从扬声器出来并且不是静音。
- *   amixer -c 0 sset "Playback Path" "SPK"
- *   amixer -c 1 sset "Master" 100%
- * alsasink 默认打开 card1（aw883xx 功放），它的 Master 出厂是 0,0（-46dB 静音），
- * 所以两条都必须做。
+ * 确保输出通路可用 —— **绝不改变音量**。
+ *
+ * 【2026-11-01 用户反馈】「开始播放时音量默认是特别大的，不管我在系统设置里
+ * 是多少，就算是关闭声音，在播放时也会出现声音」。
+ * 根因：这里原来无条件执行 `amixer -c 0 sset "Playback Path" "SPK"` 和
+ * `amixer -c 1 sset "Master" 100%`，把用户在系统设置里的选择全盖掉了。
+ *
+ * 现在只做一件事：**读 Playback Path，若为 OFF 才切 SPK**（OFF = 无输出通路，
+ * 不切就完全没声，这是路由问题不是音量问题）。若已是 SPK/HP/BT 等，一律不动。
+ * card1 Master 完全不碰 —— 用户音量就是最终音量。
+ *
+ * 这与旧 v1 实现（`native/csrc/player.c` 的 `audio_route_ensure()`）语义一致：
+ * 那里也是「只在 OFF 时切 SPK，从不碰 Master」。
  *
  * **静音开关为真时直接返回 0 且不执行任何命令。**
  * 只在 worker 线程调用。
- *
- * 【P1-12】非静音时返回 0 当且仅当**两条都经 sget 回读确认生效**：
- *   card0 回读含 `Item0: 'SPK'` 且 card1 回读含 `[100%]`。
- * 原来写成 `ok0 || ok1` 的语义已废弃 —— 只成功一半会被记成完全成功。
- * 判定不看 sset 的退出码（宿主 SIGCHLD=SIG_IGN 时拿不到，见 pb2_run）。
  */
 int pb2_mixer_setup(void);
 
 /*
- * 强制静音：把 card0 Playback Path 设为 OFF、card1 Master 设为 0。
+ * 强制静音：只把 card0 Playback Path 设为 OFF，**不碰 card1 Master**。
+ *
+ * 为什么不再设 Master=0：Master 是用户/系统的音量设置，压到 0 就等于销毁
+ * 用户设置且无法还原。Playback Path=OFF 是纯路由开关，已足够静音。
  *
  * **不受静音开关影响，静音模式下照样执行** —— 它本身就是"保持静音"这条
  * 硬性约束的执行者（release / 退出时也要走它，保证会话结束后设备仍是静音）。
- * 需要"静音时零 amixer"的只有 pb2_mixer_setup() 那条开扬声器的路径。
+ * 需要"静音时零 amixer"的只有 pb2_mixer_setup() 那条开通路的路径。
  *
  * 【P1-12】返回 0 当且仅当两路 pb2_run 都返回 0（原来用 || 语义）。
  */

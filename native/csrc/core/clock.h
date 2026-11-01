@@ -16,6 +16,13 @@ long long pb2_now_ms(void);
 long long pb2_now_us(void);
 
 /*
+ * 阻塞睡眠（毫秒）。用 nanosleep 循环实现，被信号打断会自动补足剩余时间
+ * （EINTR 时重算），不依赖 usleep（POSIX 已废弃且遇 EINTR 直接返回）。
+ * 只在 worker 线程里用，绝不可以在 JS 线程调用 —— JSAPI 零阻塞是硬规则。
+ */
+void pb2_sleep_ms(long long ms);
+
+/*
  * 读屏幕是否处于熄屏/断电状态。
  * 返回 1 = 熄屏（不应该指望平面还在），0 = 亮屏，-1 = 无法判断。
  *

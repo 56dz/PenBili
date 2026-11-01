@@ -577,18 +577,32 @@
 }
 
 /* 简介：可滚动区（手绘稿左列上方「视频标题和简介」）
- * 高度从 96(lnes 7) 收到 72(lines 5)，把最下面 20px 让给 .pnote（播放提示）。
+ * 高度从 96(lines 7) 收到 72，把最下面 20px 让给 .pnote（播放提示）。
  * 192px 的 .pleft-info 是固定预算：8(pt) + 26(pback) + 6 + 34(ptitle) + 4 + 14(pup)
  *   + 6 + 72(pdesc) + 4 + 16(pnote) = 190，留 2px 余量。
- * 72 / 10px 字号 ≈ 7 行余量，lines 取 5 留出上下行距，避免最后一行被裁半截。 */
+ *
+ * 【为什么是 scroller 不是 text】用户反馈「长简介无法上下滑动，看不到全部」。
+ * 之前这里是 <text lines:5>，超过 5 行直接省略号截断 —— 用户没有任何办法看全文。
+ * 现在外层是 scroller，内层 .pdesc-text 是**不带 lines** 的 text：带 lines 会先在
+ * scroller 内部截断再滚动，等于白滚。
+ *
+ * 【必须显式定高】scroller 在 column 容器里如果不给 flex-grow:0 + flex-basis:72px，
+ * 会被内容撑开（高度变成简介全文高度），把 .pnote 和下方 .pleft-btns 挤出可视区。
+ * height:72px 与 flex-basis 同时写是刻意的：前者兜底，后者让 flex 布局不参与拉伸。 */
 .pdesc {
   margin-top: 6px;
   width: 193px;
   height: 72px;
+  flex-grow: 0;
+  flex-shrink: 0;
+  flex-basis: 72px;
+}
+
+/* 简介正文：不设 lines / text-overflow，全文参与滚动 */
+.pdesc-text {
+  width: 193px;
   font-size: 10px;
   color: @text-color-dim;
-  lines: 5;
-  text-overflow: ellipsis;
 }
 
 /* 播放提示行（「定位中…」「加载中…」「音画不同步，正在恢复…」「起播失败 · 可返回重试」…）

@@ -104,6 +104,7 @@ async function main() {
     getScreenState,
     isKeepingScreen,
     needsBrightRestore,
+    keepRetryNeeded,
     screenStateName,
     KEEP_BRIGHT_MIN,
     KEEP_BRIGHT_RESTORE,
@@ -284,10 +285,14 @@ async function main() {
     normalizeState,
     waitLanded,
     waitFirstFrame,
+    isStreamEnded,
+    END_TAIL_MS,
+    END_DEAD_TAIL_MS,
     SEEK_LAND_NEAR_MS,
     SEEK_LAND_DEADLINE_MS
   } = await import('../src/services/play_session.js');
   const { fetchReplies, addReply, parseReplies, normalizeReply, replyType } = await import('../src/services/bili/reply.js');
+  const { isAutotestSeedEnabled, readAutotestSeed } = await import('../src/services/autotest_seed.js');
   const {
     opusToBlocks,
     opsToBlocks,
@@ -908,6 +913,17 @@ async function main() {
     // 恢复档位必须高于阈值，否则兜底会陷入"救回来又被判为调暗"的循环
     assert.ok(KEEP_BRIGHT_RESTORE > KEEP_BRIGHT_MIN);
   });
+  test('screen: 深熄态 keep 需连发两次（retry 判据）', () => {
+    /* 真机实测（2026-11-01，hal-screen keep）：从 bp=4 背光断电状态，
+     * 第 1 次 keep 只把 /tmp/.screen_state 置 1、bp 仍 4；第 2 次才 bp=0。
+     * 所以 keepScreenOnce() 在 keep 后复检 state，仍是 OFF(1) 就再补一次。 */
+    assert.strictEqual(keepRetryNeeded(1), true, 'OFF(1) 必须补第二次 keep');
+    assert.strictEqual(keepRetryNeeded(0), false, '亮屏不要重复发，省 JSAPI 调用');
+    assert.strictEqual(keepRetryNeeded(3), false, 'DIM(3) 由 setBrightness 兜底，无需再 keep');
+    assert.strictEqual(keepRetryNeeded(null), false, '读不到状态时交给硬兜底');
+    assert.strictEqual(keepRetryNeeded(undefined), false);
+    assert.strictEqual(keepRetryNeeded('1'), true, '字符串形态同样识别（JSAPI 可能回字符串）');
+  });
   test('screen: 息屏超时档位落在 600~1200s（<1200 才不被 daemon 重置脚本清掉）', () => {
     // /usr/bin/check_stop_input_deamon_times.sh：/tmp/stop_input_event_daemon 超过 1200s 会
     // killall -USR2 input-event-daemon 把配置重置掉，所以设得比 1200 小才有意义。
@@ -1112,8 +1128,71 @@ async function main() {
     assert.ok(w.calls.release >= 1);
   });
 
-  test('probe: watch 无帧 → failedId=watch 且停掉播放', async () => {
-    const w = fakeWorld();
+  // ---------------- autotest 种子守卫（防止普通用户被自动播放打扰） ----------------
+  test('autotest: 只有 enabled+autotest 双开关都显式 true 才自动播', () => {
+    // 正例：唯一合法的开启形态
+    assert.strictEqual(isAutotestSeedEnabled({ enabled: true, autotest: true }), true);
+    assert.strictEqual(
+      isAutotestSeedEnabled({ version: 1, enabled: true, autotest: true, playProbe: 150, pollEvery: 2, soakBv: 'BV1SDJC6dE4t' }),
+      true
+    );
+  });
+
+  test('autotest: 残留种子（只有 playProbe / 只有 enabled / 缺字段）一律不自动播', () => {
+    // 这些正是真机 preferences.json 里会残留的形态 —— 一个都不许触发自动播放
+    assert.strictEqual(isAutotestSeedEnabled(null), false);
+    assert.strictEqual(isAutotestSeedEnabled(undefined), false);
+    assert.strictEqual(isAutotestSeedEnabled({}), false);
+    assert.strictEqual(isAutotestSeedEnabled({ playProbe: 150 }), false, '只有 playProbe 数值 → 残留');
+    assert.strictEqual(isAutotestSeedEnabled({ enabled: true }), false, '缺 autotest → 残留');
+    assert.strictEqual(isAutotestSeedEnabled({ autotest: true }), false, '缺 enabled → 残留');
+    assert.strictEqual(isAutotestSeedEnabled({ enabled: true, playProbe: 150, soakBv: 'BV1SDJC6dE4t' }), false);
+    // 旧的布尔/字符串写法是历史遗留，不再是开启信号（等于给残留开后门）
+    assert.strictEqual(isAutotestSeedEnabled(true), false, '布尔 true 不认');
+    assert.strictEqual(isAutotestSeedEnabled('true'), false, '字符串 true 不认');
+    assert.strictEqual(isAutotestSeedEnabled([], ), false);
+    // 类型必须严格是布尔 true，不接受 'true' / 1 —— 不猜类型
+    assert.strictEqual(isAutotestSeedEnabled({ enabled: 'true', autotest: 'true' }), false);
+    assert.strictEqual(isAutotestSeedEnabled({ enabled: 1, autotest: 1 }), false);
+  });
+
+  test('autotest: readAutotestSeed 对脏值退化（不因一个脏字段触发意外行为）', () => {
+    const empty = readAutotestSeed(null);
+    assert.strictEqual(empty.soak, 0);
+    assert.strictEqual(empty.soakBv, '', '无种子 → 不指定稿件');
+    assert.strictEqual(empty.playProbe, 0, 'playProbe=0 → 不跑起播探针');
+    assert.strictEqual(empty.pollEvery, 5, '默认 5s');
+    assert.strictEqual(empty.liveOnly, false);
+    assert.strictEqual(empty.noKeep, false);
+    assert.strictEqual(empty.probeRect, false);
+
+    // soakBv 形态不对 → 当作没指定（脏值绝不能被拼进请求 URL）
+    const badBv = readAutotestSeed({ enabled: true, autotest: true, soakBv: 'javascript:alert(1)' });
+    assert.strictEqual(badBv.soakBv, '');
+    assert.strictEqual(readAutotestSeed({ enabled: true, autotest: true, soakBv: 'BV123' }).soakBv, '');
+
+    // 正常种子逐字段还原
+    const s = readAutotestSeed({
+      version: 1, enabled: true, autotest: true, playProbe: 150, pollEvery: 2,
+      soak: 60, soakBv: 'BV1SDJC6dE4t', liveOnly: false, liveRoom: 0,
+      wbiStress: 0, liveHold: 15000, noKeep: true, probeSeek: 3, probePause: 2, probeRect: true
+    });
+    assert.strictEqual(s.playProbe, 150);
+    assert.strictEqual(s.pollEvery, 2);
+    assert.strictEqual(s.soak, 60);
+    assert.strictEqual(s.soakBv, 'BV1SDJC6dE4t');
+    assert.strictEqual(s.liveHold, 15000);
+    assert.strictEqual(s.noKeep, true);
+    assert.strictEqual(s.probeSeek, 3);
+    assert.strictEqual(s.probePause, 2);
+    assert.strictEqual(s.probeRect, true);
+    // pollEvery 下界 1（诊断时要能设 1s）
+    assert.strictEqual(readAutotestSeed({ enabled: true, autotest: true, pollEvery: 0 }).pollEvery, 5);
+    assert.strictEqual(readAutotestSeed({ enabled: true, autotest: true, pollEvery: 1 }).pollEvery, 1);
+    assert.strictEqual(readAutotestSeed({ enabled: true, autotest: true, pollEvery: -3 }).pollEvery, 5);
+  });
+
+  test('probe: watch 无帧 → failedId=watch 且停掉播放', async () => {    const w = fakeWorld();
     w.player.status = async () => ({ ok: true, state: 'playing', frames: 0, positionMs: 0 });
     const r = await runProbe(w);
     assert.strictEqual(r.ok, false);
@@ -2600,6 +2679,77 @@ async function main() {
     assert.strictEqual(none.ok, false);
     assert.strictEqual(none.error, 'NO_FRAME');
     assert.strictEqual(none.frameMs, -1);
+  });
+  /* ---------- n9：流末尾判据（播放到结尾的自愈死循环） ----------
+   * 真机 2026-11-01 08:22 的死循环：视频 dur=114900 播到 114879 后源 ffmpeg 正常退出、
+   * 但 EOS 一直没到 → native 的 state 永远停在 playing（只 patch_alive(0)）→ JS 看门狗
+   * 判假死 → 原地 seek(pos=118776，被 clamp 到 113900) → 重开 ffmpeg 读 1 秒又死 →
+   * 每 60s 一轮无限循环，界面永远不显示「已播完」。
+   * 修法：用 JS 可得的量（位置 vs 时长、pipelineAlive）在自愈之前先判「其实播完了」。 */
+  test('play_session: isStreamEnded 判末尾（位置到时长的最后 1s）', () => {
+    const dur = 114900;
+    // 阈值常量本身也要锁住（改小会让正常播放被提前判完）
+    assert.strictEqual(END_TAIL_MS, 1000);
+    assert.strictEqual(END_DEAD_TAIL_MS, 3000);
+    assert.strictEqual(isStreamEnded({ positionMs: 114879, pipelineAlive: true }, dur), true);
+    assert.strictEqual(isStreamEnded({ positionMs: 113900, pipelineAlive: true }, dur), true);
+    assert.strictEqual(isStreamEnded({ positionMs: dur, pipelineAlive: true }, dur), true);
+    // 越过时长（真机那次 pos=118776 > dur）同样算末尾
+    assert.strictEqual(isStreamEnded({ positionMs: 118776, pipelineAlive: true }, dur), true);
+    assert.strictEqual(isStreamEnded({ positionMs: 12000, pipelineAlive: true }, dur), false);
+    // 显式传 durationMs 优先于 st.durationMs
+    assert.strictEqual(isStreamEnded({ positionMs: 50000, durationMs: 51000 }, dur), false);
+    assert.strictEqual(isStreamEnded({ positionMs: 50000, durationMs: 51000 }), true);
+  });
+  test('play_session: isStreamEnded「管线已死 + 贴近末尾」也算播完（真机死循环形态）', () => {
+    const dur = 114900;
+    /* native 的 alive=0 是"源读完退出"的典型形态：此时位置通常离末尾 1~3s 内。
+     * 这是本缺陷的关键分支 —— state 仍是 playing，只有 pipelineAlive 变了。 */
+    assert.strictEqual(isStreamEnded({ positionMs: 113000, pipelineAlive: false }, dur), true);
+    assert.strictEqual(isStreamEnded({ positionMs: 112000, pipelineAlive: false }, dur), true);
+    // 但管线死了且位置很靠前 → 不是播完，交给看门狗真去救
+    assert.strictEqual(isStreamEnded({ positionMs: 60000, pipelineAlive: false }, dur), false);
+    // 管线活着、位置靠前 → 更不是播完
+    assert.strictEqual(isStreamEnded({ positionMs: 112000, pipelineAlive: true }, dur), false);
+  });
+  test('play_session: isStreamEnded 正常播放中不误判 / 直播不误判', () => {
+    /* 这三条是防回归的核心：误判会把正在播的视频提前打成「已播完」。 */
+    // ① 正常播放中（位置远小于时长）绝不判完
+    assert.strictEqual(isStreamEnded({ positionMs: 0, pipelineAlive: true }, 114900), false);
+    assert.strictEqual(isStreamEnded({ positionMs: 30000, pipelineAlive: true }, 114900), false);
+    assert.strictEqual(isStreamEnded({ positionMs: 90000, pipelineAlive: true }, 114900), false);
+    // ② 直播（dur=0 = 时长未知）永远不判末尾，哪怕位置很大、管线已死
+    assert.strictEqual(isStreamEnded({ positionMs: 3600000, pipelineAlive: true }, 0), false);
+    assert.strictEqual(isStreamEnded({ positionMs: 3600000, pipelineAlive: false }, 0), false);
+    assert.strictEqual(isStreamEnded({ positionMs: 999999 }, undefined), false);
+    // ③ 位置为 0（还没起来）不判完，交给「无首帧」看门狗
+    assert.strictEqual(isStreamEnded({ positionMs: 0, pipelineAlive: false }, 114900), false);
+    // ④ 脏输入不崩
+    assert.strictEqual(isStreamEnded(null, 114900), false);
+    assert.strictEqual(isStreamEnded(undefined, 114900), false);
+    assert.strictEqual(isStreamEnded('x', 114900), false);
+    assert.strictEqual(isStreamEnded({}, 114900), false);
+    /* ⑤ 契约：isStreamEnded 是**纯位置判据**，不看 st.state。
+     * 这是故意的 —— 真机上末尾时 state 停在 'playing'（EOS 没来），若函数内部
+     * 依赖 state 就永远判不出来。而"暂停在最后一秒不算播完"的门禁放在调用点
+     * （index.vue 的 tick 里 `st.state === 'playing' &&` 前置），职责分离、各自可测。 */
+    assert.strictEqual(isStreamEnded({ positionMs: 114879, state: 'playing' }, 114900), true);
+    assert.strictEqual(isStreamEnded({ positionMs: 114879, state: 'paused' }, 114900), true);
+    assert.strictEqual(isStreamEnded({ positionMs: 114879 }, 114900), true);
+  });
+  test('play_session: readStatus 同时给出 durationMs 与 nativeDurationMs（n10 别名）', async () => {
+    const w = fakePlayDeps();
+    w.player.status = async () => ({ ok: true, state: 'playing', durationMs: 114900, positionMs: 5000 });
+    const st = await readStatus(w);
+    /* 页面 tryRecover 读的是 st.durationMs（不是 nativeDurationMs）→ 以前恒 0 →
+     * seekBy 不设上界 → 末尾还能往前 seek。两个字段必须同值。 */
+    assert.strictEqual(st.durationMs, 114900);
+    assert.strictEqual(st.nativeDurationMs, 114900);
+    // 缺字段的老 native → 两个都 0
+    w.player.status = async () => ({ ok: true, state: 'playing', positionMs: 5000 });
+    const st2 = await readStatus(w);
+    assert.strictEqual(st2.durationMs, 0);
+    assert.strictEqual(st2.nativeDurationMs, 0);
   });
   test('play_session: ensureMixin 会话级缓存（第二次不再打接口）', async () => {
     const w = fakePlayDeps();

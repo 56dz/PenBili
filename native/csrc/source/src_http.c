@@ -22,26 +22,27 @@
  *
  * 单源单 FIFO（input 有，input2 空）：
  *   ffmpeg -hide_banner -loglevel error -user_agent UA -headers "Referer: R\r\n"
- *          -ss BASE -i INPUT -map 0:v? -map 0:a? -c copy -f matroska -
- * 双源双 FIFO（input + input2，B 站 DASH）：
- *   视频：ffmpeg ... -ss BASE -i INPUT  -map 0:v? -c copy -f matroska -> vfifo
- *   音频：ffmpeg ... -ss BASE -i INPUT2 -map 0:a? -c copy -f matroska -> afifo
+ *          -ss BASE -i INPUT -map 0:v? -map 0:a? -c copy -copyts -f matroska -
+ * 双源单 FIFO（input + input2，B 站 DASH，A/V 同步方案 A）：
+ *   ffmpeg ... -ss BASE -i INPUT -ss BASE -i INPUT2 -map 0:v? -map 1:a?
+ *          -c copy -copyts -fflags +genpts -f matroska -        -> 同一 条 FIFO
  *
  * 要点：
  *   1) **-ss 必须在 -i 之前**（input seek 走索引，快且精确）
- *   2) **-f matroska 必须显式给**（输出到 "-" 时 ffmpeg 无法从扩展名推断）
- *   3) **-map 用 `?` 后缀**，这样没有音轨时不会因 "does not contain any stream" 失败
+ *   2) **-ss 只作用于紧跟的那个输入**，双输入时两路都要写一遍（踩过的坑）
+ *   3) **-f matroska 必须显式给**（输出到 "-" 时 ffmpeg 无法从扩展名推断）
+ *   4) **-map 用 `?` 后缀**，这样没有音轨时不会因 "does not contain any stream" 失败
  *      （旧实现 player.c 就在这里踩过坑）
- *   4) `-loglevel error` 抑制 "Broken pipe" 噪音（gst 关读端时 ffmpeg 必然报这个）
- *   5) 双 FIFO 时每路只 `-map` 自己的那一种流 —— 这是 lead 实测的唯一可靠解法，
- *      单 FIFO 双输入会让第二路时间戳不重基、matroskademux 永久卡 preroll。
+ *   5) `-loglevel error` 抑制 "Broken pipe" 噪音（gst 关读端时 ffmpeg 必然报这个）
+ *   6) 双输入合计**只有一个** demuxer/segment，音视频 PTS 同轴，seek 后天然对齐；
+ *      详见 MAP_DUAL_IN 处注释（旧的「一源一 ffmpeg、一源一 FIFO」会让视频从
+ *      关键帧 K 起、音频从 T 起，两条独立 segment 各自重基 => 音频领先 T-K）。
  *
  * ============================ FIFO 生命周期 ============================
- *   1) mkfifo(/tmp/pb2/pb2-<pid>-<seq>.fifo, 0600)               单 FIFO 模式
- *      mkfifo(/tmp/pb2/pb2-<pid>-<seq>-v.fifo / -a.fifo, 0600)   双 FIFO 模式（B 站 DASH）
- *      两条 FIFO 用同一个 <seq>，后缀区分视频/音频
+ *   1) mkfifo(/tmp/pb2/pb2-<pid>-<seq>.fifo, 0600)
+ *      现在所有 HTTP 路径都只有**一条** FIFO（双输入也合并成一条）；
+ *      pb2_src_t 仍保留 fifo2/hold_fd2 字段（-1 / 空串）供本地双文件路径使用。
  *   2) hold_fd = open(fifo, O_RDWR|O_CLOEXEC|O_NONBLOCK)  <- 关键，见 src_http.h
- *      双 FIFO 模式有 hold_fd / hold_fd2 两个
  *   3) posix_spawn ffmpeg，用 posix_spawn_file_actions_addopen 把它的 stdout
  *      直接指到 FIFO 的 O_WRONLY 打开（不是 dup2）
  *   4) 返回 fifo 路径给 session，session 交给 filesrc
@@ -78,8 +79,31 @@ static char *g_min_env[] = {(char *)"PATH=/usr/bin:/bin:/sbin:/usr/sbin",
 
 /* ffmpeg 输出模式 */
 #define MAP_BOTH 0  /* -map 0:v? -map 0:a?（单源，两路都在一个容器里） */
-#define MAP_VIDEO 1 /* -map 0:v?（双 FIFO 的视频那条） */
-#define MAP_AUDIO 2 /* -map 0:a?（双 FIFO 的音频那条） */
+#define MAP_VIDEO 1 /* -map 0:v?（旧双 FIFO 的视频那条，已不再使用） */
+#define MAP_AUDIO 2 /* -map 0:a?（旧双 FIFO 的音频那条，已不再使用） */
+/*
+ * 【A/V 同步修复（方案 A）】双输入单输出：
+ *   ffmpeg -ss T -i <videoUrl> -ss T -i <audioUrl>
+ *          -map 0:v? -map 1:a? -c copy -copyts -fflags +genpts [-t ..]
+ *          -f matroska -            -> 一条 FIFO
+ *
+ * 为什么改成这样（旧双 FIFO 方案的根本缺陷）：
+ *   旧方案视频、音频各起一个 ffmpeg、各写一条 FIFO、各接一个 matroskademux。
+ *   两个 demuxer 各自把 segment.start 定成「自己第一条流的 PTS」：
+ *     视频首包 PTS = K（-ss T 会退到 T 之前最近的关键帧，B 站 1~2s 一个）
+ *     音频首包 PTS = T（音频没有关键帧概念，-ss 精确）
+ *   => 视频 running_time = PTS-K、音频 running_time = PTS-T，
+ *   两条分支都在 base_time 起播 => 内容 K 和内容 T 同时播 => 音频领先 T-K。
+ *
+ *   单 demuxer 只有一个 segment（start = 全局最小 PTS = K），
+ *   内容 c 在视频/音频两路的 PTS 都是 c => running_time 都是 c-K => 天然对齐。
+ *
+ * 代价（已接受）：K..T 这段没有音频数据，音频要等 T-K 才出声（本来就没有那
+ * 一段音频可播）；而旧的 -avoid_negative_ts make_zero 单 FIFO 双输入会卡
+ * PREROLLING 的老坑，在 -copyts 下两路时间戳同轴（只差 T-K，正常 interleave），
+ * 不再复现。
+ */
+#define MAP_DUAL_IN 3 /* 双输入、单输出（B 站 DASH：视频 + 音频两个 URL） */
 
 /* 全局序号，用于生成唯一 FIFO 名（worker 单线程，不需要原子） */
 static int g_seq = 0;
@@ -161,8 +185,28 @@ static void log_argv(const char *tag, char *const argv[]) {
     }
 }
 
-static pid_t spawn_ffmpeg(const char *fifo, const char *input, const char *ua, const char *ref,
-                          long long baseMs, long long durationMs, int map_mode) {
+/*
+ * 【诊断】把**完整未截断**的 argv 落盘到 /tmp/pb2/argv-<tag>.txt。
+ *
+ * 为什么需要：日志单行 1024 字节上限逼得 log_argv() 必须截断 URL（B 站
+ * CDN URL 约 700 字节，截断后就无法复现）。排查 403 / 时间戳问题时需要
+ * 拿真 URL 在设备上手工跑同一条 ffmpeg 命令并用 ffprobe 看首包 PTS。
+ * 一个元素一行，每次 spawn 覆盖写。失败时静默跳过（纯诊断，不影响播放）。
+ */
+static void dump_argv_full(const char *tag, char *const argv[]) {
+    char path[160];
+    FILE *fp;
+    int j;
+    snprintf(path, sizeof(path), "%s/argv-%s.txt", PB2_SRC_DIR, tag);
+    fp = fopen(path, "w");
+    if (!fp) return;
+    for (j = 0; argv[j]; j++) fprintf(fp, "%s\n", argv[j]);
+    fclose(fp);
+}
+
+static pid_t spawn_ffmpeg(const char *fifo, const char *input, const char *input2,
+                          const char *ua, const char *ref, long long baseMs,
+                          long long durationMs, int map_mode) {
     posix_spawn_file_actions_t fa;
     pid_t pid = 0;
     char ss[32];
@@ -176,8 +220,8 @@ static pid_t spawn_ffmpeg(const char *fifo, const char *input, const char *ua, c
      * 秒退/断流时 cat 这个文件就知道是 403/超时/Range 不支持。 */
     char errfile[PB2_SRC_FIFO_MAX + 32];
 
-    /* argv 上限：一个输入 + 固定项，48 足够 */
-    char *argv[48];
+    /* argv 上限：双输入各有 -ss/-input 两组，再加固定项，64 足够 */
+    char *argv[64];
     int i = 0;
 
     snprintf(ss, sizeof(ss), "%lld.%03lld", baseMs / 1000, baseMs % 1000);
@@ -229,7 +273,39 @@ static pid_t spawn_ffmpeg(const char *fifo, const char *input, const char *ua, c
     argv[i++] = (char *)"-i";
     argv[i++] = (char *)input;
 
-    if (map_mode == MAP_VIDEO) {
+    if (map_mode == MAP_DUAL_IN) {
+        /*
+         * 【关键 1】-ss 只作用于**紧跟其后的那一个**输入（input option，不是
+         * global option），所以第二路必须再写一次 -ss，否则音频会从 0 开始
+         * 下载/输出 —— 这是踩过的坑。
+         *
+         * 【关键 2】-user_agent / -headers 同样是 per-input 选项！真机实测
+         * （2026-11-01 07:36）：只在第一个 -i 前给 headers 时，第二路音频
+         * 请求不带 Referer/UA → B 站 CDN 直接 403 Forbidden →
+         * `src: a ...: Server returned 403 Forbidden (access denied)` →
+         * ffmpeg 秒退 → `first frame: src died before any frame`。
+         * 所以第二路**必须再写一遍** -user_agent / -headers。
+         */
+        if (use_ua) {
+            argv[i++] = (char *)"-user_agent";
+            argv[i++] = uabuf;
+        }
+        if (use_headers) {
+            argv[i++] = (char *)"-headers";
+            argv[i++] = hdrbuf;
+        }
+        argv[i++] = (char *)"-ss";
+        argv[i++] = ss;
+        argv[i++] = (char *)"-i";
+        argv[i++] = (char *)input2;
+    }
+
+    if (map_mode == MAP_DUAL_IN) {
+        argv[i++] = (char *)"-map";
+        argv[i++] = (char *)"0:v?";
+        argv[i++] = (char *)"-map";
+        argv[i++] = (char *)"1:a?";
+    } else if (map_mode == MAP_VIDEO) {
         argv[i++] = (char *)"-map";
         argv[i++] = (char *)"0:v?";
     } else if (map_mode == MAP_AUDIO) {
@@ -275,7 +351,15 @@ static pid_t spawn_ffmpeg(const char *fifo, const char *input, const char *ua, c
     argv[i] = NULL;
 
     /* 【P1-4】每次 spawn 都把完整 argv 打一遍（元素一行，长值截中间） */
-    log_argv(map_mode == MAP_VIDEO ? "v" : (map_mode == MAP_AUDIO ? "a" : "both"), argv);
+    log_argv(map_mode == MAP_DUAL_IN
+                 ? "dual"
+                 : (map_mode == MAP_VIDEO ? "v" : (map_mode == MAP_AUDIO ? "a" : "both")),
+             argv);
+    /* 完整未截断 argv 落盘，供人工复现（URL 有 ~700B，日志装不下） */
+    dump_argv_full(map_mode == MAP_DUAL_IN
+                       ? "dual"
+                       : (map_mode == MAP_VIDEO ? "v" : (map_mode == MAP_AUDIO ? "a" : "both")),
+                   argv);
     /* -t 是否真的带上，单独一行，方便 grep */
     pb2_logf("src: ffmpeg -t check: have_t=%d tlimit=%s durMs=%lld baseMs=%lld", have_t,
              have_t ? tlimit : "(absent)", durationMs, baseMs);
@@ -336,8 +420,10 @@ static pid_t spawn_ffmpeg(const char *fifo, const char *input, const char *ua, c
         }
     }
 
-    pb2_logf("src: ffmpeg pid=%d ss=%s t=%s map=%d in=%s", (int)pid, ss,
-             have_t ? tlimit : "(none)", map_mode, input);
+    pb2_logf("src: ffmpeg pid=%d ss=%s t=%s map=%d in=%s%s%s", (int)pid, ss,
+             have_t ? tlimit : "(none)", map_mode, input,
+             (map_mode == MAP_DUAL_IN && input2) ? " in2=" : "",
+             (map_mode == MAP_DUAL_IN && input2) ? input2 : "");
     return pid;
 }
 
@@ -371,37 +457,34 @@ int pb2_src_open(pb2_src_t *s, const char *input, const char *input2, const char
     ensure_dir();
 
     if (input2 && input2[0]) {
-        /* ---------- 双 FIFO + 双 ffmpeg（B 站 DASH） ---------- */
-        snprintf(s->fifo, sizeof(s->fifo), "%s/pb2-%d-%d-v.fifo", PB2_SRC_DIR, (int)getpid(),
+        /* ---------- 单 FIFO + 单 ffmpeg 双输入（B 站 DASH，方案 A） ----------
+         *
+         * 视频、音频两个 URL 交给**同一个** ffmpeg、同一条 FIFO、GStreamer 侧
+         * 只保留一个 filesrc + 一个 matroskademux。这样只有一个 segment，
+         * 内容 c 在两路的 PTS 都是 c => running_time 天然对齐（详见文件头
+         * MAP_DUAL_IN 的注释）。旧的「双 FIFO + 双 ffmpeg + 双 demuxer」会让
+         * 视频从关键帧 K 起、音频从 T 起，两个独立 segment 各自重基到 0，
+         * 于是音频领先 T-K（seek 后「画面落后音频」的真因）。
+         */
+        snprintf(s->fifo, sizeof(s->fifo), "%s/pb2-%d-%d.fifo", PB2_SRC_DIR, (int)getpid(),
                  ++g_seq);
         s->hold_fd = make_fifo(s->fifo, sizeof(s->fifo));
         if (s->hold_fd < 0) return -1;
 
-        snprintf(s->fifo2, sizeof(s->fifo2), "%s/pb2-%d-%d-a.fifo", PB2_SRC_DIR,
-                 (int)getpid(), ++g_seq);
-        s->hold_fd2 = make_fifo(s->fifo2, sizeof(s->fifo2));
-        if (s->hold_fd2 < 0) {
-            close(s->hold_fd);
-            s->hold_fd = -1;
-            unlink(s->fifo);
-            s->fifo[0] = '\0';
-            return -1;
-        }
-
-        s->pid = spawn_ffmpeg(s->fifo, input, ua, ref, s->baseMs, durationMs, MAP_VIDEO);
-        s->pid2 = spawn_ffmpeg(s->fifo2, input2, ua, ref, s->baseMs, durationMs, MAP_AUDIO);
-        if (s->pid <= 0 || s->pid2 <= 0) {
-            pb2_logf("src: dual fifo spawn failed (v=%d a=%d)", (int)s->pid, (int)s->pid2);
+        s->pid = spawn_ffmpeg(s->fifo, input, input2, ua, ref, s->baseMs, durationMs, MAP_DUAL_IN);
+        if (s->pid <= 0) {
+            pb2_logf("src: dual-input spawn failed (pid=%d)", (int)s->pid);
             pb2_src_close(s);
             return -1;
         }
 
         snprintf(s->location, sizeof(s->location), "%s", s->fifo);
-        snprintf(s->location2, sizeof(s->location2), "%s", s->fifo2);
+        /* location2 留空：session 侧不会再建第二个 filesrc/demuxer */
         s->is_http = 1;
-        s->dual = 1;
+        s->dual = 1; /* 语义改为「双输入」，FIFO/demuxer 仍只有一套 */
         s->active = 1;
-        pb2_logf("src: dual fifo v=%s a=%s base=%lldms", s->fifo, s->fifo2, s->baseMs);
+        pb2_logf("src: dual-input single fifo %s base=%lldms (v+a in one ffmpeg)",
+                 s->fifo, s->baseMs);
         return 0;
     }
 
@@ -411,7 +494,7 @@ int pb2_src_open(pb2_src_t *s, const char *input, const char *input2, const char
     s->hold_fd = make_fifo(s->fifo, sizeof(s->fifo));
     if (s->hold_fd < 0) return -1;
 
-    s->pid = spawn_ffmpeg(s->fifo, input, ua, ref, s->baseMs, durationMs, MAP_BOTH);
+    s->pid = spawn_ffmpeg(s->fifo, input, NULL, ua, ref, s->baseMs, durationMs, MAP_BOTH);
     if (s->pid <= 0) {
         close(s->hold_fd);
         s->hold_fd = -1;
