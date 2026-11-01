@@ -53,6 +53,17 @@ typedef struct {
     int y;
     int w;
     int h;
+    /*
+     * 【P0-3】显式直播意图：1 = 直播，0 = 点播，-1 = 调用方没传（老版本 JS）。
+     *
+     * 以前靠 is_live_request() 猜：「durationMs == 0 且是 http」就判直播。
+     * 这个判据过宽 —— B 站 view 接口对互动视频/部分港澳台条目会返回
+     * duration: 0，JS 侧 `parsed.durationMs || durationSec*1000` 就落 0，
+     * 于是**点播被接成直播**：走 souphttpsrc ! flvdemux 而 DASH 分片不是 FLV
+     * → flvdemux 建不出 pad → 无画面，且永久失去 seek（do_seek 直播早退）。
+     * 现在 JS 显式传意图，native 只信它；-1 才回落到启发式并打 WARN。
+     */
+    int isLive;
 } pb2_open_req_t;
 
 void pb2_open_req_free(pb2_open_req_t *req);

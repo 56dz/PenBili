@@ -250,14 +250,21 @@ function callOptional(fnName, args) {
 }
 
 // opts → native open() 位置参数（纯函数，单测覆盖顺序与钳制）
-// opts: { input, input2, startMs, durationMs, fps, audio, transpose, rect, audioDevice, userAgent, referer, fpsCap }
+// opts: { input, input2, startMs, durationMs, fps, audio, transpose, rect, audioDevice, userAgent, referer, fpsCap, isLive }
 // input2 = DASH 音频轨第二输入 URL（''/缺省 = 单文件）
 // fpsCap = 渲染帧率上限（0/缺省 = 不限；「我的 → 视频调节 / 直播」的帧率设置）
-// 注意：15 个位置参数的顺序是与 native 的硬契约，任何一位都不能动。
+// isLive = 1 直播 / 0 点播 / 缺省（undefined）→ native 收到 -1，回落严格启发式
+// 注意：前 15 个位置参数的顺序是与 native 的硬契约，任何一位都不能动；
+//       isLive 是第 16 位（追加，老 native 忽略多余实参不受影响）。
 export function buildOpenArgs(opts) {
   const o = opts || {};
   const rect = o.rect || { x: 0, y: 0, width: 0, height: 0 };
   const cap = Math.round(Number(o.fpsCap) || 0);
+  // 只有明确 true/false 才翻译成 1/0；其它（undefined/null/非布尔）保持 -1 语义，
+  // 让 native 回落到「严格启发式」（durationMs==0 + http + .flv 才算直播）。
+  let liveFlag = -1;
+  if (o.isLive === true) liveFlag = 1;
+  else if (o.isLive === false) liveFlag = 0;
   return [
     o.input,
     Math.max(0, Math.round(o.startMs || 0)),
@@ -273,7 +280,8 @@ export function buildOpenArgs(opts) {
     typeof o.userAgent === 'string' ? o.userAgent : '',
     typeof o.referer === 'string' ? o.referer : '',
     typeof o.input2 === 'string' ? o.input2 : '',
-    cap > 0 ? cap : 0
+    cap > 0 ? cap : 0,
+    liveFlag
   ];
 }
 

@@ -268,6 +268,19 @@ static JSValue js_open(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
     req->y = (int)y;
     req->w = (int)w;
     req->h = (int)h;
+    /*
+     * 【P0-3】第 16 个参数 = 显式直播意图（1=直播 / 0=点播 / 缺省 -1）。
+     *
+     * native 不再靠「durationMs == 0 且是 http」猜直播 —— B 站 view 接口
+     * 对互动视频/部分港澳台条目会返回 duration: 0，那种点播被猜成直播后
+     * 会走 flvdemux（DASH 分片不是 FLV）→ 无画面 + 永久失去 seek，且不报错。
+     * JS 侧 play_session.js 在 resolveLiveUrl / resolvePlayUrl 里明确知道
+     * 自己在干什么，所以由它传意图，native 只信。
+     *
+     * 缺省 -1 保留给老版本 JS 与直接调 native 的测试脚本（回落到严格启发式）。
+     */
+    req->isLive = (argc >= 16) ? (int)arg_int(ctx, argc, argv, 15, -1) : -1;
+    if (req->isLive != 0 && req->isLive != 1) req->isLive = -1;
 
     JS_FreeCString(ctx, input);
     if (audio_dev) JS_FreeCString(ctx, audio_dev);
@@ -405,6 +418,25 @@ static JSValue js_set_rect(JSContext *ctx, JSValueConst this_val, int argc, JSVa
            | ((int64_t)((uint32_t)(uint16_t)w) << 32)
            | ((int64_t)((uint32_t)(uint16_t)h) << 48);
     if (pb2_session_cmd(PB2_CMD_SET_RECT, packed, NULL) != 0) {
+        return mk_fail(ctx, "PLAYER_BUSY", "queue full");
+    }
+    return mk_ok(ctx);
+}
+
+/*
+ * recover()：原地自愈，无参数、非阻塞。
+ *
+ * 【为什么必须有这个导出】以前 JS 侧 play_session.js 的 recoverSession()
+ * 探测不到 native 的 recover，只能退化成 seekBy(currentPos)：
+ *   - 点播能用（seek 会重建管线），只是多绕一圈；
+ *   - **直播完全无效** —— do_seek() 对直播是早退的，于是 index.vue 的两个
+ *     stall 看门狗（8000ms / 25000ms）触发 3 次配额全打空转，
+ *     用户看到「画面冻住、进度条还在走、点哪里都没反应，只能返回列表重进」。
+ * 现在 native 直接提供入口：直播重拉 souphttpsrc，点播投递原地 seek。
+ */
+static JSValue js_recover(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    if (pb2_session_cmd(PB2_CMD_RECOVER, 0, NULL) != 0) {
         return mk_fail(ctx, "PLAYER_BUSY", "queue full");
     }
     return mk_ok(ctx);
@@ -626,6 +658,7 @@ static JSValue js_info(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
     X("status", js_status, 0) \
     X("stop", js_stop, 0) \
     X("setRect", js_set_rect, 4) \
+    X("recover", js_recover, 0) \
     X("release", js_release, 0) \
     X("info", js_info, 0)
 

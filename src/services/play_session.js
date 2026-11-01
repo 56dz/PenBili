@@ -11,7 +11,7 @@
 import { QN_LADDER, HTML5_FPS, buildPlayurlQuery, parseHtml5Response, parseDashResponse, validateStreamUrl } from './bili/playurl.js';
 import { fetchLivePlayUrl, LIVE_FPS } from './bili/live.js';
 import { deriveMixinKey } from './bili/wbi.js';
-import { playVideoRects } from './screen.js';
+import { playVideoRects, LIVE_VIDEO_AREA } from './screen.js';
 import { dashLadderFor, videoFpsCapFor, liveFpsCapFor, liveQnFor, pixelBudgetFor } from './video_settings.js';
 
 export const SEEK_STEP_MS = 20000;
@@ -124,6 +124,65 @@ export function isStreamEnded(st, durationMs) {
   return false;
 }
 
+/* ================= 直播终止判据（P1-4） =================
+ *
+ * 点播末尾靠 isStreamEnded()（比位置与时长），直播没有时长可用，必须换判据。
+ *
+ * 直播 EOS（主播下播）在 native 侧走的是：
+ *   session.c 的 `BUS EOS` → `pb2_stats_patch_state(&g_w.stats, PB2_STATE_STOPPED)`
+ * 而 jsapi_player2.c 的 state 白名单是 {idle, opening, playing, paused, error, stopped}
+ * —— **没有 ended**；normalizeState 又把 `stopped` 归一成 `'idle'`（表示 stop() 的正常态）。
+ * 三条叠加的结果：主播下播后 tick 拿到的 state 是 `'idle'`，页面原有的
+ * `if (st.state === 'ended')` 分支永远进不去 → 界面停在「播放中」，进度条（直播位置
+ * 就是墙钟秒数）还在继续走，用户只能自己返回。
+ *
+ * 所以这里用「live + state 落回 idle/ended」判终止，再用两个证据把
+ * 「刚进页面还没起播」（state 也在 idle/opening，位置 0、没出过帧）排除掉：
+ *   · everPlayed：本会话曾经出现过 playing（页面侧维护的历史事实）；
+ *   · frames > 0：至少真的出过帧。
+ * 只要有一条成立，就说明这场直播确实播起来过、现在停了 = 已结束。
+ *
+ * ★ **不能用 positionMs > 0 当证据**：直播位置 = 墙钟（native live_position_ms()），
+ * 从 open 那一刻就开始走，一帧都没出也照样每秒 +1000。用它会在一进页面、native
+ * 还没 patch 到 opening 的那一个 tick 上把「刚打开」误判成「已结束」。
+ *
+ * 注意：也**不要**用「位置不再增长」判 —— 同样是墙钟，EOS 之后管线还在、位置照样涨。 */
+export function isLiveEnded(st, live, everPlayed) {
+  if (live !== true) return false; // 只对直播生效，点播走 isStreamEnded
+  if (!st || typeof st !== 'object') return false;
+  /* state 只认 native 明确收回的两个值：
+   *   idle  = STOPPED（EOS）经 normalizeState 归一后的结果；
+   *   ended = 将来 native 真加了 PB2_STATE_ENDED 时的直通值。 */
+  if (st.state !== 'idle' && st.state !== 'ended') return false;
+  if (everPlayed === true) return true;
+  /* 没观察到过 playing（轮询 1s 一次，主播刚下播就点进去时会漏）：
+   * 用「出过帧」兜底，避免把「刚进页面还没起播」误判成已结束。 */
+  return num(st.frames, 0) > 0;
+}
+
+/* ================= 直播重连提示（P1-4 的 JS 侧配套） =================
+ *
+ * native 直播走 souphttpsrc（timeout=15s、retries=3），最坏 45 秒里画面冻住而
+ * state 仍是 playing —— 用户看不到任何反馈。native2 会在重连开始时
+ * `pb2_stats_patch_error(&g_w.stats, PB2_E_LIVE_RECONNECT, "...")`，
+ * 重连成功清零（**故意不改 state**，否则 readStatus 会走 ok:false 让页面判失败）。
+ *
+ * 这里只做「码 → 是否正在重连」的翻译。码值 17 与 native2 对齐
+ * （core/queue.h 已占用 0..16，17 是下一个空位）。
+ * 另留一条 lastErrorMsg 含 `reconnect` 的兜底：万一 native 最终换了码，提示仍能出来。
+ */
+export const LIVE_RECONNECT_ERR = 17;
+
+export function isLiveReconnecting(st, live) {
+  if (live !== true) return false;
+  if (!st || typeof st !== 'object') return false;
+  /* 真错误态（state === 'error'）交给页面原有的失败路径，不抢它的提示 */
+  if (st.state === 'error') return false;
+  if (numSigned(st.lastError, 0) === LIVE_RECONNECT_ERR) return true;
+  const msg = typeof st.lastErrorMsg === 'string' ? st.lastErrorMsg : '';
+  return /reconnect/i.test(msg);
+}
+
 /* 解码像素预算的历史默认值（= 1080p 全尺寸），保留导出供测试/诊断引用。
  * 真正生效的预算现在来自「我的 → 视频调节 → 分辨率」（pixelBudgetFor）。
  *
@@ -136,14 +195,26 @@ export function isStreamEnded(st, durationMs) {
  * 即便 1080p60 带旋转也远超实时（且播放时 ffmpeg 不解码，只搬压缩包）。 */
 export const MAX_DECODE_PIXELS = 1920 * 1080;
 
-/* 直播：→ {ok, live:true, url, audioUrl:url, qn, cid, roomid, aid:0, durationMs:0,
+/* 直播：→ {ok, live:true, url, audioUrl:'', qn, cid, roomid, aid:0, durationMs:0,
  *          title, width, height, host, fps} | {ok:false, stage, code?, message}
  *
  * 每次播放都重新取直链（URL 带 expires，过期即 403）——转码时代的「服务器地址 +
  * 解析缓存」已随 server/live_proxy.py 一起删除。
- * 音频走**同一条 URL 的独立进程**（player.c 的 spawn_ffaudio）：单进程串行写两个输出时
- * 视频 pipe 背压会连带音频停摆（v2.9.4 真机 30 分钟长跑定位，X5 时代的结论，机制不变）。
- * 实测（2026-10-29 X6 Pro）：同一 FLV 直链并发跑 2~3 个 ffmpeg 全部成功。 */
+ * 【audioUrl 固定为空 —— 直播走单输入单管线，不再经 ffmpeg】
+ * v1（player.c）确实用「同一 URL 的独立进程 spawn_ffaudio」解过「单进程串行写两个输出时
+ * 视频 pipe 背压连带音频停摆」的问题。但 v2（player2）的直播路径**不再经过 ffmpeg**：
+ * 实测（2026-11-01 X6 Pro）B 站直播 FLV 的 PTS 是绝对值（≈2854014 秒 ≈ 792 小时），
+ * 流式 matroskademux 在这种绝对 PTS + 非 seekable FIFO 下**永久 PREROLLING**
+ * （`ffmpeg -c copy -f matroska -` → FIFO → filesrc，带/不带 -copyts 都 rc=124、
+ * buffers=0；落成普通文件再读才正常）。所以 v2 直播改为 GStreamer 直连
+ * `souphttpsrc ! flvdemux`，实测 45s 出 3018 帧、零 error、真实 kmssink 上屏
+ * vid_changes=146/6s、big_gaps(>80ms)=0。
+ *
+ * FLV 单流本身已含音轨，flvdemux 会同时给出 video/x-h264 和 audio/mpeg 两个 pad，
+ * 音视频天然同容器同 interleave、不需要对齐。**若这里仍回填 audioUrl=url，
+ * native 会按 MAP_DUAL_IN 用同一个 URL 开第二条连接**（日志里 in= 和 in2= 完全相同），
+ * 对直播纯属浪费，还会让 native 的「直播直连」判据失效。
+ * 所以直播固定 audioUrl=''，让 native 走单输入直连路径。 */
 export async function resolveLiveUrl(ctx, item) {
   const roomid = Number(item && item.roomid) || 0;
   if (!(roomid > 0)) return { ok: false, stage: 'param', message: '直播间号无效' };
@@ -157,7 +228,9 @@ export async function resolveLiveUrl(ctx, item) {
     ok: true,
     live: true,
     url: r.url,
-    audioUrl: r.url,
+    /* 固定空：直播走 native 的「单输入直连」路径（souphttpsrc ! flvdemux），
+     * 见本函数头注释。绝不能回填 r.url，否则 native 会开第二条连接。 */
+    audioUrl: '',
     qn: r.qn,
     cid: roomid,
     roomid: roomid,
@@ -361,7 +434,10 @@ export async function openVideo(ctx, item) {
   if (!rs.ok) return rs;
   if (cancelled(ctx)) return { ok: false, stage: 'cancel', message: '已取消' };
   // 矩形按**稿件真实显示宽高**做信箱适配（竖屏 → 物理竖柱，不再被拉伸成横屏）
-  const rects = playVideoRects(rs.width, rs.height);
+  // 直播没有进度条，视频区是 469x266（LIVE_VIDEO_AREA）；点播是 469x240（底部 26px 留给进度条）。
+  // 这两个矩形必须与 falcon 侧 hole 的几何严格一致（见 base.less .pvideo-live / .video-hole-live），
+  // 否则会出现「画面与点击热区差 26px」的错位。
+  const rects = playVideoRects(rs.width, rs.height, rs.live ? LIVE_VIDEO_AREA : null);
   /* 帧率上限（0 = 不限）：native 侧在 mppvideodec 之后插 videorate max-rate=N。
    * 为什么必须有这道闸：部分稿件服务端**只给 60fps 档**（例如 1080P60），
    * 光靠「请求 30fps 档」会直接落空；videorate 只做上限不插帧，低帧率内容直通。 */
@@ -379,7 +455,17 @@ export async function openVideo(ctx, item) {
     audioDevice: '',
     userAgent: ctx.mediaUa,
     referer: ctx.mediaReferer,
-    fpsCap: fpsCap
+    fpsCap: fpsCap,
+    /*
+     * 显式直播意图（native open 的第 16 个位置参数）。
+     *
+     * 不能靠 native 的「durationMs == 0 且是 http」猜：B 站 view 接口对
+     * 互动视频/部分港澳台条目会返回 duration: 0，那种点播被猜成直播后
+     * 会走 souphttpsrc ! flvdemux（DASH 分片不是 FLV）→ 无画面，
+     * 且永久失去 seek（do_seek 对直播早退），用户只看到「放不了、拖不动」。
+     * 这里我们是明确知道意图的，直接告诉 native。
+     */
+    isLive: rs.live === true
   });
   if (!openRes || openRes.ok !== true) {
     return {
@@ -655,7 +741,10 @@ export const SEEK_FRAME_DEADLINE_MS = 3000; // 首帧软上限（native 预算 P
  * probe 若仍用 3s 软上限，会在重试完成前判 TIMEOUT 并 onBack() 拆会话，把飞行中的重试杀掉
  * （真机 20:43 复现：retry 1 @31.7s，shutdown done @34.1s）。探针场景放宽到 9s，
  * 正常播放路径（waitFirstFrame 的默认 3s）不受影响。 */
-export const SEEK_FRAME_RETRY_DEADLINE_MS = 9000;
+/* 【首次 seek 必失败自愈】native 侧已加自动重试：首帧 6s 不出就重走一次 seek，
+ * 重试本身再需 ~1.5s（含关键帧探测 0.6s + 首帧 0.9s），所以探针必须等到 12s
+ * 才能把自愈后的真实首帧计入；不放宽的话探针会在自愈完成前就报 TIMEOUT。 */
+export const SEEK_FRAME_RETRY_DEADLINE_MS = 12000;
 
 function defaultSleep(ms) {
   return new Promise(function (resolve) {
@@ -809,6 +898,7 @@ export async function waitFirstFrame(read, opts) {
   const t0 = now();
   let samples = 0;
   let frames = 0;
+  let firstErr = '';
   for (;;) {
     await sleep(pollMs);
     samples++;
@@ -818,8 +908,17 @@ export async function waitFirstFrame(read, opts) {
     } catch (e) {
       st = null;
     }
+    /*
+     * 【容忍自愈中间态】native 在「首次 seek 不出首帧」时会
+     * 自动重试一次（2s 内无 video buffer 就重试）。重试期间
+     * `state` 可能一直是 error，但重试完成后会回到 playing 并出帧。
+     * 旧写法一看到 error 就立即返回失败，于是永远测不到自愈后的首帧
+     * （真机实测：native 已经 `SEEK first frame +1032ms OK`，JS 仍报 TIMEOUT）。
+     * 现在改成：记下第一个错误但**继续等**，直到 deadline；
+     * 期间一旦出帧就算成功。真失败（重试也救不回）会在 deadline 后报错。
+     */
     if (st && st.ok === false && st.state === 'error') {
-      return { ok: false, error: st.message || '播放错误', frameMs: -1, frames: frames, samples: samples };
+      if (!firstErr) firstErr = st.message || '播放错误';
     }
     if (st && st.ok !== false) {
       frames = num(st.frames, 0);
@@ -829,7 +928,7 @@ export async function waitFirstFrame(read, opts) {
     }
     if (now() - t0 >= deadlineMs) break;
   }
-  return { ok: false, error: 'NO_FRAME', frameMs: -1, frames: frames, samples: samples };
+  return { ok: false, error: firstErr || 'NO_FRAME', frameMs: -1, frames: frames, samples: samples };
 }
 
 // 幂等停止 + 释放 fb（stop/release 自身幂等）

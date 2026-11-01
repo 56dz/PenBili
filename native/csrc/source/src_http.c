@@ -291,10 +291,23 @@ static long long probe_video_keyframe_ms(const char *input, const char *ua, cons
      * 实测探测 1575ms（737+838），把 seek 端到端推到 3234ms。
      * 改单次 %+1 后探测稳定在 ~700ms，端到端回落到 ~2000ms 以内。
      */
-    snprintf(cmd, sizeof(cmd),
-             "%s -v error%s%s -select_streams v -show_entries packet=pts_time,flags "
-             "-read_intervals %lld%%+1 -of csv=p=0 '%s' 2>/dev/null",
-             PB2_FFPROBE, uaarg, refarg, targetMs / 1000, input);
+    /*
+     * 【致命 bug 修复】以前这里传的是 `targetMs / 1000`（整数除法，截断到秒）：
+     *   T=316629ms -> 传 316 -> ffprobe 从 316.000s 找关键帧 -> 拿到 310.910s
+     *   真实关键帧是 315.915s（实测 ffprobe -read_intervals 316.629%+1 第一行）
+     * 于是音频被 seek 到比视频早 5 秒的位置，A/V 偏 5s，matroskademux 被迫
+     * 丢视频追音频（Synchronizing stream 0 ... by advancing time），而视频
+     * 丢掉后必须等到下一个关键帧才能解码（GOP≈5s）→ 首次 seek 卡 11~12 秒
+     * 完全不出帧。改成毫秒精度的秒串（与 -ss 参数同格式）后偏差消失。
+     */
+    {
+        char tsec[32];
+        snprintf(tsec, sizeof(tsec), "%lld.%03lld", targetMs / 1000, targetMs % 1000);
+        snprintf(cmd, sizeof(cmd),
+                 "%s -v error%s%s -select_streams v -show_entries packet=pts_time,flags "
+                 "-read_intervals %s%%+1 -of csv=p=0 '%s' 2>/dev/null",
+                 PB2_FFPROBE, uaarg, refarg, tsec, input);
+    }
 
     fp = popen(cmd, "r");
     if (!fp) {

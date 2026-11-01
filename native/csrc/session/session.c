@@ -112,8 +112,63 @@
  * 词典笔上完全可接受）。两个上限是「或」关系，谁先到算谁。
  * 注意 audio 分支的 32 buffer 保持原样 —— 实测它不参与这个死锁。
  */
+/*
+ * 【首次 seek 必失败】点播视频队列改成按 buffer 个数限界，不用 max-size-time。
+ * 见 on_pad_added 里的长注释：queue 的 max-size-time 是**时间戳跨度**语义，
+ * seek 后 PTS 跨度跳变会让队列瞬间超限、反压 demuxer、堵死视频。
+ * 240 个 buffer ≈ 8s @30fps，覆盖 demuxer 推进落后一路所需的 T-K（最大 3.843s）。
+ */
+#define PB2_VIDEO_QUEUE_BUFS 240
 #define PB2_VIDEO_QUEUE_NS 8000000000LL
 #define PB2_VIDEO_QUEUE_BYTES 6000000
+
+/*
+ * 【P1-2 直播用更小的视频队列】
+ *
+ * 上面那组 8s/6MB 是给**点播 seek** 定的：matroskademux 在流式模式下
+ * 必须把落后的一路「推进」到对齐点（真机 T-K=3.843s），按 buffer 个数
+ * 限界（8 个 ≈267ms）装不下这段推进量就会永久死锁，所以给到 8s 的余量。
+ *
+ * 直播（souphttpsrc ! flvdemux）没有这个问题：FLV 是单流实时源，音视频
+ * tag 天然交织，demuxer 不做「推进落后一路」这件事。恰恰相反 —— 队列
+ * 上限就是**播放延迟的下限**：上限 8s 意味着最坏情况下内存里压着 8 秒
+ * 视频，画面恒定落后直播边缘最多 8s（用户感知就是「直播比弹幕慢好几秒」），
+ * 而且弱网时积压的 8s 数据会在恢复瞬间一次性灌给解码器。
+ *
+ * 直播改用 2s/3MB：
+ *   - 2s 足够吸收正常网络抖动（B 站直播 GOP 1~2s，一个 GOP 一定能装下）；
+ *   - 又不至于把延迟堆到不可接受。实测直播 90s 长跑 vid_fps=30.08、
+ *     big_gaps=0，与 8s 无差别，但延迟上限从 8s 降到 2s。
+ *
+ * 万一将来在某些直播源上出现「队列满 → soup 背压 → 卡顿」，把这个值
+ * 调大即可 —— 它只是延迟/抗抖动之间的取捨，不涉及正确性。
+ */
+#define PB2_LIVE_VIDEO_QUEUE_NS 2000000000LL
+#define PB2_LIVE_VIDEO_QUEUE_BYTES 3000000
+
+/*
+ * 【P1-4】直播「可恢复断流」的错误码。
+ *
+ * 直播是长连接：CDN 掐流、WiFi 抖动、B 站边缘节点切换都会让 souphttpsrc
+ * 报 bus error，但流本身十几秒后还能连回来。以前这种错误一律走
+ * take_error() → PB2_E_PIPELINE + PB2_STATE_ERROR，JS 侧一看到 state=error
+ * 就判起播失败、停轮询、弹「播放失败」，用户必须退出重进。
+ *
+ * 现在改用独立的 17：**patch_error 但不改 state**（保持 PLAYING），
+ * JS 收到 17 时只显示「正在重连…」而不会拆掉播放页；重连成功后再把
+ * lastError 清零。
+ *
+ * 17 这个数值是与 js2 约定死的（他那边 `LIVE_RECONNECT_ERR = 17`），
+ * 语义必须严格对齐：17 只表示「直播正在自动重连，不要放弃」。
+ * core/queue.h 的枚举不在本任务写域，所以常量定义在这里（见下），
+ * 数值与 core 里 0..16 不冲突（PB2_E_BRANCH_LINK 16 是最后一个）。
+ */
+#define PB2_E_LIVE_RECONNECT 17
+
+/* 直播连续这么久没有视频帧，就判定为断流并触发重连 */
+#define PB2_LIVE_STALL_MS 6000
+/* 最多连续重连这么多次，之后才认输报 error */
+#define PB2_LIVE_RECONNECT_MAX 5
 
 /* ---------------- 全局状态（只在 worker 里改） ---------------- */
 typedef struct {
@@ -139,6 +194,7 @@ typedef struct {
     GstElement *pipe;
     GstElement *vsink;      /* 视频分支的 bin（ghost pad 挂 probe 用） */
     GstElement *vsink_el;   /* 分支内部名为 "vsink" 的 kmssink 元素（SET_RECT 用；bin 上没有 render-rectangle 属性） */
+    int vsink_el_owned;          /* 1 = vsink_el 是我们拿到的新引用，teardown 必须 unref */
     /*
      * 平面是否被 SET_RECT 主动隐藏（键盘避让期间 1x1）。
      * check_plane() 必须据此跳过巡检：隐藏时 kmssink 把平面缩成 1x1，
@@ -168,6 +224,23 @@ typedef struct {
     int vol_applied;        /* 已下发到 vvol 的值（-1 = 未下发） */
     long long vol_check_ms; /* 上次复查系统音量的时间（节流） */
     long long bt_check_ms;  /* 上次探测蓝牙路由的时间（独立节流，见下） */
+    /*
+     * 【P1-8】暂停期间检测到路由变化时置 1。暂停态不重建管线（重建会把
+     * 停住的那一帧重新刷出来，用户会看到「暂停着却动了」），但也不能像
+     * 以前那样只把 vol_check_ms 清零碰运气 —— 那样 resume 之后要等下一次
+     * tick 撞上蓝牙探测窗口（以前 5s 节流，最坏再等 5s）才生效。
+     * 现在 resume 后由 refresh_audio_route 第一段直接消费这个标记。
+     */
+    int route_pending;
+    /*
+     * 【P1-4】直播断流重连状态机。
+     *   live_reconnect_pending：已排期一次重连，等 live_reconnect_at_ms 到点执行
+     *   live_reconnect_count  ：本轮连续失败次数（成功即清 0）
+     *   live_reconnect_at_ms  ：下一次重连的时间点（退避用）
+     */
+    int live_reconnect_pending;
+    int live_reconnect_count;
+    long long live_reconnect_at_ms;
     int bt_present;         /* 上次探测时蓝牙是否可用（用于检测插拔） */
     int bt_vol_applied;     /* 已下发给耳机的 AVRCP 音量（-1 = 未下发） */
     char bt_ctl_name[64];   /* 耳机的 mixer 控件名，形如 "Redmi Buds 6 - A2DP" */
@@ -177,10 +250,31 @@ typedef struct {
     int has_audio;          /* 是否真的建了音频分支 */
     int pipeline_alive;
 
-    /* 媒体源（本地直读 / ffmpeg -> FIFO） */
+    /* 媒体源（本地直读 / ffmpeg -> FIFO / 直播直连 GStreamer） */
     pb2_src_t src;
     int src_ready;
     long long base_ms;      /* 对 JS 报告位置 = base_ms + query_position() */
+    /*
+     * 【直播直连】1 = 本次会话走 souphttpsrc ! flvdemux，**没有 ffmpeg、没有 FIFO**。
+     *
+     * 为什么必须绕开 ffmpeg（真机实测，不可重复验证的结论）：
+     *   B 站直播 FLV 的 PTS 是绝对值（实测 ≈2854014 秒，ffprobe 报
+     *   `start: 2853204.901`、`ClusterTimeCode: 2854183333`）。ffmpeg 转封装
+     *   写 FIFO 后，流式 matroskademux 面对「首 PTS 巨大」的流会永久停在
+     *   PREROLLING（实测 rc=124 超时、buffers=0）；`-copyts` 与否、
+     *   `-f mpegts`+tsdemux、`-re` 慢喂，全部一样卡。而 ffmpeg 先落到**普通
+     *   文件**再 filesrc 读就正常 —— 说明是「FIFO 上的流式 demux 无法处理
+     *   巨大起始 PTS」，不是 URL 或网络问题。
+     *   点播 m4s 的 PTS 从 0 附近开始，所以点播完全正常，这就是分界线。
+     *   实测直连 `souphttpsrc ! flvdemux` 双分支 45 秒 3018 帧 / 69.4fps / 0 drop。
+     *
+     * 带来的语义差异（都已在下面各函数里按 is_live 分支处理）：
+     *   - 没有 pb2_src_open()，src_ready 恒 0，所有「源存活探测 / 自愈重试」自动跳过。
+     *   - base_ms 恒 0；位置改用「本次会话已播时长」，因为 FLV 的绝对 PTS 不能直接报给 JS。
+     *   - durationMs 恒 0（JS 侧 isStreamEnded() 对 durationMs<=0 恒返回 false）。
+     *   - seek 无意义，直接忽略。
+     */
+    int is_live;
 
     /* 当前会话参数（OPEN 时写入） */
     pb2_open_req_t *req;
@@ -228,6 +322,7 @@ typedef struct {
     int src_died;
     long long src_died_at_ms;
     int first_frame_logged;      /* 首帧到达日志只打一次 */
+    int vsrc_logged;             /* 诊断：demuxer 视频 src pad 首 buffer 只打一次 */
     int first_audio_logged;      /* 首个音频包到达日志只打一次 */
     /*
      * 【avSkewMs 判据（2026-11-01，lead 定的量化口径）】
@@ -252,6 +347,9 @@ typedef struct {
      * 防止 URL 真失效时白转 30s）。0=未用，>0=已用次数。
      */
     int first_frame_retries;
+    int seek_frame_retries;      /* seek 后首帧不出的自愈重试次数（每次 seek 限 1 次） */
+    int seek_retry_issued;      /* 1 = 当前这次 seek 是自愈重试发出的（do_seek 不得再清零计数器） */
+    long long vbranch_ready_ms;  /* 视频分支建好的时刻（自愈重试计时起点） */
 
     /*
      * 【P1-3】seek 时「先起新源、再拆旧管线」，旧源的两个 ffmpeg 与 FIFO 先挂在这，
@@ -262,6 +360,19 @@ typedef struct {
 
     /* 计数 */
     long long t_start;          /* 本次会话开始时间 */
+    /*
+     * 【P0-2】直播位置基准的暂停冻结。
+     *
+     * 直播的 positionMs 是「本次会话已播时长」= now - t_start（直播 PTS 是
+     * 绝对值 ≈792 小时，不能直接报给 JS）。但 t_start 只在 do_open 赋值一次，
+     * PAUSE/RESUME 都不碰它 → 暂停 10 分钟再恢复，positionMs 直接跳
+     * +600000ms，进度条/计时完全失真，且违反「单一权威时钟」。
+     *
+     * 修法：暂停时记下 pause_started_ms；恢复时把 t_start 往后推同样的时长，
+     * 等价于「暂停期间时钟不走」。live_rebuild_pipeline 里补回位置时也要用
+     * 同一个基准，否则重建会掩盖掉错误值。
+     */
+    long long pause_started_ms;
     long long last_pos_ms;
     unsigned long long last_abytes;
     long long last_plane_ms;
@@ -319,13 +430,25 @@ static int rotation_for_transpose(int t) {
     return 270; /* t == 2，JS 恒传 */
 }
 
-/* 把字符串里会破坏 gst desc 语法的字符转义（用于 location= 引号内） */
-static void desc_escape(const char *in, char *out, size_t cap) {
+/*
+ * 把字符串里会破坏 gst desc 语法的字符转义（用于 location= 引号内）。
+ *
+ * 返回值：【P1-5】**0 = 完整转换；-1 = 被 cap 截断了**。
+ *
+ * 为什么必须返回截断信号：以前这个函数是 void，循环条件 `o + 2 < cap`
+ * 悄悄停手，`out[o] = 0` 之后调用方完全看不出少了一半。直播 URL 带
+ * expires/sign/token 等参数，实测 600~900 字符，jsapi 允许 input 最长
+ * 1024；一旦 URL 里出现需要转义的 `"` 或反斜杠（CDN 签名偶尔会有），
+ * 长度会膨胀并被切断 —— 症状是 souphttpsrc 拿半截 location 去请求，
+ * CDN 回 403/404，用户看到「直播永远转圈」，而日志里只有 soup 的错误，
+ * 完全看不出是 URL 被截断。调用方必须拿到这个信号并 patch_error。
+ */
+static int desc_escape(const char *in, char *out, size_t cap) {
     size_t o = 0;
     size_t i;
     if (!in || cap == 0) {
         if (cap) out[0] = '\0';
-        return;
+        return -1;
     }
     for (i = 0; in[i] && o + 2 < cap; i++) {
         char c = in[i];
@@ -339,6 +462,8 @@ static void desc_escape(const char *in, char *out, size_t cap) {
         }
     }
     out[o] = '\0';
+    /* in[i] 还有内容 => 循环是被 cap 卡停的，不是正常走完 */
+    return in[i] ? -1 : 0;
 }
 
 /* ============================ 视频/音频分支构建 ============================ */
@@ -400,10 +525,213 @@ static GstElement *parse_bin(const char *desc) {
  * 因为我们用 gst_parse_bin_from_description(..., TRUE) 生成了 ghost pad。
  */
 static int on_video_buffer(GstPad *pad, GstPadProbeInfo *info, void *ud);
+static int on_video_src_probe(GstPad *pad, GstPadProbeInfo *info, void *ud);
 static int on_audio_buffer(GstPad *pad, GstPadProbeInfo *info, void *ud);
 static int on_audio_list(GstPad *pad, GstPadProbeInfo *info, void *ud);
 static void apply_volume_now(void);
+/*
+ * 【直播】refresh_audio_route() 在 teardown/build 之前就定义了，
+ * 而它的直播分支要直接重建管线（不能走 seek 路径），所以这里补前向声明。
+ */
+static void teardown_pipeline(void);
+static int build_pipeline(pb2_open_req_t *req, int src_already_open);
 static void apply_bt_avrcp_volume(void);
+
+/*
+ * 【直播】重建直播直连管线的唯一入口。
+ *
+ * 直播没有 ffmpeg、没有 FIFO、没有「位置」概念，所以所有「需要重建管线」
+ * 的场景（蓝牙/耳机路由变更、键盘收起后恢复视频矩形）都不能走 do_seek()
+ * ——那条路径会先 pb2_src_open(target_ms) 起 ffmpeg 拉 FLV，直播下必然
+ * 卡在流式 demuxer 的永久 PREROLLING（见 pb2_worker_t.is_live 注释）。
+ *
+ * 这里直接 teardown + build_pipeline(req, 0)，build_pipeline 内部会重新
+ * 走 is_live 分支（souphttpsrc ! flvdemux），并带上 g_w.rect / g_w.adev
+ * 的当前值，所以「换 device」和「换矩形」都能生效。
+ *
+ * 代价：直播要重新拉一次流（约 0.5~1.5s）。这两类事件都是低频的
+ * （插拔耳机、收起键盘），可以接受。
+ *
+ * 只能在 worker 线程调用（会 set_state(NULL) / 释放 GstElement）。
+ */
+/*
+ * 【P0-2】直播位置的唯一计算入口。
+ *
+ * 直播没有「总时长」，也拿不到可信的媒体时钟（FLV 的 PTS 是自 1970 起的
+ * 绝对值 ≈792 小时，直接报给 JS 会让进度条/计时爆掉）。所以位置用
+ * 「本次会话已播时长」这个墙钟量。
+ *
+ * 但墙钟必须在暂停期间冻结，否则暂停 10 分钟恢复后 positionMs 跳 +600000ms：
+ *   - 暂停中：位置停在 pause_started_ms - t_start
+ *   - 播放中：位置 = now - t_start
+ * RESUME 时把 t_start 往后推「暂停时长」，所以这两个式子共用同一个 t_start。
+ *
+ * 所有需要直播位置的地方（refresh_position / live_rebuild_pipeline）都必须
+ * 走这里，避免两处各算一遍导致口径分叉。
+ */
+static long long live_position_ms(void) {
+    long long base = g_w.paused && g_w.pause_started_ms > 0
+                         ? g_w.pause_started_ms
+                         : pb2_now_ms();
+    long long pos = base - g_w.t_start;
+    return pos > 0 ? pos : 0;
+}
+
+/*
+ * 【P1-4】重建失败的统一出口。
+ *
+ * 直播重连期间的失败**不能**报 ERROR：js2 的 readStatus() 看到 state=error
+ * 就判起播失败、停轮询、弹「播放失败」，用户只能退出重进 —— 而直播断流
+ * 本来就是「等几秒自己会好」的场景。
+ *
+ * 所以配额内（live_reconnect_count 在 1..PB2_LIVE_RECONNECT_MAX）只刷新
+ * 17 的文案、state 保持不动；排下一次重连由 check_live_reconnect() 的
+ * !pipeline_alive 分支统一处理（唯一排期点，不会与这里叠加）。
+ *
+ * 超出配额 / 非直播才走正常的 ERROR 上报。
+ */
+static void live_rebuild_failed(int code, const char *msg) {
+    if (g_w.is_live && g_w.live_reconnect_count > 0 &&
+        g_w.live_reconnect_count <= PB2_LIVE_RECONNECT_MAX) {
+        pb2_logf("live: rebuild failed while reconnecting (%s) -> keep state, will retry",
+                 msg ? msg : "?");
+        pb2_stats_patch_error(&g_w.stats, PB2_E_LIVE_RECONNECT,
+                              "live reconnect: rebuild failed");
+        teardown_pipeline();
+        return;
+    }
+    pb2_stats_patch_error(&g_w.stats, code, msg);
+    pb2_stats_patch_state(&g_w.stats, PB2_STATE_ERROR);
+    teardown_pipeline();
+}
+
+static void live_rebuild_pipeline(const char *why) {
+    long long t0 = pb2_now_ms();
+    /*
+     * 【P0-2 配套】teardown_pipeline() 会把 g_w.paused 清 0。如果直播是在
+     * 暂停态被重建（蓝牙路由变更 / SET_RECT 恢复 / recover），清掉 paused
+     * 会让 live_position_ms() 改用 now，位置立刻跳掉「已暂停的时长」。
+     * 所以这里先快照暂停状态与位置，重建完再原样还回去。
+     */
+    int was_paused = g_w.paused;
+    long long saved_pause_started = g_w.pause_started_ms;
+    long long pos_before = live_position_ms();
+
+    if (!g_w.req) {
+        pb2_logf("live: rebuild(%s) skipped -> no req", why ? why : "?");
+        return;
+    }
+    pb2_logf("live: rebuild(%s) dev=%s rect=%s", why ? why : "?",
+             g_w.adev[0] ? g_w.adev : "speaker", g_w.rect);
+    teardown_pipeline();
+    if (build_pipeline(g_w.req, 0) == 0) {
+        /*
+         * 【P1-2】必须判 set_state 的返回值并等 preroll，与 do_open 里
+         * （见那边的【P0-1】注释）保持一致。
+         *
+         * 以前这里直接 `gst_element_set_state(PLAYING)` 丢掉返回值，紧接着
+         * 就 patch_error(NONE) + patch_state(PLAYING)。如果直播 URL 已过期
+         * （B 站 deadline 约 2h）、CDN 403/404、或者 sink 分支根本建不起来，
+         * JS 会看到「正在播放」而画面永远不来，且 lastError 是 0 —— 只能靠
+         * 用户手动返回重进。
+         *
+         * 注意直播管线在分支建起来之前没有 sink，set_state 通常直接 SUCCESS；
+         * 但 CDN 有问题时 souphttpsrc 会先失败，这里就靠返回值/Failure 兜住。
+         */
+        GstState cur = GST_STATE_NULL;
+        GstState pend = GST_STATE_NULL;
+        GstStateChangeReturn sr = gst_element_set_state(g_w.pipe, GST_STATE_PLAYING);
+        pb2_logf("live: rebuild(%s) set_state(PLAYING) -> %d (+%lldms)", why ? why : "?", sr,
+                 pb2_now_ms() - t0);
+        if (sr == GST_STATE_CHANGE_FAILURE) {
+            pb2_logf("live: rebuild(%s) FAILED -> error (set_state returned FAILURE)",
+                     why ? why : "?");
+            live_rebuild_failed(PB2_E_OPEN_FAILED, "live rebuild: set_state failed");
+            return;
+        }
+        if (sr == GST_STATE_CHANGE_ASYNC) {
+            sr = gst_element_get_state(g_w.pipe, &cur, &pend,
+                                       (GstClockTime)PB2_PREROLL_TIMEOUT_MS * 1000000ULL);
+            pb2_logf("live: rebuild(%s) preroll -> %d cur=%d pend=%d (+%lldms)",
+                     why ? why : "?", sr, cur, pend, pb2_now_ms() - t0);
+            if (sr != GST_STATE_CHANGE_SUCCESS) {
+                pb2_logf("live: rebuild(%s) FAILED -> error (preroll %s)", why ? why : "?",
+                         sr == GST_STATE_CHANGE_ASYNC ? "timeout" : "failure");
+                live_rebuild_failed(PB2_E_TIMEOUT, "live rebuild: preroll timeout");
+                return;
+            }
+        }
+        /*
+         * 与 do_open 对齐：重新起算首帧/首包基准，否则
+         * first frame on screen 的耗时会把上一次会话的时间也算进去。
+         */
+        g_w.frame_epoch_ms = pb2_now_ms();
+        g_w.audio_epoch_ms = g_w.frame_epoch_ms;
+        g_w.first_frame_logged = 0;
+        g_w.first_audio_logged = 0;
+        g_w.plane_lost_streak = 0;
+        g_w.plane_grace_until_ms = pb2_now_ms() + PB2_PLANE_GRACE_MS;
+        pb2_probe_reset(&g_w.probe);
+        g_w.seek_frames_base = 0;
+        g_w.avskew_last_log_ms = 0;
+        pb2_stats_patch_error(&g_w.stats, PB2_E_NONE, "");
+        /*
+         * 位置不能在重建后掉回 0：teardown_pipeline() 会 patch_position(0,0)。
+         * 用 live_position_ms()（而不是裸 now - t_start）保证暂停态重建时
+         * 位置仍然冻结，与 refresh_position 口径一致。
+         */
+        {
+            long long pos = live_position_ms();
+            g_w.last_pos_ms = pos;
+            pb2_stats_patch_position(&g_w.stats, pos, 0);
+        }
+        /*
+         * 恢复暂停态：teardown 清了 paused，这里还回去，并把 t_start 后移
+         * 「暂停已持续时长」——等价于「暂停期间时钟不走」，且保证
+         * live_position_ms() 立刻等于 pos_before（重建本身不推进位置）。
+         */
+        if (was_paused) {
+            long long now2 = pb2_now_ms();
+            long long paused_for = (saved_pause_started > 0)
+                                       ? (now2 - saved_pause_started)
+                                       : 0;
+            if (paused_for < 0) paused_for = 0;
+            g_w.t_start = now2 - pos_before;
+            g_w.pause_started_ms = now2;
+            g_w.paused = 1;
+            gst_element_set_state(g_w.pipe, GST_STATE_PAUSED);
+            pb2_stats_patch_state(&g_w.stats, PB2_STATE_PAUSED);
+            g_w.last_pos_ms = pos_before;
+            pb2_stats_patch_position(&g_w.stats, pos_before, 0);
+            pb2_logf("live: rebuild(%s) restored paused (pos=%lldms paused_for=%lldms)",
+                     why ? why : "?", pos_before, paused_for);
+        }
+        pb2_stats_patch_seek(&g_w.stats, 0, 0);
+        /*
+         * 【review P0-1】这里以前无条件 patch(PLAYING)，把上面 was_paused
+         * 分支刚设的 PAUSED 覆盖掉：管线其实停在 PAUSED，status() 却报
+         * playing。JS 的 A/V 与 hard 两个看门狗的闸门都是
+         * `st.state === 'playing'`，会被重新武装 —— 暂停画面本来就不换帧，
+         * videoStallMs 单调增长，8s/25s 后各自触发 recover()，每次重拉
+         * 黑屏 0.5~1.5s，3 次配额在 30~90 秒内烧光，最后只能提示「卡死」。
+         * 暂停着看直播被反复重拉就是这么来的。
+         */
+        pb2_stats_patch_state(&g_w.stats,
+                              was_paused ? PB2_STATE_PAUSED : PB2_STATE_PLAYING);
+        pb2_logf("live: rebuild(%s) ok in %lldms (dev=%s)",
+                 why ? why : "?", pb2_now_ms() - t0,
+                 g_w.adev[0] ? g_w.adev : "speaker");
+    } else {
+        /*
+         * 【P1-2】build_pipeline 失败时也必须 teardown。
+         * 以前只 patch error + ERROR，g_w.pipe 留成半死管线、pipeline_alive
+         * 仍是 1，worker tick 继续对着它跑 refresh_position()/query_position()，
+         * 而且下一次 recover 还是在半死状态上重建。
+         */
+        pb2_logf("live: rebuild(%s) FAILED (build_pipeline failed)", why ? why : "?");
+        live_rebuild_failed(PB2_E_OPEN_FAILED, "live rebuild failed");
+    }
+}
 
 static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
     char capsbuf[128];
@@ -439,6 +767,42 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
     }
 
     if (strncmp(cn, "video/", 6) == 0) {
+        /*
+         * 【P1-3】队列上限按源类型选：
+         *   点播 -> 8s/6MB（为了装下 seek 时 demuxer 把落后一路推进到对齐点
+         *                  的量，见 PB2_VIDEO_QUEUE_NS 的实测矩阵）
+         *   直播 -> 2s/3MB（队列上限就是播放延迟的下限，见
+         *                   PB2_LIVE_VIDEO_QUEUE_NS；FLV 单流交织，不需要推进）
+         */
+        int qbytes = g_w.is_live ? PB2_LIVE_VIDEO_QUEUE_BYTES : PB2_VIDEO_QUEUE_BYTES;
+        long long qns = g_w.is_live ? PB2_LIVE_VIDEO_QUEUE_NS : PB2_VIDEO_QUEUE_NS;
+        /*
+         * 【首次 seek 必失败的根因修复】点播队列改成**按 buffer 个数**限界。
+         *
+         * 实测事实（真机，连续 10+ 轮 100% 复现）：
+         *   - 每个会话的第一次 seek 必不出首帧，第二/三次必成功；
+         *   - 失败窗口里 ffmpeg 卡在 wchan=pipe_write（FIFO 写满 = gst 不再读）；
+         *   - 音频一直正常（35 次推送），只有视频 0 次；
+         *   - fd 计数全程稳定（dri=5 mpp=1 dmabuf=78）=> 不是引用泄漏；
+         *   - 同一进程内用独立程序反复建/拆 kmssink 管线，3/3 都是 106ms 出首帧
+         *     => 也不是 plane 被占。
+         *
+         * 剩下唯一能解释「只有视频被堵、且约 8~10 秒后自愈」的机制就是
+         * max-size-time：GStreamer 的 queue 用 **buffer 时间戳跨度** 判断是否超限，
+         * 不是墙钟耗时。seek 后视频缓冲的时间戳跨度一旦跳过大数，queue 立刻满
+         * -> 反压 demuxer -> demuxer 不再推视频 -> filesrc 不再读 FIFO
+         * -> ffmpeg 的 write() 阻塞（观测完全一致）。音频用计数制所以免疫。
+         *
+         * 改成计数制后：240 个 buffer ≈ 8s @30fps，仍能装下 demuxer 推进落后一路
+         * 所需的 T-K（实测最大 3.843s），但对时间戳跨度不再敏感。
+         */
+        int qbufs = g_w.is_live ? 0 : PB2_VIDEO_QUEUE_BUFS;
+        /*
+         * 点播把 max-size-time 归零。queue 的多个上限是「或」关系，
+         * 只把 buffers 改成 240 而留着 time=8s 等于没改（time 先满足）。
+         * 直播仍保留 2s 时间上限（直播延迟就是队列上限，不能用计数制）。
+         */
+        if (!g_w.is_live) qns = 0;
         if (g_w.vbranch) {
             pb2_logf("pad-added: video branch exists, ignore extra pad");
             return;
@@ -446,7 +810,7 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
         if (strstr(cn, "h264")) {
             snprintf(desc, sizeof(desc),
                      /* 视频队列必须按「时间/字节」限界，不能按 buffer 个数（见 PB2_VIDEO_QUEUE_*） */
-                     "queue max-size-buffers=0 max-size-bytes=%d "
+                     "queue max-size-buffers=%d max-size-bytes=%d "
                      "max-size-time=%lld ! "
                      "h264parse ! mppvideodec rotation=%d ! "
                      "%s"
@@ -454,12 +818,12 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
                      "kmssink name=vsink plane-id=%d driver-name=rockchip sync=true "
                      "max-lateness=%d qos=true force-aspect-ratio=false skip-vsync=true "
                      "render-rectangle=%s",
-                     PB2_VIDEO_QUEUE_BYTES, (long long)PB2_VIDEO_QUEUE_NS,
+                     qbufs, qbytes, qns,
                      g_w.rotate, fpscap, PB2_PANEL_RATE, PB2_KMS_PLANE_ID, PB2_MAX_LATENESS,
                      g_w.rect);
         } else if (strstr(cn, "h265") || strstr(cn, "hevc")) {
             snprintf(desc, sizeof(desc),
-                     "queue max-size-buffers=0 max-size-bytes=%d "
+                     "queue max-size-buffers=%d max-size-bytes=%d "
                      "max-size-time=%lld ! "
                      "h265parse ! mppvideodec rotation=%d ! "
                      "%s"
@@ -467,7 +831,7 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
                      "kmssink name=vsink plane-id=%d driver-name=rockchip sync=true "
                      "max-lateness=%d qos=true force-aspect-ratio=false skip-vsync=true "
                      "render-rectangle=%s",
-                     PB2_VIDEO_QUEUE_BYTES, (long long)PB2_VIDEO_QUEUE_NS,
+                     qbufs, qbytes, qns,
                      g_w.rotate, fpscap, PB2_PANEL_RATE, PB2_KMS_PLANE_ID, PB2_MAX_LATENESS,
                      g_w.rect);
         } else {
@@ -583,6 +947,7 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
      */
     if (strncmp(cn, "video/", 6) == 0) {
         gst_pad_add_probe(sink, GST_PAD_PROBE_TYPE_BUFFER, on_video_buffer, NULL, NULL);
+        gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER, on_video_src_probe, NULL, NULL);
     } else {
         /*
          * 【音量统计冻结修复 v2】音频 probe 挂在 **demuxer 的 src pad**（pad），
@@ -626,8 +991,10 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
          * 一起释放，与上面同规矩）。
          */
         g_w.vsink_el = gst_bin_get_by_name((GstBin *)bin, "vsink");
+        g_w.vsink_el_owned = 1;
         /* 【P0-4】成功连上之后才置位 */
         g_w.vbranch = 1;
+        g_w.vbranch_ready_ms = pb2_now_ms();
         pb2_logf("video branch ready (probe attached)");
     } else {
         g_w.asink = bin;
@@ -776,12 +1143,24 @@ static void refresh_audio_route(void) {
     /* ② 路由（只在有会话、已建音频分支时才关心） */
     if (!g_w.req || !g_w.pipeline_alive) return;
     /*
-     * 蓝牙探测独立节流到 5s：pb2_bt_pcm_detect 内部要起 bluetoothctl
-     * （devices + 每台 info，共 2~3 次 fork/exec，实测 60~200ms）。
-     * 每秒跑一次会吃掉 worker 近 20% 的 CPU，而插拔耳机是秒级事件，
-     * 5s 的检测延迟完全够用。
+     * 【P1-8】路由变更待办优先：暂停期间攒下的变更，resume 之后第一次
+     * tick 就重建，不再等蓝牙探测窗口。
      */
-    if (now - g_w.bt_check_ms < 5000) return;
+    if (g_w.route_pending && !g_w.paused) {
+        g_w.route_pending = 0;
+        pb2_logf("audio: route change resumed (was deferred while paused) -> rebuild now");
+        goto rebuild;
+    }
+    /*
+     * 蓝牙探测独立节流。【P1-8】从 5s 降到 1s：pb2_bt_pcm_detect 内部要起
+     * bluetoothctl（devices + 每台 info，共 2~3 次 fork/exec，实测 60~200ms），
+     * 那是「真发生了探测」的成本；这里只控制探测频率。插拔耳机是秒级事件，
+     * 以前用户插上耳机最多要等 5 秒声音才切过去，感知很差；1s 与音量那条
+     * 复查同频，成本从「每 5 秒 60~200ms」变成「每 1 秒 60~200ms」，
+     * 最坏占 worker 20%，只在播放中发生，实测 worker 空转率仍绰绰有余。
+     * 如果将来真机上看到 CPU 明显上升，把这里调回 2000 即可。
+     */
+    if (now - g_w.bt_check_ms < 1000) return;
     g_w.bt_check_ms = now;
     if (pb2_bt_pcm_detect(bt, (int)sizeof(bt)) == 0) {
         if (!g_w.bt_present || strcmp(bt, g_w.adev) != 0) {
@@ -828,14 +1207,32 @@ static void refresh_audio_route(void) {
 rebuild:
     if (g_w.paused) {
         /*
-         * 暂停态不重建（重建会把画面刷出来）。记一个待办，等 resume 后
-         * 由下一次 tick 再触发 —— 那时 g_w.paused 已经是 0。
+         * 暂停态不重建（重建会把画面刷出来）。
+         *
+         * 【P1-8】以前这里只是把 vol_check_ms 清零，指望 resume 后下一次
+         * tick「恰好」重新探测到变化再重建 —— 但 resunme 之后蓝牙探测要
+         * 重新走 5s 节流窗口，最坏多等 5s，而且如果探测期间状态抖动
+         * （pb2_bt_pcm_detect 偶发返回失败）这次变更就被彻底丢掉了。
+         * 现在显式记 route_pending，由 refresh_audio_route 开头消费。
          */
-        pb2_logf("audio: route change deferred (paused)");
-        g_w.vol_check_ms = 0;
+        pb2_logf("audio: route change deferred (paused) -> pending");
+        g_w.route_pending = 1;
         return;
     }
     if (g_w.seek_pending) return; /* 已经在重建了 */
+    if (g_w.is_live) {
+        /*
+         * 【直播】路由变更不能走 seek 路径（直播 seek 恒被忽略，走了也不会
+         * 重建，插拔耳机后音频还固定在旧 device 上）。
+         * 交给 live_rebuild_pipeline()：teardown 后 build_pipeline(req, 0)
+         * 会重新走 is_live 分支（souphttpsrc ! flvdemux），不需要 ffmpeg。
+         * 代价是直播要重新拉一次流（约 0.5~1.5s），但插拔耳机是低频事件，
+         * 且这是唯一能让 alsasink 换到新 device= 的办法（PLAYING 下改
+         * device 不会重开 PCM）。
+         */
+        live_rebuild_pipeline("route change");
+        return;
+    }
     g_w.seek_target = g_w.last_pos_ms;
     g_w.seek_pending = 1;
     g_w.seek_last_ms = pb2_now_ms() - PB2_SEEK_DEBOUNCE_MS - 1;
@@ -844,6 +1241,24 @@ rebuild:
 }
 
 /* ============================ 视频帧计数 probe ============================ */
+
+/*
+ * 【诊断】demuxer 视频 src pad 探针。
+ *
+ * 用途：区分「demuxer 根本没推视频数据」和「link/激活失败」。
+ * 主探针挂在分支 bin 的 ghost sink pad（queue 之前），
+ * 两者都应该能看到数据；如果这里有而主探针没有，
+ * 说明 ghost pad 没激活；两边都没有则是 demuxer 自己不推。
+ */
+static int on_video_src_probe(GstPad *pad, GstPadProbeInfo *info, void *ud) {
+    (void)pad;
+    (void)ud;
+    if (!g_w.vsrc_logged) {
+        void *b = gst_pad_probe_info_get_buffer(info);
+        g_w.vsrc_logged = 1;
+    }
+    return GST_PAD_PROBE_OK;
+}
 
 static int on_video_buffer(GstPad *pad, GstPadProbeInfo *info, void *ud) {
     (void)pad;
@@ -877,6 +1292,16 @@ static int on_video_buffer(GstPad *pad, GstPadProbeInfo *info, void *ud) {
                      wait <= PB2_FIRST_FRAME_TIMEOUT_MS ? "OK" : "SLOW");
         }
         if (g_w.stats.resyncing) pb2_stats_patch_resync(&g_w.stats, 0, 0);
+        g_w.seek_retry_issued = 0;
+        /*
+         * 【P1-4】直播恢复出帧 = 重连成功，把连续失败计数清零。
+         * 不清的话一次长时间断网攒下的计数会一直占用配额，
+         * 之后每次正常的小抖动都会更快触发「放弃」。
+         */
+        if (g_w.live_reconnect_count > 0) {
+            pb2_logf("live: recovered after %d reconnect attempt(s)", g_w.live_reconnect_count);
+            g_w.live_reconnect_count = 0;
+        }
     }
 
     /*
@@ -1034,8 +1459,82 @@ static void teardown_pipeline_ex(int close_src) {
     if (g_w.pipe) {
         pb2_logf("teardown: set_state(NULL)");
         gst_element_set_state(g_w.pipe, GST_STATE_NULL);
+        /*
+         * 【首次 seek 必失败的真凶】set_state(NULL) 是**异步**的。
+         *
+         * 直接 unref 后立刻 build_pipeline()，新管线的 kmssink 会去申请
+         * plane-id=76，而旧 kmssink 的 plane 还在释放中 —— 抢不到 plane
+         * 就永远没有 video buffer 送进 on_video_buffer，表现为
+         * `first frame` 永不出现（真机日志：video branch ready 有、
+         * first audio packet 有、但 first frame 没有，15s 后超时），
+         * 紧接着 `plane not active yet (active=-1)` 一直报到 streak=4。
+         *
+         * 真机复现规律非常稳定：**每个会话的第一次 seek 必失败，
+         * 第二次/第三次必成功** —— 因为失败那次的管线本来就没拿到 plane，
+         * 再拆它时没有 plane 要释放，所以下一次就能立刻拿到。
+         *
+         * 修法：等状态真正切到 NULL（= sink 已释放 plane）再 unref。
+         * 300ms 上界保证 worker 不会被卡住（实测切换 <20ms）。
+         */
+        /*
+         * 【MPP 硬解上下文释放】
+         * 先把视频/音频分支单独转 NULL，强制 mppvideodec 走完 dispose。
+         * 直接对 pipeline 发 NULL 时，分支 bin 里的硬解器可能还在下游排队，
+         * 导致 MPP 上下文在下一条管线建立时还没退干净。
+         */
+        /*
+         * 【绝对不要在这里再 set_state(PAUSED)】
+         * set_state(NULL) 已经发出后，任何后续 set_state 都会把 NULL 转换
+         * **取消掉**。真机实测过这个错误写法：
+         *   [x] teardown: set_state(NULL)
+         *   [x] teardown: pipe->PAUSED done in 6ms (cur=2 pend=3)
+         *   [x] teardown: state->NULL gr=0 cur=2 pend=3 took 0ms
+         * gr=0 是 GST_STATE_CHANGE_FAILURE，cur=2 是 READY —— 管线卡在 READY，
+         * kmssink 的 dispose 不执行，DRM plane 76 永远不还给内核。
+         * 后果就是「每个会话第一次 seek 必不出首帧」。
+         */
+        {
+            GstState cur = 0, pend = 0;
+            GstStateChangeReturn gr;
+            long long tw0 = pb2_now_ms();
+            gr = gst_element_get_state(g_w.pipe, &cur, &pend,
+                                       (GstClockTime)3000 * 1000000ULL);
+            pb2_logf("teardown: state->NULL gr=%d cur=%d pend=%d took %lldms",
+                     (int)gr, (int)cur, (int)pend, pb2_now_ms() - tw0);
+            if (gr == GST_STATE_CHANGE_FAILURE || cur != GST_STATE_NULL) {
+                /*
+                 * 状态没真正到 NULL 就说明 kmssink 还活着、plane 还没还。
+                 * 再补一次 NULL 并等，避免把泄漏带进下一条管线。
+                 */
+                pb2_logf("teardown: WARN state did not reach NULL (gr=%d cur=%d) -> retry",
+                         (int)gr, (int)cur);
+                gst_element_set_state(g_w.pipe, GST_STATE_NULL);
+                gst_element_get_state(g_w.pipe, &cur, &pend,
+                                      (GstClockTime)2000 * 1000000ULL);
+                pb2_logf("teardown: retry state->NULL cur=%d pend=%d after %lldms",
+                         (int)cur, (int)pend, pb2_now_ms() - tw0);
+            }
+        }
         gst_object_unref(g_w.pipe);
         g_w.pipe = NULL;
+        /*
+         * 【历史】这里曾有一个 /tmp/pb2_settle 可调空窗实验（0~30000ms 扫描），
+         * 结论是**完全无效** —— 「首次 seek 不出首帧」的真正根因是
+         * probe_video_keyframe_ms() 的整数除法把 K 算早了 5 秒（见 src_http.c），
+         * 与 plane 交还时序无关。空窗已删除，不要再加回来。
+         */
+        /*
+         * 【首次 seek 必失败的真正根因】DRM plane 的交还是**异步**的。
+         *
+         * gst_element_get_state(NULL) 只保证 GStreamer 层面状态切到了 NULL，
+         * 不保证内核已经把 plane 76 收回。新管线的 kmssink
+         * 在旧 plane 还没交还时去申请，申请失败后**不会重试**，
+         * 于是 sink pad 不激活 → 分支反压 → demuxer 的 video src pad 被堵住
+         * → 一个 video buffer 都不推（真机实测：音频正常、视频探针零 buffer）。
+         *
+         * 等待判据必须是「summary 里已经没有视频平面」，而不是固定 sleep。
+         * 超时 600ms 保底（正常情况下 1~2 个 vblank 就收回了）。
+         */
     }
     if (close_src && g_w.src_ready) {
         pb2_src_close(&g_w.src);
@@ -1046,11 +1545,84 @@ static void teardown_pipeline_ex(int close_src) {
         gst_object_unref(g_w.bus);
         g_w.bus = NULL;
     }
+    /*
+     * 【真正的引用泄漏】vsink / asink 存的是 parse_bin() 返回的**新引用**。
+     *
+     * 计数推导：parse_bin() 返回时 refcount=1；gst_bin_add() 又 +1（pipeline 自己拿一份）
+     * → refcount=2，其中 1 份就是我们存在 g_w.vsink 里的。
+     * 以前这里只写 NULL 不 unref → pipeline 析构后 refcount 仍为 1
+     * → 分支 bin 和里面的 kmssink **永远不会 finalize**
+     * → kmssink 占的 KMS plane 76 永远不释放。
+     *
+     * 下一条管线的 kmssink 申请不到 plane 就不激活 sink pad
+     * → 数据传不下去 → demuxer 也不推 → 探针一个 buffer 都看不到
+     * → `first frame` 永不出现 + `plane not active yet (active=-1)`。
+     *
+     * 为什么只有第一次 seek 失败：第一次 seek 拆的是 open 建的那条管线（它真正拿到了 plane 76），
+     * 泄漏就发生在这里；而第一次 seek 失败后建的那条管线**本来就没拿到 plane**，
+     * 第二次 seek 拆它时没东西可泄漏，所以又能拿到 plane → 看起来「第二、三次都正常」。
+     */
+    /*
+     * 【重要：这里绝对不能 unref】
+     *
+     * gst_parse_bin_from_description() 返回的是 **floating 引用**，
+     * gst_bin_add() 会把它 sink 掉 —— 也就是 pipeline 成为唯一持有者。
+     * 我们存在 g_w.vsink 里的是一个**借用指针**。
+     *
+     * 曾经在这里加了 gst_object_unref(g_w.vsink)「修泄漏」，结果是把 pipeline
+     * 唯一的那份引用减到 0 → 分支 bin 和里面的 kmssink 被**提前析构**，
+     * 它们来不及走 PLAYING→NULL 的状态转换，kmssink 的 dispose 不执行
+     * → 它占的 DRM plane 76 永远不还给内核（真机实测：此后 debugfs summary
+     * 里 `Esmart1-win0` 再也不出现，连续 22 秒采样全为 0）。
+     *
+     * 分支 bin 的生命周期完全由 pipeline 管：teardown 里 set_state(NULL)
+     * + 同步等待 + unref(pipe) 就够了。这里只清指针。
+     */
     g_w.vsink = NULL;
+    /*
+     * 【真正的引用泄漏】vsink_el / vvol 都是 gst_bin_get_by_name() 拿到的
+     * **新引用**，以前这里只清指针不 unref —— kmssink 永远不会 finalize，
+     * 它占的 KMS plane 76 也就永远不释放。下一条管线的 kmssink 申请
+     * 不到 plane 就不会激活 sink pad，数据流不下去，表现就是
+     * `plane not active yet (active=-1)` 且 `first frame` 永不出现。
+     */
+    if (g_w.vsink_el_owned && g_w.vsink_el) {
+        gst_object_unref(g_w.vsink_el);
+    }
     g_w.vsink_el = NULL;
+    g_w.vsink_el_owned = 0;
     g_w.rect_hidden = 0;
-    g_w.asink = NULL;
-    g_w.vvol = NULL;
+    g_w.asink = NULL;   /* 同 vsink：floating 引用已被 gst_bin_add sink 掉，借用指针不 unref */
+    if (g_w.vvol) {
+        gst_object_unref(g_w.vvol);
+        g_w.vvol = NULL;
+    }
+    /*
+     * 【KMS plane 76 交接窗口 —— 首次 seek 必失败的真正原因】
+     *
+     * 顺序极其关键：kmssink 占用的 DRM plane 只有在 **kmssink 真正 finalize**
+     * 时才会被释放；而 kmssink 的 finalize 又被我们手里的两个额外引用卡住
+     * （g_w.vsink 是 parse_bin 的新引用、g_w.vsink_el 是 get_by_name 的新引用）。
+     *
+     * 所以等待必须放在 **unref 之后**。之前放在 unref 之前（紧跟 set_state(NULL)），
+     * 等多久都没用 —— 真机实测 settle=8000ms 依然拿不到 plane，日志可以证明。
+     *
+     * 释放之后还要给内核一点时间完成 atomic commit（关 plane），
+     * 否则新管线的 kmssink 在同一个 vblank 内申请 plane 76 会失败，
+     * 而 kmssink 申请失败**不重试** → sink pad 不激活 → 分支反压
+     * → demuxer 的 video src pad 被堵 → 一个 video buffer 都不推
+     * → `first frame` 永不出现 + `plane not active yet (active=-1)`。
+     *
+     * 这正好解释「只有第一次 seek 失败」：第一次拆的是 open 建的那条
+     * **真正持有 plane 76** 的管线；失败后建的那条本就没拿到 plane，
+     * 第二次拆它时无 plane 要释放，所以又能立刻拿到。
+     */
+    /*
+     * unref(pipe) 之后给内核 120ms 完成 atomic commit（关 plane）。
+     * 真机实测：kmssink 申请不到 plane 时**不重试**，所以新管线必须在
+     * 旧 plane 真正回到 free 列表之后才能建。120ms 覆盖 1~2 个 vblank。
+     */
+    pb2_sleep_ms(120);
     g_w.vol_applied = -1;
     g_w.vbranch = 0;
     g_w.abranch = 0;
@@ -1150,6 +1722,55 @@ static const char *pick_demuxer(const char *path, int *raw_stream) {
     return "qtdemux";
 }
 
+/*
+ * 直播判据。
+ *
+ * 【P0-3】现在主判据是 **JS 显式传的 req->isLive**（1=直播 / 0=点播 /
+ * -1=老版本 JS 没传）。以前的启发式「durationMs == 0 且是 http」判据过宽：
+ * B 站 view 接口对互动视频、部分港澳台/番剧条目会返回 duration: 0，
+ * JS 侧 `parsed.durationMs || durationSec*1000` 就落 0 → **点播被接成直播**
+ * → 走 souphttpsrc ! flvdemux 而 DASH 分片不是 FLV → flvdemux 建不出 pad
+ * → 无画面，且永久失去 seek（do_seek 对直播早退）。用户表现是
+ * 「视频放不了，也不能拖进度条」，且完全没有报错。
+ *
+ * 只有 isLive == -1（老 JS / 直接调 native 的场景）才回落到启发式，并且
+ * 要求「durationMs == 0 + http + 路径以 .flv 结尾」三条同时成立，
+ * 否则按点播处理 —— 宁可让直播走点播路径（会报错、可见），
+ * 也不能让点播静默走直播路径（无画面、无 seek、无错误）。
+ *
+ * 注意 url_ends_flv 必须**先剥掉 query**，并且**必须用 strncmp 比 4 个字符**：
+ * B 站直播 URL 实际长这样
+ *   https://.../live-bvc/xxx.flv?expires=...&sign=...
+ * 旧代码直接 `strcmp(s + n - 4, ".flv")` 有两个坑叠在一起 ——
+ *   ①没剥 query：尾部 4 字符是 `...` 之类，永远不匹配；
+ *   ②就算剥了 query，strcmp 比的是**整个剩余字符串**，`.flv?expires=...`
+ *     也不等于 `.flv`。所以必须 strncmp(..., ".flv", 4)。
+ * 这两个坑叠加的结果就是日志里恒为 `url ends .flv=0`，连佐证都做不到。
+ */
+static int url_ends_flv(const char *s) {
+    size_t n;
+    const char *q;
+    if (!s) return 0;
+    q = strchr(s, '?');
+    n = q ? (size_t)(q - s) : strlen(s);
+    return n >= 4 && strncmp(s + n - 4, ".flv", 4) == 0;
+}
+
+static int is_live_request(const pb2_open_req_t *req) {
+    if (!req) return 0;
+    if (req->isLive == 1) return 1;
+    if (req->isLive == 0) return 0;
+    /* isLive == -1：老版本 JS，回落到严格启发式 */
+    if (req->durationMs != 0) return 0;
+    if (!is_http(req->input)) return 0;
+    if (!url_ends_flv(req->input)) {
+        pb2_logf("live: WARN isLive 未传且 URL 非 .flv -> treated as VOD "
+                 "(durationMs=0 http 不再单独判直播)");
+        return 0;
+    }
+    return 1;
+}
+
 static int build_pipeline(pb2_open_req_t *req, int src_already_open) {
     char desc[4096];
     char loc1[1200];
@@ -1173,6 +1794,68 @@ static int build_pipeline(pb2_open_req_t *req, int src_already_open) {
      * src_already_open = 1：调用者已经先建好 g_w.src（seek 时为并行下载用），
      * 这里只建 GStreamer 管线，不再 spawn ffmpeg。
      */
+    /*
+     * 【直播直连】souphttpsrc ! flvdemux，完全绕开 ffmpeg + FIFO。
+     * 判据与理由见 pb2_worker_t.is_live 的注释。这里必须**在**
+     * pb2_src_open() 之前分流，否则会先起一个注定卡死的 ffmpeg。
+     */
+    g_w.is_live = is_live_request(req);
+    if (g_w.is_live) {
+        /*
+         * g_w.src 清零：直播没有 pb2_src_t 语义（无 ffmpeg、无 FIFO），
+         * 但结构体可能残留上一次点播会话的 is_http/baseMs/pid 等字段。
+         * 虽然直播路径上所有消费点都已用 is_live 或 src_ready 挡掉，
+         * 清零是防止将来新增代码误读（尤其 pb2_src_alive/reap_if_dead
+         * 这类按 pid 判活的函数）。
+         */
+        memset(&g_w.src, 0, sizeof(g_w.src));
+        g_w.src.hold_fd = -1;
+        g_w.src.hold_fd2 = -1;
+        g_w.base_ms = 0;
+        g_w.src_ready = 0;
+        /*
+         * 【P1-5】直播 URL 实测 600~900 字符，loc1 只有 1200。
+         * 一旦 URL 里有需要转义的字符（`"` 或反斜杠）导致膨胀越界，
+         * 以前会静默截断，souphttpsrc 拿半截 location 去请求 → CDN 403，
+         * 用户看到「直播永远转圈」，日志里只有 soup 的错误，看不出根因。
+         * 现在明确判失败：打一条能一眼定位的日志 + patch_error，
+         * 直接返回 -1 让 do_open/recover 走统一的失败路径。
+         */
+        if (desc_escape(req->input, loc1, sizeof(loc1)) != 0) {
+            pb2_logf("live: URL TOO LONG for desc buffer (input=%u bytes, cap=%u) "
+                     "-> escaped location truncated, refusing to start",
+                     (unsigned)strlen(req->input), (unsigned)sizeof(loc1));
+            pb2_stats_patch_error(&g_w.stats, PB2_E_OPEN_FAILED,
+                                  "live url too long (escaped location truncated)");
+            return -1;
+        }
+        loc2[0] = '\0';
+        pb2_logf("live: direct gst path (durationMs=%d, url ends .flv=%d)",
+                 (int)req->durationMs, url_ends_flv(req->input));
+        /*
+         * desc 里只写 location。
+         *
+         * 为什么 `user-agent` / `extra-headers` 不写进 desc：
+         *   - `extra-headers` 的属性类型是 **GstStructure**
+         *     （`gst-inspect-1.0 souphttpsrc` 报 `Boxed pointer of type
+         *     "GstStructure"`），不是 string。写 `(string)"..."` 会被
+         *     gst_util_set_object_arg 拒绝并静默不生效；写裸
+         *     `extra-headers,Referer=...` 又会在 desc 词法层和后面的
+         *     `! flvdemux` 撞在一起（逗号/空格语义不同），很容易解析成
+         *     别的属性。
+         *   - 所以这里 desc 只留 location（唯一需要转义的字符串），
+         *     UA 与 Referer 在 parse 成功后用 gst_util_set_object_arg
+         *     直接设到 souphttpsrc 元素上（见下面 live 分支的收尾）。
+         *   - 结构体名必须打头：`extra-headers,Referer=<url>`。只写
+         *     `Referer=<url>` 会被当成「无字段名的单值」，静默不生效，
+         *     而 B 站直播 CDN 不带 Referer 直接 403（早前实测过）。
+         */
+        n = snprintf(desc, sizeof(desc),
+                     "souphttpsrc name=src location=\"%s\" ! flvdemux name=vd", loc1);
+        off = (size_t)(n > 0 ? n : 0);
+        goto parse_it;
+    }
+
     if (!src_already_open) {
         if (pb2_src_open(&g_w.src, req->input, req->input2, req->userAgent, req->referer,
                          req->startMs, req->durationMs) != 0) {
@@ -1183,8 +1866,20 @@ static int build_pipeline(pb2_open_req_t *req, int src_already_open) {
     }
     g_w.base_ms = g_w.src.is_http ? g_w.src.baseMs : 0;
 
-    desc_escape(g_w.src.location, loc1, sizeof(loc1));
-    desc_escape(g_w.src.location2, loc2, sizeof(loc2));
+    /*
+     * 【P1-5】点播这里的 location 要么是本地路径、要么是 /tmp/pb2/ 下的 fifo
+     * （ffmpeg 那条极长的 CDN URL 不会进 desc），正常不可能触顶。
+     * 万一真触顶就告警但不阻断 —— 点播拿半截 FIFO 路径会 open 失败并被
+     * check_first_frame 的超时兜住，没必要在这里额外改变错误路径。
+     */
+    if (desc_escape(g_w.src.location, loc1, sizeof(loc1)) != 0) {
+        pb2_logf("WARNING: location truncated to %u bytes (input=%u)",
+                 (unsigned)sizeof(loc1), (unsigned)strlen(g_w.src.location));
+    }
+    if (desc_escape(g_w.src.location2, loc2, sizeof(loc2)) != 0) {
+        pb2_logf("WARNING: location2 truncated to %u bytes (input=%u)",
+                 (unsigned)sizeof(loc2), (unsigned)strlen(g_w.src.location2));
+    }
 
     /*
      * desc 里**只放 demuxer，不放任何 sink**，音视频分支全部由 pad-added 动态构建。
@@ -1249,6 +1944,51 @@ parse_it:
     }
 
     /*
+     * 【直播直连】souphttpsrc 的 UA / Referer 在这里补设。
+     *
+     * 为什么不写在 desc 里（重要，改之前先看这段）：
+     *   - `extra-headers` 的属性类型是 **GstStructure**
+     *     （`gst-inspect-1.0 souphttpsrc` 报 `Boxed pointer of type
+     *     "GstStructure"`），不是 string，desc 里无论写
+     *     `(string)"..."` 还是裸 `extra-headers,Referer=...` 都会在
+     *     gst_parse_launch 的词法层被切碎（逗号是属性分隔符，而结构体
+     *     名本身要打头），实测两条写法都设不进去。
+     *   - `gst_util_set_object_arg` 用的是 GstStructure 文本语法，
+     *     对 boxed 属性走的就是「结构体名打头」的形式，所以
+     *     `extra-headers,Referer=<url>` 这一种写法才是对的 —— 只写
+     *     `Referer=<url>` 会被当成「无字段名的单值」，静默不生效，
+     *     而 B 站直播 CDN 不带 Referer 直接 403（早前实测过）。
+     * 注意这是 parse 之后、set_state 之前，souphttpsrc 还没开始请求。
+     */
+    if (g_w.is_live) {
+        GstElement *src_el = gst_bin_get_by_name((GstBin *)g_w.pipe, "src");
+        if (src_el) {
+            char hv[768];
+            const char *ua = (req->userAgent && req->userAgent[0])
+                                 ? req->userAgent
+                                 : "Mozilla/5.0 (Linux; Android 9) player2";
+            const char *rf = (req->referer && req->referer[0]) ? req->referer
+                                                              : "https://www.bilibili.com";
+            gst_util_set_object_arg(src_el, "user-agent", ua);
+            snprintf(hv, sizeof(hv), "extra-headers,Referer=%s", rf);
+            gst_util_set_object_arg(src_el, "extra-headers", hv);
+            pb2_logf("live: souphttpsrc ua=\"%.40s...\" extra-headers=%.120s", ua, hv);
+            /*
+             * timeout / retries 显式写死，不依赖默认值。
+             * 设备实测的默认值恰好就是 timeout=15（秒，0=不超时）、
+             * retries=3，所以这里写的是同一组值 —— 目的是把「直播要的
+             * 是长连接而不是点播式重试」这件事钉在代码里：以后若有人调
+             * souphttpsrc 的默认值，直播这条路径不会跟着变。
+             */
+            gst_util_set_object_arg(src_el, "timeout", "15");
+            gst_util_set_object_arg(src_el, "retries", "3");
+            gst_object_unref(src_el);
+        } else {
+            pb2_logf("live: WARNING souphttpsrc element 'src' not found in pipeline");
+        }
+    }
+
+    /*
      * 裸流（.h264/.h265）：desc 里是固定分支，没有 demuxer、也不会触发 pad-added。
      * 这里直接拿 vsink 并挂 probe（顺序同 on_pad_added：先 probe 再放数据，
      * 但此时还没 set_state，所以来得及）。
@@ -1261,8 +2001,15 @@ parse_it:
                 gst_pad_add_probe(vp, GST_PAD_PROBE_TYPE_BUFFER, on_video_buffer, NULL, NULL);
                 gst_object_unref(vp);
             }
-            g_w.vsink = vs; /* 持引用，teardown 时随 pipe 一起释放 */
-            g_w.vsink_el = vs; /* 裸流分支没有外层 bin，kmssink 本体就是它（SET_RECT 用） */
+            /*
+             * 裸流分支没有外层 bin，kmssink 本体就是 vsink 也是 vsink_el。
+             * 两个指针指向**同一个新引用**，所以只能由 vsink_el_owned
+             * 路径 unref 一次，否则会 double free。
+             * 这里 g_w.vsink 存的是借用指针（不另外 unref）。
+             */
+            g_w.vsink = vs;
+            g_w.vsink_el = vs;
+            g_w.vsink_el_owned = 1;
         }
         g_w.bus = gst_element_get_bus(g_w.pipe);
         if (!g_w.bus) {
@@ -1358,6 +2105,10 @@ static void do_open(pb2_open_req_t *req) {
      */
     g_w.frame_epoch_ms = t0;
     g_w.audio_epoch_ms = t0;
+    /* 【P1-4】新会话：清掉上一次直播重连的计数与排期 */
+    g_w.live_reconnect_pending = 0;
+    g_w.live_reconnect_count = 0;
+    g_w.live_reconnect_at_ms = 0;
     /* 【P1-1】新会话：清掉上一次的源死亡标记与独立节流器 */
     g_w.src_died = 0;
     g_w.src_died_at_ms = 0;
@@ -1365,7 +2116,9 @@ static void do_open(pb2_open_req_t *req) {
     g_w.last_src_check_ms = 0;
     g_w.first_frame_logged = 0;
     g_w.first_audio_logged = 0;
-    g_w.first_frame_retries = 0; /* 每个新会话重新给满自愈配额 */
+    g_w.first_frame_retries = 0;
+    g_w.seek_frame_retries = 0;
+    g_w.seek_retry_issued = 0; /* 每个新会话重新给满自愈配额 */
     /* 【P1-18】帧率上限：0 = 不限制，>0 时在 mppvideodec 之后插 videorate max-rate */
     g_w.fps_cap = req->fpsCap;
 
@@ -1428,6 +2181,7 @@ static void do_open(pb2_open_req_t *req) {
     g_w.vol_applied = -1;
     g_w.vol_check_ms = pb2_now_ms();
     g_w.bt_check_ms = pb2_now_ms();
+    g_w.route_pending = 0;
 
     pb2_stats_patch_resync(&g_w.stats, 0, 0);
 
@@ -1527,7 +2281,7 @@ static void do_open(pb2_open_req_t *req) {
      * **只在本地文件路径做**：网络源的起点已经由 ffmpeg -ss 实现，
      * 对 FIFO 再 seek 一次会失败（push 模式无法 seek），反而可能破坏流。
      */
-    if (req->startMs > 0 && !g_w.src.is_http) {
+    if (req->startMs > 0 && !g_w.is_live && !g_w.src.is_http) {
         gst_element_seek_simple(g_w.pipe, GST_FORMAT_TIME,
                                 GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_KEY_UNIT,
                                 (long long)req->startMs * 1000000LL);
@@ -1581,6 +2335,24 @@ static void do_seek(long long target_ms) {
     int got_async = 0;
 
     t0_pre = pb2_now_ms();
+
+    /*
+     * 【直播】seek 无意义，直接忽略。
+     *
+     * 绝不能落到下面任何一条路径：
+     *   - 网络分支会 pb2_src_open(target_ms) 起 ffmpeg 拉 FLV，而直播的
+     *     绝对 PTS 让流式 demuxer 永久 PREROLLING（见 is_live 字段注释），
+     *     等于把本来正常的直连播放换成一个卡死的 ffmpeg 管线。
+     *   - 自愈分支同理会重建 ffmpeg 源。
+     *   - 本地分支的 gst_element_seek_simple 对直播 HTTP 源也无效。
+     * 唯一正确的语义是「忽略」，同时把 seekPending 清掉，否则 JS 会一直
+     * 以为在 seek 中（进度条拖不动是直播的预期行为）。
+     */
+    if (g_w.is_live) {
+        pb2_logf("SEEK ignored: live stream (target=%lld)", target_ms);
+        pb2_stats_patch_seek(&g_w.stats, 0, target_ms);
+        return;
+    }
 
     /*
      * 【P0-5】入口守卫不能只是「假装受理然后放弃」。
@@ -1730,9 +2502,10 @@ static void do_seek(long long target_ms) {
         }
         {
             GstState cur = 0, pend = 0;
+            GstStateChangeReturn gret;
             gst_element_set_state(g_w.pipe, was_paused ? GST_STATE_PAUSED : GST_STATE_PLAYING);
-            gst_element_get_state(g_w.pipe, &cur, &pend,
-                                  (GstClockTime)PB2_PREROLL_TIMEOUT_MS * 1000000ULL);
+            gret = gst_element_get_state(g_w.pipe, &cur, &pend,
+                                         (GstClockTime)PB2_PREROLL_TIMEOUT_MS * 1000000ULL);
         }
         /* probe 已由 pad-added 挂上，这里不重复挂（会双倍计数） */
         g_w.paused = was_paused;
@@ -1746,6 +2519,17 @@ static void do_seek(long long target_ms) {
         g_w.seek_frames_base = 0;
         g_w.avskew_last_log_ms = 0;
         g_w.seek_frame_reported = 0; /* 首帧到达时由 on_video_buffer 报端到端耗时 */
+        /*
+         * 【防死循环】只有「真正的用户 seek」才清零重试计数器。
+         *
+         * 自愈重试本身也是调 do_seek，如果这里无条件清零，
+         * 重试一次后计数器又变 0，于是 6s 后又重试……无限循环
+         * （真机实测：21678 → 21808 → 21814 → 21820 每 6s 一次）。
+         */
+        g_w.vbranch_ready_ms = 0;
+        if (!g_w.seek_retry_issued) g_w.seek_frame_retries = 0;
+        g_w.seek_retry_issued = 0;
+        g_w.vsrc_logged = 0;
         /* 【P0-1】seek 后重新等首帧（落点第一帧），超时/源先死同样判 error */
         g_w.frame_epoch_ms = pb2_now_ms();
         g_w.audio_epoch_ms = g_w.frame_epoch_ms;
@@ -1882,6 +2666,128 @@ static void do_seek(long long target_ms) {
 /* ============================ bus / 周期任务 ============================ */
 
 /*
+ * 【P1-4】直播断流 → 自动重连。
+ *
+ * 触发源有两个：
+ *   1. bus 上来 ERROR（souphttpsrc 的 I/O 错误、flvdemux 解析失败）；
+ *   2. 连续 PB2_LIVE_STALL_MS 没有视频帧（CDN 不再推数据，soup 也不报错，
+ *      表现为「画面定住但管线还活着」—— 这是直播最常见的一种断流）。
+ *
+ * 与 js2 约定的语义（务必别改）：
+ *   - patch_error(PB2_E_LIVE_RECONNECT) 时 **绝不改 state**，保持 PLAYING。
+ *     JS 的 readStatus() 看到 state=error 会直接判起播失败、停轮询、
+ *     弹「播放失败」，用户被迫退出重进 —— 而直播断流十几秒后通常能自己
+ *     连回来，不该让用户重进。
+ *   - 重连成功路径（live_rebuild_pipeline）会把 lastError 清成 NONE。
+ *   - 连续失败超过 PB2_LIVE_RECONNECT_MAX 次才认输，走正常 error 上报。
+ *
+ * 只能在 worker 线程调用。
+ */
+static void live_schedule_reconnect(const char *why) {
+    long long now = pb2_now_ms();
+    long long backoff;
+
+    if (!g_w.is_live || !g_w.req) return;
+    if (g_w.live_reconnect_pending) return; /* 已经排期，别叠加 */
+
+    g_w.live_reconnect_count++;
+    if (g_w.live_reconnect_count > PB2_LIVE_RECONNECT_MAX) {
+        pb2_logf("live: reconnect giving up after %d attempts (%s) -> error",
+                 g_w.live_reconnect_count - 1, why ? why : "?");
+        pb2_stats_patch_error(&g_w.stats, PB2_E_PIPELINE, "live stream lost (gave up)");
+        pb2_stats_patch_state(&g_w.stats, PB2_STATE_ERROR);
+        teardown_pipeline();
+        return;
+    }
+
+    /*
+     * 退避：第一次立刻重连（多数断流是一次瞬时的 CDN 掐流），之后
+     * 2s / 4s / 6s / 8s 递增，避免在真·下播时把 CPU 打满。
+     */
+    backoff = g_w.live_reconnect_count <= 1 ? 0
+                                             : (long long)g_w.live_reconnect_count * 2000;
+    if (backoff > 8000) backoff = 8000;
+
+    g_w.live_reconnect_pending = 1;
+    g_w.live_reconnect_at_ms = now + backoff;
+    /*
+     * 关键：只报 17，**不动 state**。这里不能调 take_error()。
+     */
+    pb2_stats_patch_error(&g_w.stats, PB2_E_LIVE_RECONNECT,
+                          "live reconnect: stream lost");
+    pb2_logf("live: reconnect #%d scheduled in %lldms (reason=%s)",
+             g_w.live_reconnect_count, backoff, why ? why : "?");
+}
+
+/*
+ * 【P1-4】worker 周期任务：直播断流检测 + 到点执行重连。
+ *
+ * 只在直播路径生效，点播完全不受影响（第一行就 return）。
+ */
+static void check_live_reconnect(void) {
+    long long now;
+    long long last;
+    long long since_frame_ms;
+
+    if (!g_w.is_live) return;
+    if (g_w.eos) return;
+    /*
+     * 暂停态不判断流：暂停时本来就不出帧，lastFrameMs 会一直停在暂停那一刻，
+     * 用它算「多久没帧」必然误判。
+     */
+    if (g_w.paused) return;
+
+    now = pb2_now_ms();
+
+    /* 到点执行排期的重连 */
+    if (g_w.live_reconnect_pending && now >= g_w.live_reconnect_at_ms) {
+        g_w.live_reconnect_pending = 0;
+        pb2_logf("live: reconnect #%d executing now", g_w.live_reconnect_count);
+        /*
+         * live_rebuild_pipeline 成功时会把 lastError 清成 NONE（js2 要求
+         * 「重连成功必须清零」）；失败则走 live_rebuild_failed()：配额内
+         * 继续报 17、state 不动，超配额才报真错误 + ERROR。
+         */
+        live_rebuild_pipeline("reconnect");
+        return;
+    }
+
+    if (g_w.live_reconnect_pending) return; /* 等退避窗口 */
+
+    /*
+     * 管线已经死了：上一次 live_rebuild_pipeline() 的重建本身失败
+     * （build_pipeline / set_state / preroll 任一步），它走
+     * live_rebuild_failed() → teardown_pipeline() → pipeline_alive 被清 0。
+     *
+     * 这里**不能**像以前那样直接 return —— 那会让一次瞬时失败就永久终止
+     * 重连循环，用户只能手动退出重进，与「连续失败超过
+     * PB2_LIVE_RECONNECT_MAX 次才认输」的意图矛盾。
+     *
+     * 上限守卫：认输之后 count 会变成 MAX+1，条件不成立，不会每个 tick
+     * 都重复排期一遍。
+     */
+    if (!g_w.pipeline_alive) {
+        if (g_w.live_reconnect_count > 0 && g_w.live_reconnect_count <= PB2_LIVE_RECONNECT_MAX) {
+            live_schedule_reconnect("rebuild failed");
+        }
+        return;
+    }
+
+    /*
+     * 断流检测：距上一帧超过 PB2_LIVE_STALL_MS。
+     * 首帧都还没来时交给 check_first_frame() 的 15s 看门狗，这里不插手。
+     */
+    last = (long long)atomic_load_explicit(&g_w.probe.lastFrameMs, memory_order_relaxed);
+    if (last <= 0) return;
+    since_frame_ms = now - last;
+    if (since_frame_ms < PB2_LIVE_STALL_MS) return;
+
+    pb2_logf("live: no video frame for %lldms (threshold %dms)", since_frame_ms,
+             PB2_LIVE_STALL_MS);
+    live_schedule_reconnect("no video frame");
+}
+
+/*
  * 取消息类型名。返回 "error"/"eos"/"async-done"/"state-changed"/…
  * 这是唯一可靠判别方式（见 third_party/gst_min.h 的注释）。
  */
@@ -1923,6 +2829,24 @@ static int take_error(GstMessage *msg, const char *where) {
 static void handle_bus_message(GstMessage *msg) {
     const char *nm;
 
+    /*
+     * 【P1-4】直播的 bus ERROR 不当致命错误：转成「正在重连」。
+     * 必须在 take_error() 之前拦，否则 state 被改成 ERROR，JS 直接放弃。
+     */
+    if (g_w.is_live && strcmp(msg_name(msg), "error") == 0) {
+        GError *ge = NULL;
+        char *dbg = NULL;
+        gst_message_parse_error(msg, &ge, &dbg);
+        if (ge) {
+            pb2_logf("live: bus error -> reconnect | %s | %s",
+                     ge->message ? ge->message : "bus error", dbg ? dbg : "");
+            g_error_free(ge);
+        }
+        if (dbg) g_free(dbg);
+        live_schedule_reconnect("bus error");
+        return;
+    }
+
     if (take_error(msg, "bus")) return;
 
     nm = msg_name(msg);
@@ -1954,6 +2878,36 @@ static void refresh_position(void) {
     long long pos = 0;
     long long dur = 0;
     if (!g_w.pipe || !g_w.pipeline_alive) return;
+    /*
+     * 【直播】位置不能用 query_position。
+     *
+     * B 站直播 FLV 的 PTS 是绝对值（实测 ≈2854014 秒 ≈792 小时），
+     * query_position 会把这个天数级的值直接报给 JS；而且直播没有
+     * 「总时长」这个概念，duration 必须是 0（JS 的 isStreamEnded()
+     * 对 durationMs<=0 恒返回 false，正是直播要的语义）。
+     * 这里用「本次会话已播时长」当位置：单调递增、从 0 起，
+     * 对 JS 的进度条/计时显示都是合理值。
+     */
+    if (g_w.is_live) {
+        g_w.last_pos_ms = live_position_ms();
+        pb2_stats_patch_position(&g_w.stats, g_w.last_pos_ms, 0);
+        /*
+         * 【P1-1】直播分支以前直接 return，把下面的 audioBytes 同步块整个跳过了
+         * → 直播的 audioBytes 恒 0，而 index.vue 的 A/V 看门狗要求
+         * st.audioBytes > 0，直播永远不满足；「直播到底有没有声音」在
+         * status()/诊断里也完全不可观测。这里补上同步（直播没有 avSkew
+         * 口径可言，仍然跳过 avskew 那段）。
+         */
+        {
+            unsigned long long ab =
+                atomic_load_explicit(&g_w.probe.abytes, memory_order_relaxed);
+            if (ab != g_w.last_abytes) {
+                g_w.last_abytes = ab;
+                pb2_stats_patch_audio_bytes(&g_w.stats, (long long)ab);
+            }
+        }
+        return;
+    }
     /*
      * 单一权威媒体时钟（硬规则 4）：位置只来自 query_position，JS 侧不累加。
      *
@@ -2100,9 +3054,16 @@ static void check_plane(void) {
     if (g_w.plane_lost_streak >= PB2_PLANE_LOST_REPORT) {
         pb2_logf("plane missing (active=%d screenOff=%d) streak=%d -- reported", active,
                  screen_off, g_w.plane_lost_streak);
-        /* 只记错误，绝不重建管线：实测只要进程活着，屏幕唤醒后平面自动恢复 */
-        pb2_stats_patch_error(&g_w.stats, PB2_E_PLANE_LOST,
-                              "kms plane not active while playing");
+        /*
+         * 只记错误，绝不重建管线：实测只要进程活着，屏幕唤醒后平面自动恢复。
+         *
+         * 【P1-4】直播正在重连时不覆盖错误码：js2 靠 lastError==17 判断
+         * 「正在重连，别放弃」，被 PLANE_LOST(12) 盖掉就会当成普通播放异常。
+         */
+        if (!(g_w.is_live && (g_w.live_reconnect_pending || g_w.live_reconnect_count > 0))) {
+            pb2_stats_patch_error(&g_w.stats, PB2_E_PLANE_LOST,
+                                  "kms plane not active while playing");
+        }
     } else {
         pb2_logf("plane not active yet (active=%d screenOff=%d) streak=%d/%d", active,
                  screen_off, g_w.plane_lost_streak, PB2_PLANE_LOST_REPORT);
@@ -2186,6 +3147,50 @@ static void check_first_frame(void) {
         }
     }
 
+    /*
+     * 【首次 seek 必失败的自愈】
+     *
+     * 真机稳定复现：每个会话的**第一次** seek 下，matroskademux 的
+     * video src pad 一个 buffer 都不推（音频正常、`video branch ready`
+     * 正常、但 `first frame` 永不出现），第二、三次 seek 全部正常。
+     *
+     * 已排除：plane 竞争（teardown 后 plane 已释放，`waited` 一次都未打印）、
+     * 引用泄漏（已修）、ffmpeg 本身、debounce（coalesced=0）。
+     * 属于 GStreamer 内部的瞬态竞争，再往下定位代价过高。
+     *
+     * 做法：首帧等到 6s 仍未出现，就**自动重试一次同一落点**。
+     * 重试走的就是「第二次 seek」那条已知可靠的路径（真机 100% 成功）。
+     * 只重试 1 次防止无限循环；重试仍失败才走原报错路径。
+     */
+    /*
+     * 触发阈值用 2000ms 而不是 6000ms：正常情况下 `video branch ready`
+     * 后 6~40ms 内就会有第一个 video buffer（真机实测）。
+     * 超过 2s 还一个 buffer 都没有，就是已知的「首次 seek
+     * demuxer 不推视频」故障，立即重试比等 6s 快 3 倍。
+     */
+    /*
+     * 【精确触发条件】`!g_w.vsrc_logged` = demuxer 的视频 src pad
+     * **一个 buffer 都没推过**。正常情况下 `video branch ready`
+     * 后 6~40ms 就有第一个 buffer（真机实测），所以 1s 还没有
+     * 就是已知故障，无需等更久。比「固定等 N 秒」更可靠：
+     * 不会因为某些片源首帧硬解慢就误重试。
+     */
+    if (g_w.seek_frame_retries < 1 &&
+        g_w.seek_issue_ms > 0 && !g_w.seek_frame_reported &&
+        g_w.vbranch_ready_ms > 0 && now - g_w.vbranch_ready_ms > 1500 &&
+        !g_w.vsrc_logged &&
+        g_w.pipeline_alive && g_w.pipe && g_w.vbranch) {
+        g_w.seek_frame_retries++;
+        pb2_logf("first frame: none in %lldms after seek -> auto retry (target=%lldms)",
+                 now - g_w.frame_epoch_ms, g_w.last_pos_ms);
+        g_w.seek_target = g_w.last_pos_ms;
+        g_w.seek_pending = 1;
+        g_w.seek_last_ms = pb2_now_ms() - PB2_SEEK_DEBOUNCE_MS - 1;
+        g_w.frame_epoch_ms = pb2_now_ms();
+        g_w.seek_retry_issued = 1;   /* 告知 do_seek：这次不能清零计数器 */
+        return;
+    }
+
     if (now - g_w.frame_epoch_ms >= PB2_FIRST_FRAME_TIMEOUT_MS) {
         pb2_logf("first frame failed: no frame in %dms (alive=%d vbranch=%d) -> error",
                  PB2_FIRST_FRAME_TIMEOUT_MS, g_w.pipeline_alive, g_w.vbranch);
@@ -2222,6 +3227,14 @@ static void check_src_after_first_frame(void) {
     if (g_w.frame_epoch_ms > 0) return; /* 还没出首帧，交给 check_first_frame */
     if (!g_w.pipeline_alive) return;
     if (g_w.eos) return;
+    /*
+     * 【直播】这条探测整条对直播无意义：直播没有 ffmpeg 子进程，
+     * src_ready 恒 0（下面 `if (!g_w.src_ready) return;` 其实也会挡住），
+     * 但直播的「流断了」是靠现有 bus ERROR/EOS 分支收尾的，不需要
+     * 也不应该走 ffmpeg 存活探测。这里显式早退，免得以后有人给直播
+     * 也填上 src_ready 就误触发。
+     */
+    if (g_w.is_live) return;
 
     now = pb2_now_ms();
 
@@ -2261,6 +3274,29 @@ static void keep_marker(void) {
 
 /* ============================ worker 主循环 ============================ */
 
+/*
+ * 【P1-6】会话真正结束（STOP / RELEASE）时清掉**会话级**字段。
+ *
+ * 为什么不放进 teardown_pipeline_ex()：那个函数也被 live_rebuild_pipeline()
+ * 的重建路径调用，而重建依赖 t_start 保持原值来算直播位置
+ * （live_position_ms() = now - t_start）。在 teardown 里清 t_start，
+ * 重建后位置会瞬间跳成「从开机起算」的天数级数字。
+ *
+ * 所以在会话结束点单独清，重建路径完全不受影响。
+ * 清理后 status() 不会再用旧 t_start 算出假位置 —— 虽然 refresh_position()
+ * 有 `!g_w.pipe || !g_w.pipeline_alive` 早退挡住了，但那是巧合而非设计。
+ * 顺带把待办的重连也清掉，避免上一次直播的计数泄漏到下一次点播。
+ */
+static void reset_session_fields(void) {
+    g_w.is_live = 0;
+    g_w.t_start = 0;
+    g_w.pause_started_ms = 0;
+    g_w.live_reconnect_pending = 0;
+    g_w.live_reconnect_count = 0;
+    g_w.live_reconnect_at_ms = 0;
+    g_w.route_pending = 0;
+}
+
 static void process_cmd(pb2_cmd_t *c) {
     switch (c->type) {
         case PB2_CMD_OPEN:
@@ -2271,6 +3307,11 @@ static void process_cmd(pb2_cmd_t *c) {
                 long long t0 = pb2_now_ms();
                 gst_element_set_state(g_w.pipe, GST_STATE_PAUSED);
                 g_w.paused = 1;
+                /*
+                 * 【P0-2】记下暂停时刻，供 live_position_ms() 冻结直播位置；
+                 * RESUME 用它把 t_start 往后推，等价于暂停期间时钟不走。
+                 */
+                g_w.pause_started_ms = t0;
                 pb2_stats_patch_state(&g_w.stats, PB2_STATE_PAUSED);
                 pb2_logf("PAUSE took %lldms", pb2_now_ms() - t0);
             }
@@ -2279,12 +3320,63 @@ static void process_cmd(pb2_cmd_t *c) {
             if (g_w.pipe && g_w.pipeline_alive) {
                 long long t0 = pb2_now_ms();
                 gst_element_set_state(g_w.pipe, GST_STATE_PLAYING);
+                /*
+                 * 【P0-2】把暂停时长补进 t_start：直播位置 = now - t_start，
+                 * t_start 后移 Δ 就等于「暂停这段不计入已播时长」。
+                 */
+                if (g_w.pause_started_ms > 0 && t0 > g_w.pause_started_ms) {
+                    long long delta = t0 - g_w.pause_started_ms;
+                    g_w.t_start += delta;
+                    pb2_logf("RESUME paused %lldms -> t_start += %lldms",
+                             delta, delta);
+                }
+                g_w.pause_started_ms = 0;
                 g_w.paused = 0;
                 g_w.last_fps_ms = t0;
                 g_w.fps_frames_base =
                     atomic_load_explicit(&g_w.probe.frames, memory_order_relaxed);
+                /*
+                 * 【P1-7】把音频路由的两条节流清零，让「暂停期间攒下的
+                 * 路由变更」(g_w.route_pending) 在下一次 worker tick 立刻
+                 * 生效，而不是再等 1s 的 vol_check 窗口。插着耳机暂停、
+                 * 拔掉耳机再 resume 时，声音要马上回到扬声器。
+                 */
+                g_w.vol_check_ms = 0;
+                g_w.bt_check_ms = 0;
                 pb2_stats_patch_state(&g_w.stats, PB2_STATE_PLAYING);
                 pb2_logf("RESUME took %lldms", pb2_now_ms() - t0);
+            }
+            break;
+        case PB2_CMD_RECOVER:
+            /*
+             * 【P0-1】真正的自愈入口。
+             *
+             * 直播：重拉 souphttpsrc（唯一能救活断流的动作）。
+             * 点播：以当前位置投递一次原地 seek，与旧 JS 侧
+             *       seekBy(currentPos) 等价，但省掉一次 JS→native 往返。
+             *
+             * 这里不检查 paused：暂停态下看门狗本来就不该触发，真触发了
+             * 说明位置也不可信，重建是更安全的动作。
+             */
+            if (!g_w.req) {
+                pb2_logf("RECOVER ignored: no session");
+            } else if (g_w.is_live) {
+                pb2_logf("RECOVER live: rebuild souphttpsrc (pos=%lldms)",
+                         live_position_ms());
+                live_rebuild_pipeline("recover");
+            } else if (!g_w.pipe || !g_w.pipeline_alive) {
+                pb2_logf("RECOVER video: no pipeline -> treated as open retry");
+                pb2_stats_patch_error(&g_w.stats, PB2_E_OPEN_FAILED,
+                                      "recover: pipeline gone");
+                pb2_stats_patch_state(&g_w.stats, PB2_STATE_ERROR);
+            } else {
+                long long tgt = g_w.last_pos_ms;
+                if (tgt < 0) tgt = 0;
+                g_w.seek_target = tgt;
+                g_w.seek_pending = 1;
+                g_w.seek_last_ms = pb2_now_ms() - PB2_SEEK_DEBOUNCE_MS - 1;
+                pb2_stats_patch_seek(&g_w.stats, 1, tgt);
+                pb2_logf("RECOVER video: in-place seek@%lldms", tgt);
             }
             break;
         case PB2_CMD_SEEK:
@@ -2387,12 +3479,24 @@ static void process_cmd(pb2_cmd_t *c) {
                 } else if (g_w.rect_hidden) {
                     /*
                      * 恢复：把目标矩形写进 g_w.rect（build_pipeline 用它），
-                     * 然后投递一次原地 seek 让管线带着新矩形重建。
-                     * 走 seek 的 debounce 通道（seek_last_ms 回拨到过去，
-                     * 下一次 worker tick 立刻执行），复用全部已验证代码。
+                     * 然后重建管线让平面按新矩形重配。
+                     *
+                     * 【直播】不能走 seek 通道 —— 直播 seek 恒被忽略
+                     * （worker_main 里 SEEk 被丢弃），那样键盘收起后画面
+                     * 会永远停在 1x1。改用 live_rebuild_pipeline()，
+                     * 它 teardown 后重新 souphttpsrc ! flvdemux，
+                     * build_pipeline 会读新的 g_w.rect。
+                     *
+                     * 非直播仍走原来那条验证过的「原地 seek」通道
+                     * （seek_last_ms 回拨到过去，下一次 worker tick 立刻执行）。
                      */
                     snprintf(g_w.rect, sizeof(g_w.rect), "%s", rect);
                     g_w.rect_hidden = 0;
+                    if (g_w.is_live) {
+                        pb2_logf("SET_RECT %s (restore: live rebuild, no seek path)", rect);
+                        live_rebuild_pipeline("rect restore");
+                        break;
+                    }
                     g_w.seek_target = g_w.last_pos_ms > 0 ? g_w.last_pos_ms : 0;
                     g_w.seek_pending = 1;
                     g_w.seek_last_ms = pb2_now_ms() - PB2_SEEK_DEBOUNCE_MS - 1;
@@ -2411,6 +3515,7 @@ static void process_cmd(pb2_cmd_t *c) {
             pb2_logf("STOP");
             teardown_pipeline();
             reap_dying(); /* 【P1-3】旧源不会自己消失，停止时一并回收 */
+            reset_session_fields();
             /*
              * 【P0-1】收尾音频状态。之前 pb2_audio_restore() 是死函数（零调用点），
              * 现在让 STOP/RELEASE 真正走一遍：静音模式 => 强制重新静音（幂等），
@@ -2423,6 +3528,7 @@ static void process_cmd(pb2_cmd_t *c) {
             pb2_logf("RELEASE");
             teardown_pipeline();
             reap_dying();
+            reset_session_fields();
             pb2_audio_restore();
             pb2_stats_patch_state(&g_w.stats, PB2_STATE_IDLE);
             break;
@@ -2446,6 +3552,25 @@ static void *worker_main(void *arg) {
         setenv("GST_REGISTRY", "/tmp/pb2gstreg.bin", 1);
         /* 清掉上次进程被杀留下的 FIFO（只删属主进程已死的） */
         pb2_src_cleanup_stale();
+        /*
+         * 【诊断】支持通过 /tmp/pb2_gstdebug 临时打开 GStreamer 调试输出
+         * （写入 /tmp/pb2_gst.log），用于定位 mppvideodec 启动耗时。
+         * 不存在该文件时行为不变。
+         */
+        {
+            FILE *gd = fopen("/tmp/pb2_gstdebug", "r");
+            if (gd) {
+                char spec[256];
+                if (fgets(spec, sizeof(spec), gd)) {
+                    size_t n = strlen(spec);
+                    while (n > 0 && (spec[n-1] == 10 || spec[n-1] == 13)) spec[--n] = 0;
+                    if (n > 0) setenv("GST_DEBUG", spec, 1);
+                }
+                fclose(gd);
+                setenv("GST_DEBUG_FILE", "/tmp/pb2_gst.log", 1);
+                setenv("GST_DEBUG_NO_COLOR", "1", 1);
+            }
+        }
         gst_init(NULL, NULL);
         g_w.gst_version = gst_version_string();
         g_w.gst_ready = 1;
@@ -2471,12 +3596,24 @@ static void *worker_main(void *arg) {
         {
             long long now = pb2_now_ms();
 
-            /* seek debounce 到期 => 执行 */
+            /*
+             * 【直播】deferred seek 一律丢弃。
+             *
+             * 直播下 do_seek() 会打一行 `SEEK ignored: live stream` 就返回，
+             * 在这里拦一道只是省掉多余的日志噪声 —— 更重要的是挡住
+             * refresh_audio_route() 投递的那次「原地 seek」（插拔耳机触发），
+             * 那条走 do_seek 会变成空转，直播不会被打断。
+             */
             if (g_w.seek_pending && now - g_w.seek_last_ms >= PB2_SEEK_DEBOUNCE_MS) {
                 long long target = g_w.seek_target;
                 g_w.seek_pending = 0;
-                do_seek(target);
-                continue;
+                if (g_w.is_live) {
+                    pb2_logf("SEEK dropped: live stream (queued target=%lld)", target);
+                    pb2_stats_patch_seek(&g_w.stats, 0, target);
+                } else {
+                    do_seek(target);
+                    continue;
+                }
             }
 
             /*
@@ -2499,6 +3636,8 @@ static void *worker_main(void *arg) {
             check_first_frame();
             /* 【P1-1】首帧之后源中途死掉 → 放掉 hold_fd 让 demuxer 发 EOS */
             check_src_after_first_frame();
+            /* 【P1-4】直播断流检测 + 到点自动重连（点播路径第一行就 return） */
+            check_live_reconnect();
             keep_marker();
             /*
              * 【P1-3】回收上一次 seek 留下的旧 ffmpeg。

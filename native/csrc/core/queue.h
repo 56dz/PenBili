@@ -55,6 +55,19 @@ typedef enum {
                             * i64 = x | (y<<16) | (w<<32) | (h<<48)
                             * w==0 或 h==0 → 隐藏平面（矩形 0,0,0,0）。
                             */
+    /*
+     * 【PB2_CMD_RECOVER】原地自愈，无参数。
+     *
+     * 以前 JS 侧 recoverSession() 只能探测到 native 没有 recover 导出，
+     * 于是退化成 seekBy(currentPos)。点播下这条路能用（seek 会重建管线），
+     * 但直播下 do_seek() 是早退的 —— 看门狗 3 次配额全打空转，
+     * 用户看到「画面冻住、点哪里都没反应，只能返回列表重进」。
+     *
+     * 现在 native 提供真正的自愈入口：
+     *   - 直播 → live_rebuild_pipeline("recover")（重拉 souphttpsrc）
+     *   - 点播 → 以当前位置投递一次原地 seek（与旧 JS 行为一致，但少一次往返）
+     */
+    PB2_CMD_RECOVER = 12,
     PB2_CMD_QUIT = 10
 } pb2_cmd_type_t;
 

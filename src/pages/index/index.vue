@@ -42,7 +42,10 @@
              代价是简介从 7 行缩到 5 行（192px 高度是固定预算，见 base.less .pleft-info）。 -->
         <text class="pnote">{{ play.note }}</text>
       </div>
-      <div class="pleft-btns">
+      <!-- 三个按钮（点赞/投币/收藏）直播态隐藏（用户反馈 m07570-3）。
+           直播没有「收藏夹」语义，点赞/投币对房间也不适用，留着只会占掉 74px
+           且点了没反馈。留空 div 保持 pleft 的 192+74 高度预算不变。 -->
+      <div v-if="!isLivePlay" class="pleft-btns">
         <div class="pbtn" @click="onToggleLike">
           <image class="pbtn-icon" :src="act.like ? ic.likeOn : ic.like" :width="26" :height="26"></image>
           <text :class="act.like ? 'pbtn-count-on' : 'pbtn-count'">{{ formatCount(act.likeCount) }}</text>
@@ -139,7 +142,10 @@
           </div>
           <!-- 直播：点击开播（本机 MPP 硬解，直连 B 站 FLV 源） -->
           <div v-else-if="it.kind === 'live'" :key="it.key" class="vrow" @click="onPlayItem(it)">
-            <image class="thumb thumb-sq" :src="it.cover" :width="93" :height="93"></image>
+            <!-- 封面必须是 16:9 长方形（用户反馈：「搜索直播时，每个直播的封面图片是正方形，
+                 而不是长方形」）。此前这里用 .thumb-sq 强制 93x93，与视频/图文/历史三栏的
+                 166x93 不一致，视觉上突然出现一个方块。统一走 .thumb。 -->
+            <image class="thumb" :src="it.cover" :width="166" :height="93"></image>
             <div class="vinfo">
               <text class="vtitle">{{ it.title }}</text>
               <text class="vmeta">{{ it.up }}{{ it.online ? ' · 人气 ' + formatCount(it.online) : '' }}{{ it.cate ? ' · ' + it.cate : '' }}</text>
@@ -252,16 +258,24 @@
     <!-- 播放态中列（用户手绘稿 m11950）：上=视频(469x240)，下=可拖动进度条(26)。
          点击视频区暂停/继续（用户要求「接下来要修改为点击视频播放区暂停」）。 -->
     <div v-if="mode === 'play'" class="pmid">
-      <div class="pvideo" @click="onTogglePlay">
+      <!-- 直播态：没有进度条，视频区撑满整个 469x266（见 base.less .pvideo-live）。
+           注意 KMS 平面是硬件 overlay，尺寸由 native 的 render-rectangle 决定，
+           这里的 class 只管 falcon 侧「挖孔」占位（hole）的几何 —— 两者必须一致，
+           否则点击热区与画面对不上。 -->
+      <div :class="isLivePlay ? 'pvideo pvideo-live' : 'pvideo'" @click="onTogglePlay">
         <!-- 点击视频区暂停/继续（用户要求 m11950-4）。
              hole 是视频平面上的透明占位，必须**自己**也绑 click —— falcon 的点击
              不一定从子节点冒泡到父容器，真机实测只绑父级会有一半面积点不动。 -->
-        <hole v-if="holeVisible" class="video-hole" @click="onTogglePlay"></hole>
-        <div v-else class="play-idle" @click="onTogglePlay">
+        <hole v-if="holeVisible" :class="isLivePlay ? 'video-hole video-hole-live' : 'video-hole'" @click="onTogglePlay"></hole>
+        <div v-else :class="isLivePlay ? 'play-idle play-idle-live' : 'play-idle'" @click="onTogglePlay">
           <text class="play-idle-text">{{ play.note || idleText }}</text>
         </div>
       </div>
+      <!-- 进度条直播态隐藏（用户反馈 m07570-3）。直播无时长、seek 无意义
+           （FLV 长连接不支持拖动），留着只会让用户白拖一次。
+           隐藏后 .pvideo 用 .pvideo-live 撑满 266px（见 base.less）。 -->
       <div
+        v-if="!isLivePlay"
         class="seek"
         @touchstart="onSeekTouch"
         @touchmove="onSeekTouch"
@@ -275,8 +289,12 @@
     </div>
 
     <!-- 播放态右列（用户手绘稿 m11950）：上=评论区(240)，下=输入框+发送按钮(26)。
-         点收藏按钮时整栏被收藏夹选择覆盖，上方有退出按钮，退出恢复评论区。 -->
-    <div v-if="mode === 'play'" class="pright">
+         点收藏按钮时整栏被收藏夹选择覆盖，上方有退出按钮，退出恢复评论区。
+         直播态整列隐藏（用户反馈 m07570-3「直播界面不应该出现评论区」）：
+         直播的评论流与点播不同族（弹幕式、实时滚动），复用点播评论区语义不对；
+         而且三个按钮（含收藏）在直播态已隐藏，favOverlay 永远不会被打开，
+         整列一起隐藏是安全的。隐藏后中列视频区靠 .pvideo-live 撑满 266px。 -->
+    <div v-if="mode === 'play' && !isLivePlay" class="pright">
       <!-- 收藏夹覆盖层 -->
       <template v-if="favOverlay">
         <div class="fav-head">
@@ -342,6 +360,15 @@
         </div>
       </template>
     </div>
+
+    <!-- 直播态右列占位（用户反馈 m07570-3 隐藏评论区后的副作用，必须补）。
+         为什么不能只删：holeVisible 为真时根节点套 .page-live（背景透明，让 KMS 视频
+         平面透出来 —— 见 base.less 顶部关于 2026-09-24 闪烁的注释）。.pleft 和 .pvideo
+         都有自己的不透明底色，但右列 278px 原本靠 .pright 的 @nav-background 遮住。
+         一旦 .pright 不渲染，这 278px 就没有任何不透明元素兜底，会把上一屏的 fb 残留
+         像素透出来（浏览态列表的封面、图文正文等），看起来像"右侧半屏花了"。
+         所以直播态放一个同宽同高、同底色的空占位，几何与 .pright 完全一致。 -->
+    <div v-if="isLivePlay" class="pright-fill"></div>
 
     <!-- 图文详情：中列正文（896 宽，评论打开时被评论面板替换） -->
     <div v-if="mode === 'article' && !commentsOpen" class="astage">
@@ -439,6 +466,9 @@ import {
 import { fetchViewState, fetchFavFolders, setLike, addCoin, dealFav } from '../../services/bili/action.js';
 // 自检种子守卫：判断是否真该自动播（双开关），纯函数可单测 —— 详见该文件头注释
 import { isAutotestSeedEnabled, readAutotestSeed } from '../../services/autotest_seed.js';
+/* 直播「下播」判据的引擎级自证（probeLiveEnd）：纯计算，不取流不播放不亮屏。
+ * 单独成模块是为了让「假 status → 判据结论」这张用例表能被 Node 单测直接跑。 */
+import { runLiveEndCases } from '../../services/live_end_probe.js';
 // 主页网格列数 + 尾部裁剪（用户要求 m11950-3：加载更多后条目数必须能被列数整除）
 import {
   GRID_COLS,
@@ -505,6 +535,8 @@ import {
   describePlayError,
   ensureMixinResult,
   isStreamEnded,
+  isLiveEnded,
+  isLiveReconnecting,
   num,
   SEEK_STEP_MS,
   SEEK_FRAME_RETRY_DEADLINE_MS
@@ -628,6 +660,10 @@ const SEEK_NOTE_TIMEOUT_MS = 4000;
  * 15s 既留了余量，又不会让用户盯着"加载中"超过十五秒还不知道发生了什么。 */
 const NO_FRAME_FAIL_MS = 15000;
 
+/* 直播重连提示文案（P1-4 配套）：抽成常量，因为 tick 里有两处要跟它比对
+ * （「该挂了吗」「该撤了吗」），写两遍字符串迟早拼错。 */
+const LIVE_RECONNECT_NOTE = '直播重连中…';
+
 export default {
   name: 'PageBili',
   data() {
@@ -717,7 +753,9 @@ export default {
     idleText() {
       if (this.play.state === 'loading') return '取流中…';
       if (this.play.state === 'error') return '起播失败 · 返回列表';
-      if (this.play.state === 'ended') return '已播完';
+      /* 直播下播与点播播完是两种语义：点播说「已播完」，直播说「直播已结束」
+       * （用户反馈里「主播下播」≠「我看完了」）。P1-4。 */
+      if (this.play.state === 'ended') return this.isLivePlay ? '直播已结束' : '已播完';
       return '';
     },
     infoTitle() {
@@ -725,6 +763,16 @@ export default {
     },
     infoUp() {
       return this.play.session ? this.play.session.up : '';
+    },
+    /* 当前播放会话是不是直播（用户反馈 m07570-3：「直播界面不应该出现评论区、
+       三个按钮、和进度条」）。
+     *
+     * 判据只能看 session.live：play_session.js 的 openVideo 会把 resolveLiveUrl()
+     * 的 live:true 原样带进 session（:404 `live: !!rs.live`），而 session 是
+     * 播放页唯一的真相源（idlePlay() 的 session 是 null）。不能看 durationMs===0，
+     * 因为 durationMs 未知的点播（如 durl 回退）也是 0，会误判。 */
+    isLivePlay() {
+      return this.mode === 'play' && !!(this.play.session && this.play.session.live === true);
     },
     timeText() {
       const s = this.play.session;
@@ -825,6 +873,12 @@ export default {
      * "上次出帧时刻"可比，只能靠"零帧已经持续多久"来判断起播是不是真死了。
      * 用滚动计时而不是"起播时刻"：这样 seek 后、recover 后重新零帧也能被兜住。 */
     this._noFrameAt = 0;
+    /* 直播会话状态（P1-4）：
+     *   _livePlayed          = 本会话是否**曾经**出现过 playing（判「下播」时用来
+     *                          排除「刚进页面还没起播」—— 那时 state 同样是 idle）
+     *   _liveReconnectLogged = 「直播重连中…」是否已打过日志（避免每秒刷屏） */
+    this._livePlayed = false;
+    this._liveReconnectLogged = false;
     // 关键顺序：先恢复登录 Cookie（loadLocal），其末尾才发起首屏加载 ——
     // 否则首屏 rcmd 会以匿名身份发出，拿到的是默认推荐而非账号个性化推荐
     await this.loadLocal();
@@ -950,14 +1004,26 @@ export default {
          * native 日志里出现 `SET_RECT <x,y,w,h>`（= process_cmd 真的执行了
          * gst_util_set_object_arg），以及恢复时出现原矩形。 */
         this._probeRect = seed.probeRect;
+        /* probeLiveEnd：直播「下播」判据的引擎级自证（纯计算，不取流/不播放/不亮屏）。
+         * 为什么需要：真实下播要等主播关播，或断网等 souphttpsrc 重试耗尽才能复现；
+         * 而判据跑在真机 QuickJS 上（typeof/Number 行为可能与 Node 有差异）。
+         * 这个开关用假 status 喂真函数，几毫秒跑完，结论可直接 grep。 */
+        const probeLiveEnd = seed.probeLiveEnd;
+        /* 只开了 probeLiveEnd 的种子不能顺带跑全链路自检 —— 那会起播/切 tab，
+         * 把「纯计算自证」变成有副作用的播放流程。其余种子组合保持原有优先级不变。 */
+        const hasAutoBody = liveOnly || wbiStress > 0 || playProbe > 0 || soakSec > 0;
         logWarn('[bili] autotest seeded → ' + (liveOnly
           ? 'liveOnly room=' + (liveRoom || '-')
           : wbiStress > 0 ? 'wbiStress n=' + wbiStress
           : playProbe > 0 ? 'playProbe ' + playProbe + 's'
+          : (probeLiveEnd && !hasAutoBody) ? 'probeLiveEnd only'
           : 'run' + (soakSec > 0 ? ' soak=' + soakSec + 's' : '') + (soakBv ? ' bv=' + soakBv : '')));
+        // 自证先跑（无副作用、不打乱播放），再按原优先级分发
+        if (probeLiveEnd) this.runLiveEndProbe();
         if (liveOnly) this.runLiveAutotest(liveRoom, liveHold);
         else if (wbiStress > 0) this.runWbiStress(wbiStress);
         else if (playProbe > 0) this.runPlayProbe(playProbe, soakBv);
+        else if (probeLiveEnd && !hasAutoBody) await this.selectTab('rcmd'); // 只跑自证：停在正常首屏
         else this.runAutotest(soakSec, soakBv); // 自检内部自带首屏加载（避免与这里并发双 load 竞态）
       } else {
         await this.selectTab('rcmd'); // 首屏加载：此刻登录 Cookie 已就位 → 个性化推荐
@@ -1452,6 +1518,9 @@ export default {
       this._screenOffStallLogged = false;
       this._seekNoteAt = 0; // 新会话没有在等的 seek
       this._noFrameAt = 0;  // 新会话的"连续零帧"计时也归零
+      /* 直播会话状态按会话重置（P1-4）：换一场直播要重新判定「有没有播起来过」。 */
+      this._livePlayed = false;
+      this._liveReconnectLogged = false;
       const tick = async () => {
         if (this.gen !== myGen) {
           this.stopPoll();
@@ -1558,6 +1627,8 @@ export default {
          * frames 停涨，这在看门狗看来和"卡死"一模一样。若不放行，用户每拖一次进度条就
          * 可能被自愈逻辑再补一次 seek（雪上加霜，且耗尽 3 次配额）。 */
         const seekBusy = this._seekNoteAt > 0;
+        /* 直播标志：本 tick 内反复用（终止判据 + 重连提示），取一次避免多次走 computed。 */
+        const isLivePlay = this.isLivePlay;
         /* ---------- 流末尾判据（n9，必须在所有自愈看门狗之前） ----------
          * 播到结尾时源 ffmpeg 正常退出但 EOS 可能一直不到，native 的 state 会永远
          * 停在 playing、只把 pipelineAlive 置 0。若先跑看门狗，就会被判成"假死"而
@@ -1576,6 +1647,37 @@ export default {
             '[bili] video ended（末尾判据）pos=' + st.positionMs + ' dur=' + durMs +
             ' frames=' + st.frames + ' alive=' + (st.pipelineAlive ? 1 : 0) +
             ' → 停轮询，不再自愈 seek'
+          );
+          return;
+        }
+        /* ---------- 直播终止判据（P1-4，仅直播） ----------
+         * 直播没有时长，走不了上面的 isStreamEnded（dur<=0 恒 false）。主播下播时
+         * native 发 EOS → patch_state(STOPPED) → normalizeState 归一成 'idle'，
+         * 而页面原有的 `if (st.state === 'ended')` 分支在 native 上永远不可达 →
+         * 界面停在「播放中」、进度条（直播位置=墙钟）继续走。
+         *
+         * 为什么必须放在这里（自愈看门狗之前）：下播后管线还在但不再出帧，
+         * videoStallMs 会一路涨，两个 stall 看门狗会把「正常下播」当成假死，
+         * 反复原地 seek 重连 —— 用户看到的是界面卡住 + 无任何提示。
+         *
+         * 注意直播位置是墙钟（native live_position_ms()），EOS 后照样每秒 +1000，
+         * 所以**不能**用「位置停止增长」判结束，只能看 state 落回 idle/ended。 */
+        /* 先算重连标志：正在重连时 state 理论上仍是 playing（native2 约定不动 state），
+         * 但万一日后实现改了把它置回 idle，也不能把「重连中」误报成「已结束」——
+         * 这两个提示的语义完全相反（等一会儿就好 vs 别等了）。 */
+        const liveReconnecting = isLivePlay && isLiveReconnecting(st, isLivePlay);
+        if (!seekBusy && !liveReconnecting && isLiveEnded(st, isLivePlay, this._livePlayed)) {
+          this.play.state = 'ended';
+          this.play.note = ''; // 清掉「直播重连中…」之类残留
+          this.play.frames = st.frames;
+          this.play.positionMs = st.positionMs;
+          this.stopPoll();
+          logWarn(
+            '[bili] live ended（直播终止判据）state=' + st.state +
+            ' pos=' + st.positionMs + ' frames=' + st.frames +
+            ' played=' + (this._livePlayed ? 1 : 0) +
+            ' alive=' + (st.pipelineAlive ? 1 : 0) +
+            ' → 停轮询，界面显示「直播已结束」'
           );
           return;
         }
@@ -1601,7 +1703,11 @@ export default {
           st.state === 'opening' ||
           st.state === 'loading' ||
           (st.state === 'playing' && st.frames === 0);
-        if (waitingFrames && !screenOff && !seekBusy && !this.commentsOpen) {
+        /* 直播重连期间让位：重连必然伴随 frames 停涨（最坏 45s = souphttpsrc
+         * retries=3 × timeout=15s），按 15s 判失败会把「等一会儿就好」直接判死。
+         * native 侧有硬上限（45s 后自己报错 → state=error → 走页面失败路径），
+         * 所以这里不需要再加时间闸。 */
+        if (waitingFrames && !liveReconnecting && !screenOff && !seekBusy && !this.commentsOpen) {
           if (this._noFrameAt <= 0) this._noFrameAt = now;
           const noFrameMs = now - this._noFrameAt;
           if (noFrameMs > NO_FRAME_FAIL_MS) {
@@ -1625,6 +1731,9 @@ export default {
         if (
           !screenOff &&
           !seekBusy &&
+          /* 直播重连中让位：native 自己正在重连（最坏 45s），JS 再动手只会
+           * 和它抢管线；等 native 报错（state=error）或恢复，页面各自有路径。 */
+          !liveReconnecting &&
           st.state === 'playing' &&
           !st.gateActive &&
           // 重同步期间让位，但**有限让位**——超过 15s 仍未恢复就交回 JS 兜底，
@@ -1655,6 +1764,7 @@ export default {
         if (
           !screenOff &&
           !seekBusy &&
+          !liveReconnecting &&
           st.state === 'playing' &&
           !st.gateActive &&
           (!st.resyncing || (st.resyncingMs || 0) > 15000) &&
@@ -1708,6 +1818,10 @@ export default {
         // 若按这里判定就会把提示改成「加载中…」，用户看到的是"定位"变"加载"，语义错且更焦虑。
         if (seekWaiting) {
           // 保持「定位中…」原样
+        } else if (liveReconnecting) {
+          /* 直播重连期间画面必然停滞（frames 不再增长），若按下面判定就会挂
+           * 「加载中…」，但真实情况是「等几秒就好」—— 语义不同，交给下面的
+           * 重连提示统一处理，这里让位。 */
         } else if (st.state === 'playing' && st.frames === 0 && !st.resyncing) {
           if (this.play.note !== '加载中…') {
             this.play.note = '加载中…';
@@ -1720,6 +1834,46 @@ export default {
          * native 位置拉回去，表现为"拖完往左弹一下"。首帧到达后再交回 native。 */
         if (!seekWaiting) this.play.positionMs = st.positionMs;
         this.play.frames = st.frames;
+        /* 直播「曾经播起来过」的事实记录（P1-4）：主播下播就在我们点进去的瞬间发生时，
+         * 轮询（1s 一次）可能一次都抓不到 playing，只有 idle —— 若不留这条历史，
+         * isLiveEnded() 就只能靠 frames>0 兜底（位置不行：直播位置是墙钟，一进页面就有值）。
+         * 一旦确认 playing 就置位、会话内不清。 */
+        if (isLivePlay && st.state === 'playing' && !this._livePlayed) {
+          this._livePlayed = true;
+        }
+        /* ---------- 直播重连提示（P1-4 的 JS 侧配套） ----------
+         * native 直播走 souphttpsrc（timeout=15s、retries=3），最坏 45 秒画面冻住而
+         * state 仍是 playing，用户没有任何反馈。native2 在重连开始时 patch_error
+         * (PB2_E_LIVE_RECONNECT=17)（**不动 state**），重连成功清零。
+         *
+         * 这里只负责翻译成提示：出现就挂「直播重连中…」，消失就撤。
+         * 只撤自己挂的那句 —— 别把别人（音画恢复/加载中）的提示清掉。 */
+        if (isLivePlay) {
+          const reconnecting = liveReconnecting;
+          if (reconnecting) {
+            /* 只在「从没提示过」时挂提示 —— 不覆盖「定位中…」之类更紧急的实时状态
+             * 倒是次要；关键是别让每秒一次的 tick 反复重写同一个字符串。 */
+            if (this.play.note !== LIVE_RECONNECT_NOTE) {
+              this.play.note = LIVE_RECONNECT_NOTE;
+            }
+            if (!this._liveReconnectLogged) {
+              this._liveReconnectLogged = true;
+              logWarn(
+                '[bili] live reconnect（直播重连中）code=' + st.lastError +
+                ' msg=' + (st.lastErrorMsg || '') + ' pos=' + st.positionMs
+              );
+            }
+          } else {
+            /* 只撤自己挂的那句 —— 别把「加载中…」「音画不同步…」的提示清掉。 */
+            if (this.play.note === LIVE_RECONNECT_NOTE) this.play.note = '';
+            /* 日志标志必须无条件复位：提示可能已被上面的「加载中…」覆盖，
+             * 若只跟着 note 复位，下一次重连就再也打不出日志了。 */
+            if (this._liveReconnectLogged) {
+              this._liveReconnectLogged = false;
+              logWarn('[bili] live reconnect 已恢复 pos=' + st.positionMs + ' frames=' + st.frames);
+            }
+          }
+        }
         if (st.state === 'ended') {
           this.play.state = 'ended';
           this.play.note = ''; // 播完时清掉残留提示。
@@ -2718,6 +2872,34 @@ export default {
          全部复用按钮同一代码路径 —— 设备无触摸注入的替代取证） ---------- */
     // WBI 压测（诊断；种子 bili_autotest = {enabled:true, wbiStress:<N>}）：
     // 连打 N 次 nav 取密钥，统计失败率与成功时走的传输（jsapi / native）。
+    /* 直播「下播」判据的引擎级自证（种子 bili_autotest = {enabled:true, autotest:true, probeLiveEnd:true}）。
+     *
+     * 为什么要在真机上跑这个：判据已有 Node 单测，但真机是 QuickJS，
+     * `typeof` / `Number()` / 正则的行为与 V8 可能有细微差异；而真实下播无法随时复现
+     * （要等主播关播，或断网等 souphttpsrc 重试耗尽）。用假 status 喂真函数，
+     * 几毫秒跑完，结论可直接 grep。
+     *
+     * 不取流、不播放、不亮屏（屏幕保活都不会被这里触发），因此不影响防烧屏纪律。
+     * 失败时额外打一行「判据数据源不一致」警告，但不中断后续流程。 */
+    runLiveEndProbe() {
+      try {
+        const r = runLiveEndCases();
+        for (let i = 0; i < r.lines.length; i++) logWarn(r.lines[i]);
+        if (r.fail > 0) {
+          logWarn(
+            '[bili] LIVE-END PROBE 本机引擎结论与 Node 单测不一致：失败 ' +
+              r.fail + ' 条 —— 判据不可信，「直播已结束」可能误判！' +
+              ' 详情见上方 FAIL 行'
+          );
+          return { ok: false, pass: r.pass, fail: r.fail };
+        }
+        return { ok: true, pass: r.pass, fail: 0 };
+      } catch (e) {
+        // 自证代码自身抛错（比如模块加载失败）不能带崩首屏
+        logWarn('[bili] LIVE-END PROBE 异常: ' + ((e && e.message) || e));
+        return { ok: false, pass: 0, fail: -1 };
+      }
+    },
     async runWbiStress(n) {
       let okJsapi = 0;
       let okNative = 0;

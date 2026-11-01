@@ -95,6 +95,14 @@ export function seekFillWidth(ratio, fillMax) {
 // 播放态视频区（逻辑面坐标）：x 紧接左列，底部 26px 留给进度条
 export const VIDEO_AREA = { x: LEFT_COL_WIDTH, y: 0, width: MID_COL_WIDTH, height: 240 };
 
+// 直播态视频区：没有进度条，整列 266 全给画面（用户反馈 m07570-3）。
+//
+// 为什么必须单独一个矩形而不是复用 VIDEO_AREA：KMS 视频平面是硬件 overlay，
+// 它盖在 falcon UI 之上，所以 falcon 侧把 .pvideo 撑到 266（.pvideo-live）之后，
+// 若平面仍是 240 高，画面下方 26px 会留一条黑边，而 hole 的点击热区却是 266 ——
+// 用户点那条黑边能暂停、看着却像没画面。两边必须严格一致。
+export const LIVE_VIDEO_AREA = { x: LEFT_COL_WIDTH, y: 0, width: MID_COL_WIDTH, height: 266 };
+
 // 旧名兼容（图文态仍用「图标栏」这个概念时不再需要，保留导出避免既有 import 报错）
 export const ICON_BAR_WIDTH = LEFT_COL_WIDTH;
 export const ICON_BAR_GAP = 0;
@@ -185,14 +193,18 @@ export function probeVideoRects(videoWidth, videoHeight) {
 // 不能用全屏 960x266 作 box：21:9 等比 16:9 更宽的视频会按高适配得 w>448 →
 // blit 越出视频区、溢出到左右栏（X5 真机实测 bug）。也不能只约束宽度：
 // 视频区高度是 240（底部 26px 留给进度条，overlay 平面盖住 UI 画不上去）。
-export function playVideoRects(videoWidth, videoHeight) {
+export function playVideoRects(videoWidth, videoHeight, area) {
+  // area 缺省 = 点播视频区（240 高）。直播传 LIVE_VIDEO_AREA（266 高）。
+  // 只换 box 的 height/x/width 来源，信箱适配与物理换算复用同一套逻辑，
+  // 避免为直播另写一份换算（旋转变换错了极难排查，见上面 logicalRectToPhysicalRect 注释）。
+  const box = area || VIDEO_AREA;
   const fit = fitLogicalRect(videoWidth, videoHeight, {
-    width: VIDEO_AREA.width,
-    height: VIDEO_AREA.height
+    width: box.width,
+    height: box.height
   });
   const logical = {
-    x: VIDEO_AREA.x + fit.x,
-    y: VIDEO_AREA.y + fit.y,
+    x: box.x + fit.x,
+    y: box.y + fit.y,
     width: fit.width,
     height: fit.height
   };

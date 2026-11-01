@@ -245,12 +245,6 @@
   background-color: @card-border-color;
 }
 
-/* 直播卡：方形封面（166 宽列内居中 93x93） */
-.thumb-sq {
-  width: 93px;
-  height: 93px;
-}
-
 .vinfo {
   width: 166px;
   margin-top: 4px;
@@ -698,6 +692,27 @@
   align-items: center;
 }
 
+/* 直播态：没有进度条，视频区吃掉下方 26px 撑满整个 469x266（用户反馈 m07570-3
+ * 「直播界面不应该出现进度条」）。三条规则必须放在对应非 -live 规则**之后**：
+ * falcon 的等价特异性下靠源码顺序决胜，写前面会被 .pvideo/.video-hole/.play-idle
+ * 的 240px 覆盖回去。
+ *
+ * 注意这三条只决定 falcon 侧的占位几何（hole 挖孔区/点击热区）。
+ * KMS 视频平面本身是硬件 overlay，尺寸由 native 的 render-rectangle 决定，
+ * 对应的逻辑矩形在 screen.js 的 LIVE_VIDEO_AREA（266 高），两边必须一致，
+ * 否则会出现「画面 266 高但下方 26px 点不动」或反过来的错位。 */
+.pvideo-live {
+  height: 266px;
+}
+
+.video-hole-live {
+  height: 266px;
+}
+
+.play-idle-live {
+  height: 266px;
+}
+
 .play-idle-text {
   font-size: 14px;
   color: @text-color-dim;
@@ -749,6 +764,15 @@
 .pright-body {
   width: 278px;
   height: 240px;
+}
+
+/* 直播态右列占位：评论区整列隐藏后，用同宽同高同底色的空 div 兜住这 278px。
+ * 背景必须不透明（@nav-background，与 .pright 一致）—— holeVisible 时根节点是
+ * .page-live（透明背景），没有这层就会把上一屏的 fb 残留像素透出来。 */
+.pright-fill {
+  width: 278px;
+  height: 266px;
+  background-color: @nav-background;
 }
 
 /* 右下输入框（雾化玻璃）：输入区 + 发送按钮 */

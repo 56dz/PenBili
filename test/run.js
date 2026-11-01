@@ -88,6 +88,7 @@ async function main() {
     isRectInsidePanel,
     playVideoRects,
     VIDEO_AREA,
+    LIVE_VIDEO_AREA,
     PHYSICAL,
     PANEL_X_OFFSET,
     BAR_WIDTH,
@@ -288,11 +289,16 @@ async function main() {
     isStreamEnded,
     END_TAIL_MS,
     END_DEAD_TAIL_MS,
+    isLiveEnded,
+    isLiveReconnecting,
+    LIVE_RECONNECT_ERR,
     SEEK_LAND_NEAR_MS,
     SEEK_LAND_DEADLINE_MS
   } = await import('../src/services/play_session.js');
   const { fetchReplies, addReply, parseReplies, normalizeReply, replyType } = await import('../src/services/bili/reply.js');
   const { isAutotestSeedEnabled, readAutotestSeed } = await import('../src/services/autotest_seed.js');
+  /* 直播下播判据的真机自证用例表（与真机 probeLiveEnd 同源） */
+  const { runLiveEndCases, LIVE_END_CASES } = await import('../src/services/live_end_probe.js');
   const {
     opusToBlocks,
     opsToBlocks,
@@ -695,7 +701,7 @@ async function main() {
   });
 
   // ---------------- player adapter ----------------
-  test('player: buildOpenArgs 顺序与钳制（15 个位置参数，含 DASH 第二输入与 fpsCap）', () => {
+  test('player: buildOpenArgs 顺序与钳制（16 个位置参数，含 DASH 第二输入 / fpsCap / isLive）', () => {
     const args = buildOpenArgs({
       input: 'https://x/v.mp4',
       input2: 'https://x/a.m4s',
@@ -708,17 +714,27 @@ async function main() {
       audioDevice: '',
       userAgent: 'UA',
       referer: 'https://r/',
-      fpsCap: 30
+      fpsCap: 30,
+      isLive: false
     });
     assert.deepStrictEqual(args, [
       // fps=0 → 回落 24（与 native 侧 `fps<1||fps>60 → 24` 一致）
-      'https://x/v.mp4', 0, 1235, 24, 0, 1, 0, 174, 254, 452, '', 'UA', 'https://r/', 'https://x/a.m4s', 30
+      'https://x/v.mp4', 0, 1235, 24, 0, 1, 0, 174, 254, 452, '', 'UA', 'https://r/', 'https://x/a.m4s', 30, 0
     ]);
-    // input2 缺省 → 第 14 位空串（native 据此走单文件 0:a:0）；fpsCap 缺省 → 末位 0（不限帧率）
+    // input2 缺省 → 第 14 位空串（native 据此走单文件 0:a:0）；fpsCap 缺省 → 0（不限帧率）
     const solo = buildOpenArgs({ input: 'https://x/v.mp4', startMs: 0, durationMs: 0, fps: 30, rect: { x: 0, y: 0, width: 1, height: 1 } });
-    assert.strictEqual(solo.length, 15);
+    assert.strictEqual(solo.length, 16);
     assert.strictEqual(solo[13], '');
     assert.strictEqual(solo[14], 0);
+    // isLive 缺省 → -1（native 回落严格启发式，不擅自判直播）
+    assert.strictEqual(solo[15], -1);
+    // 只有明确 true/false 才翻译成 1/0；其它一律 -1（防「点播被猜成直播」P0-3）
+    assert.strictEqual(buildOpenArgs({ input: 'a', isLive: true })[15], 1);
+    assert.strictEqual(buildOpenArgs({ input: 'a', isLive: false })[15], 0);
+    assert.strictEqual(buildOpenArgs({ input: 'a', isLive: undefined })[15], -1);
+    assert.strictEqual(buildOpenArgs({ input: 'a', isLive: null })[15], -1);
+    assert.strictEqual(buildOpenArgs({ input: 'a', isLive: 1 })[15], -1);
+    assert.strictEqual(buildOpenArgs({ input: 'a', isLive: 'true' })[15], -1);
     // fpsCap 非法（负数/NaN）一律归 0，绝不给 native 传负的 max-rate
     assert.strictEqual(buildOpenArgs({ input: 'a', fpsCap: -3 })[14], 0);
     assert.strictEqual(buildOpenArgs({ input: 'a', fpsCap: 'x' })[14], 0);
@@ -1809,7 +1825,7 @@ async function main() {
     assert.ok(seen.indexOf(LIVE_PLAYINFO_URL) === 0, seen);
     assert.ok(seen.indexOf('room_id=12345') > 0, seen);
   });
-  test('live: resolveLiveUrl —— 直连双进程（音频同源）+ durationMs=0 + 真实分辨率', async () => {
+  test('live: resolveLiveUrl —— 单输入直连（audioUrl 为空）+ durationMs=0 + 真实分辨率', async () => {
     const mkClient = (data) => ({
       request: async () => ({ ok: true, data })
     });
@@ -1824,8 +1840,11 @@ async function main() {
     const r = await resolveLiveUrl(ctx, { kind: 'live', roomid: 9, title: 'T' });
     assert.strictEqual(r.ok, true);
     assert.strictEqual(r.live, true);
-    // v2.9.4 起直播走音视频分离双进程：音频进程拉同一条 URL（单进程串行写两路会被视频背压拖死）
-    assert.strictEqual(r.audioUrl, r.url);
+    // v2（player2）起直播不再经 ffmpeg：FLV 绝对 PTS（≈792 小时）会让流式 matroskademux
+    // 永久 PREROLLING，改为 GStreamer 直连 souphttpsrc ! flvdemux。
+    // FLV 单流已含音轨，所以 audioUrl 必须为空 —— 回填 r.url 会让 native 开第二条连接。
+    assert.strictEqual(r.audioUrl, '');
+    assert.notStrictEqual(r.audioUrl, r.url);
     assert.strictEqual(r.durationMs, 0);
     assert.strictEqual(r.aid, 0);
     assert.strictEqual(r.fps, LIVE_FPS_MOD);
@@ -2737,6 +2756,92 @@ async function main() {
     assert.strictEqual(isStreamEnded({ positionMs: 114879, state: 'paused' }, 114900), true);
     assert.strictEqual(isStreamEnded({ positionMs: 114879 }, 114900), true);
   });
+  test('play_session: isLiveEnded 主播下播（state 落回 idle）判直播已结束', () => {
+    /* 真机契约：直播 EOS → native patch_state(STOPPED) → normalizeState 归一成
+     * 'idle'，而页面只认 'ended' → 提示永远不出来（P1-4）。isLiveEnded 必须
+     * 认 'idle'。 */
+    assert.strictEqual(isLiveEnded({ state: 'idle', positionMs: 600000, frames: 900 }, true, true), true);
+    // 将来 native 真加了 PB2_STATE_ENDED 也能直通
+    assert.strictEqual(isLiveEnded({ state: 'ended', positionMs: 600000, frames: 900 }, true, true), true);
+    /* 没观察到过 playing（轮询 1s 一次，刚进页面就下播会漏）：用「出过帧」兜底 */
+    assert.strictEqual(isLiveEnded({ state: 'idle', positionMs: 3000, frames: 12 }, true, false), true);
+    /* ★ 反例：位置非 0 但一帧都没出过 —— **不能**当证据。直播位置=墙钟，
+     * 从 open 就开始走，一进页面就 +1000/秒。若拿它当判据，用户刚点进直播间
+     * 就会看到「直播已结束」。 */
+    assert.strictEqual(isLiveEnded({ state: 'idle', positionMs: 3000, frames: 0 }, true, false), false);
+    assert.strictEqual(isLiveEnded({ state: 'idle', positionMs: 600000, frames: 0 }, true, false), false);
+  });
+  test('play_session: isLiveEnded 不误判「刚进页面还没起播」/ 点播 / 仍在播', () => {
+    /* ★ 这是 lead 点名的核心边界：刚进直播间时 state 也是 idle/opening、
+     * 位置 0、没出过帧 —— 绝不能判成「已结束」，否则用户一进去就看到
+     * 「直播已结束」。 */
+    assert.strictEqual(isLiveEnded({ state: 'idle', positionMs: 0, frames: 0 }, true, false), false);
+    assert.strictEqual(isLiveEnded({ state: 'opening', positionMs: 0, frames: 0 }, true, false), false);
+    // 起播中（opening）即使有位置也不该判结束 —— state 不是 idle/ended
+    assert.strictEqual(isLiveEnded({ state: 'opening', positionMs: 3000, frames: 5 }, true, true), false);
+    // 还在正常播 → false
+    assert.strictEqual(isLiveEnded({ state: 'playing', positionMs: 600000, frames: 900 }, true, true), false);
+    // 暂停（直播暂停）→ false，不算结束
+    assert.strictEqual(isLiveEnded({ state: 'paused', positionMs: 600000, frames: 900 }, true, true), false);
+    // 真错误态交给页面失败路径，不走「已结束」
+    assert.strictEqual(isLiveEnded({ state: 'error', positionMs: 600000, frames: 900 }, true, true), false);
+    /* ★ 点播绝不能被这个函数判走：live !== true 一律 false（点播末尾走
+     * isStreamEnded，两者职责分离）。 */
+    assert.strictEqual(isLiveEnded({ state: 'idle', positionMs: 114879, frames: 900 }, false, true), false);
+    assert.strictEqual(isLiveEnded({ state: 'idle', positionMs: 114879, frames: 900 }, undefined, true), false);
+    assert.strictEqual(isLiveEnded({ state: 'idle', positionMs: 114879, frames: 900 }, null, true), false);
+    // 脏输入不崩
+    assert.strictEqual(isLiveEnded(null, true, true), false);
+    assert.strictEqual(isLiveEnded(undefined, true, true), false);
+    assert.strictEqual(isLiveEnded('x', true, true), false);
+    assert.strictEqual(isLiveEnded({}, true, true), false);
+  });
+  test('play_session: isLiveReconnecting 只认直播 + 码 17（且不抢真错误态）', () => {
+    /* 与 native2 对齐的码值锁死：core/queue.h 已占用 0..16，17 是下一个空位。 */
+    assert.strictEqual(LIVE_RECONNECT_ERR, 17);
+    // 直播 + 码 17 + state 仍是 playing（native2 不改 state）→ 正在重连
+    assert.strictEqual(
+      isLiveReconnecting({ state: 'playing', lastError: 17, lastErrorMsg: 'live reconnect' }, true),
+      true
+    );
+    // 码 17 但缺 msg 也要认（判据以码为准）
+    assert.strictEqual(isLiveReconnecting({ state: 'playing', lastError: 17 }, true), true);
+    // 字符串形态的码（JSAPI 有时给字符串）
+    assert.strictEqual(isLiveReconnecting({ state: 'playing', lastError: '17' }, true), true);
+    /* 真错误态（state === 'error'）不归这里管：页面已有「起播失败」路径，
+     * 重连提示不能覆盖它。 */
+    assert.strictEqual(isLiveReconnecting({ state: 'error', lastError: 17 }, true), false);
+    // 点播即使 lastError=17 也不提示（17 是直播专用码）
+    assert.strictEqual(isLiveReconnecting({ state: 'playing', lastError: 17 }, false), false);
+    assert.strictEqual(isLiveReconnecting({ state: 'playing', lastError: 17 }, undefined), false);
+    // 其它错误码不误判（12=PLANE_LOST，真机上键盘避让时会出现）
+    assert.strictEqual(isLiveReconnecting({ state: 'playing', lastError: 12 }, true), false);
+    assert.strictEqual(isLiveReconnecting({ state: 'playing', lastError: 0 }, true), false);
+    assert.strictEqual(isLiveReconnecting({ state: 'playing' }, true), false);
+    // 脏输入不崩
+    assert.strictEqual(isLiveReconnecting(null, true), false);
+    assert.strictEqual(isLiveReconnecting('x', true), false);
+  });
+  test('play_session: isLiveReconnecting 的 lastErrorMsg 兜底（native 换码也能提示）', () => {
+    /* 万一 native2 最终没用 17（比如换了码值），只要 msg 里带 reconnect 就仍提示 ——
+     * 这条兜底让「用户至少能看到点什么」不依赖单个魔法数字。 */
+    assert.strictEqual(
+      isLiveReconnecting({ state: 'playing', lastError: 99, lastErrorMsg: 'live reconnect attempt 2' }, true),
+      true
+    );
+    assert.strictEqual(
+      isLiveReconnecting({ state: 'playing', lastError: 0, lastErrorMsg: 'RECONNECTING' }, true),
+      true
+    );
+    // 不含 reconnect 的普通错误不改提示
+    assert.strictEqual(
+      isLiveReconnecting({ state: 'playing', lastError: 95, lastErrorMsg: 'kms plane not active' }, true),
+      false
+    );
+    // 空/非字符串 msg 不崩
+    assert.strictEqual(isLiveReconnecting({ state: 'playing', lastError: 17, lastErrorMsg: null }, true), true);
+    assert.strictEqual(isLiveReconnecting({ state: 'playing', lastError: 0, lastErrorMsg: 42 }, true), false);
+  });
   test('play_session: readStatus 同时给出 durationMs 与 nativeDurationMs（n10 别名）', async () => {
     const w = fakePlayDeps();
     w.player.status = async () => ({ ok: true, state: 'playing', durationMs: 114900, positionMs: 5000 });
@@ -2750,6 +2855,45 @@ async function main() {
     const st2 = await readStatus(w);
     assert.strictEqual(st2.durationMs, 0);
     assert.strictEqual(st2.nativeDurationMs, 0);
+  });
+  test('live_end_probe: 用例表在 Node 下全部通过（与真机自证同源）', async () => {
+    /* 这条测试与真机上的 probeLiveEnd 走**同一张用例表、同一个函数**：
+     * 真机跑 QuickJS、这里跑 V8，两边都 PASS 才能说明判据不依赖引擎特性。
+     * 一旦真机日志出现 LIVE-END PROBE FAIL，就能定位到具体哪条用例。 */
+    const r = runLiveEndCases();
+    /* 失败时把失败行拼进断言消息，不用去翻日志就知道哪条挂了 */
+    assert.strictEqual(r.fail, 0, '失败用例: ' + r.failures.join(' | '));
+    assert.ok(r.pass > 0, '用例表不能为空');
+    assert.strictEqual(r.pass + r.fail, LIVE_END_CASES.length);
+    /* 每条用例都必须带 name/kind/want 与「为什么」—— 否则真机日志里的 FAIL 行无法定位 */
+    for (const c of LIVE_END_CASES) {
+      assert.ok(typeof c.name === 'string' && c.name.length > 0, '用例缺 name');
+      assert.ok(c.kind === 'end' || c.kind === 'reconnect', '用例 kind 非法: ' + c.kind);
+      assert.strictEqual(typeof c.want, 'boolean');
+      assert.ok(typeof c.why === 'string' && c.why.length > 0, '用例缺 why: ' + c.name);
+    }
+    /* 结果行里必须打出引擎指纹：真机与 Node 行为不一致时，
+     * 第一件要看的就是它（历史上踩过 Number(undefined) 一类坑）。 */
+    assert.ok(r.lines[0].indexOf('LIVE-END PROBE engine') >= 0);
+    assert.ok(r.lines[0].indexOf("Number('17')=17") >= 0, '引擎指纹应包含 Number(17)');
+    assert.ok(r.lines[r.lines.length - 1].indexOf('passed=') >= 0);
+  });
+  test('live_end_probe: 用例覆盖面涵盖墙钟/刚进直播间两个关键反例', () => {
+    /* 防「用例被删了也不知道」：这两条反例直接对应真机上踩过的两个 bug
+     * （刚进直播间误判已结束、墙钟位置当「播过」证据），丢了就会回退。 */
+    const names = LIVE_END_CASES.map((c) => c.name).join('|');
+    assert.ok(names.indexOf('墙钟') >= 0, '缺「墙钟位置不能当证据」反例');
+    assert.ok(names.indexOf('刚进页面未起播') >= 0, '缺「刚进直播间」反例');
+    const endN = LIVE_END_CASES.filter((c) => c.kind === 'end').length;
+    const recN = LIVE_END_CASES.filter((c) => c.kind === 'reconnect').length;
+    assert.ok(endN >= 8, '下播判据用例过少：' + endN);
+    assert.ok(recN >= 5, '重连判据用例过少：' + recN);
+    /* end 类用例必须都显式给 live（否则测的是其它东西） */
+    let missingLive = 0;
+    for (const c of LIVE_END_CASES) {
+      if (c.kind === 'end' && !('live' in c)) missingLive++;
+    }
+    assert.strictEqual(missingLive, 0, '有 ' + missingLive + ' 条 end 用例没给 live 参数');
   });
   test('play_session: ensureMixin 会话级缓存（第二次不再打接口）', async () => {
     const w = fakePlayDeps();
@@ -3036,6 +3180,66 @@ async function main() {
       const out = p.height / p.width;
       assert.ok(Math.abs(out - src) / src < 0.02, tag + ' 变形: src=' + src + ' out=' + out);
     }
+  });
+
+  // ---------------- 直播视频区（无进度条，469x266）----------------
+  // 用户反馈 m07570-3：「直播界面不应该出现进度条」。进度条那条 26px 让给画面后，
+  // KMS 平面的逻辑矩形也必须从 240 高变成 266 高，否则画面下方会留一条黑边，
+  // 而 hole 的点击热区是 266 —— 用户点黑边能暂停、看着却像没画面。
+  test('screen: LIVE_VIDEO_AREA 比点播高 26px（让出进度条那条）', () => {
+    assert.strictEqual(LIVE_VIDEO_AREA.height, 266);
+    assert.strictEqual(VIDEO_AREA.height, 240);
+    assert.strictEqual(LIVE_VIDEO_AREA.height - VIDEO_AREA.height, 26);
+    assert.strictEqual(LIVE_VIDEO_AREA.x, VIDEO_AREA.x);
+    assert.strictEqual(LIVE_VIDEO_AREA.width, VIDEO_AREA.width);
+  });
+
+  test('screen: 直播 playVideoRects 16:9 → 逻辑 469x264、物理 {1,278,264,469}', () => {
+    const live = playVideoRects(1920, 1080, LIVE_VIDEO_AREA);
+    assert.deepStrictEqual(live.logical, { x: 213, y: 1, width: 469, height: 264 });
+    assert.deepStrictEqual(live.physical, { x: 1, y: 278, width: 264, height: 469 });
+    // 点播同源视频仍是 240 高（回归防护：不能把默认 box 也改了）
+    const vod = playVideoRects(1920, 1080);
+    assert.deepStrictEqual(vod.logical, { x: 234, y: 0, width: 427, height: 240 });
+    assert.deepStrictEqual(vod.physical, { x: 0, y: 299, width: 240, height: 427 });
+  });
+
+  test('screen: 直播矩形填满 266 列且不越出 LIVE_VIDEO_AREA（各比例）', () => {
+    const cases = [
+      [1920, 1080], // 16:9
+      [1280, 720], // 16:9
+      [2560, 1080], // 21:9
+      [3840, 1080], // 32:9 极宽
+      [1000, 1000], // 1:1
+      [1080, 1920] // 9:16 竖屏
+    ];
+    for (const c of cases) {
+      const tag = c.join('x');
+      const r = playVideoRects(c[0], c[1], LIVE_VIDEO_AREA);
+      const g = r.logical;
+      assert.ok(g.x >= LIVE_VIDEO_AREA.x, tag + ' 逻辑 x 越出视频区首: ' + g.x);
+      assert.ok(g.x + g.width <= LIVE_VIDEO_AREA.x + LIVE_VIDEO_AREA.width, tag + ' 逻辑 x 越出视频区尾');
+      assert.ok(g.y >= LIVE_VIDEO_AREA.y, tag + ' 逻辑 y 越出视频区首: ' + g.y);
+      assert.ok(
+        g.y + g.height <= LIVE_VIDEO_AREA.y + LIVE_VIDEO_AREA.height,
+        tag + ' 逻辑 y 越出 266 视频区: ' + (g.y + g.height)
+      );
+      // 直播没有进度条，物理 x 可以一直顶到 266（点播被限制在 240）
+      const p = r.physical;
+      assert.ok(isRectInsidePanel(p), tag + ' 不在面板内');
+      assert.ok(p.x >= 0 && p.x + p.width <= PHYSICAL.width, tag + ' 物理 x 越出列');
+      assert.ok(p.x + p.width <= LIVE_VIDEO_AREA.height, tag + ' 物理 x 越出 266 视频区');
+      // 比例守恒
+      const src = c[0] / c[1];
+      const out = p.height / p.width;
+      assert.ok(Math.abs(out - src) / src < 0.02, tag + ' 变形: src=' + src + ' out=' + out);
+    }
+  });
+
+  test('screen: playVideoRects 第二参缺省/传 null 时仍走点播 240 高（向后兼容）', () => {
+    const a = playVideoRects(640, 360);
+    assert.deepStrictEqual(playVideoRects(640, 360, null), a);
+    assert.deepStrictEqual(playVideoRects(640, 360, undefined), a);
   });
 
   // ---------------- native 管线源码契约（player.c 是 C，单测只能查文本） ----------------
