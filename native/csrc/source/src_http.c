@@ -76,6 +76,12 @@ static char *g_min_env[] = {(char *)"PATH=/usr/bin:/bin:/sbin:/usr/sbin",
 
 #define PB2_FFMPEG "/usr/bin/ffmpeg"
 #define PB2_FFMPEG_ALT "/bin/ffmpeg"
+#define PB2_FFPROBE "/usr/bin/ffprobe"
+
+/* 关键帧探测的单条缓存（见 probe_video_keyframe_ms 顶部注释） */
+static char g_kf_input[768];
+static long long g_kf_target = -1;
+static long long g_kf_k = -1;
 
 /* ffmpeg 输出模式 */
 #define MAP_BOTH 0  /* -map 0:v? -map 0:a?（单源，两路都在一个容器里） */
@@ -204,12 +210,131 @@ static void dump_argv_full(const char *tag, char *const argv[]) {
     fclose(fp);
 }
 
+/*
+ * ============ 探测视频关键帧 K（修「seek 后开头静音 T-K 秒」） ============
+ *
+ * 【问题】用户反馈：拖动进度条后，视频先无声播放 1~2 秒，音频才加入
+ * （加入之后音画是同步的）。这是我上一轮「A/V 同步修复」引入的副作用。
+ *
+ * 【机制】双输入单 demux + `-copyts` 下：
+ *   · 视频是 `-c copy`，seek 只能落在**关键帧**上 → 实际输出从 K（≤T）开始；
+ *   · 音频不是视频、没有关键帧概念，`-ss T` 是**精确**的 → 从 T 开始；
+ *   · `-copyts` 保留原始 PTS，于是视频首包 PTS≈K、音频首包 PTS≈T；
+ *   · matroskademux 取全局最小 PTS（=K）当 segment 起点，
+ *     所以内容 K 在时钟 0 渲染，而音频要等时钟 T-K 才出声。
+ *   ⇒ 视频先播 K→T 这段画面，全程静音，T-K 之后音频才加入。
+ *
+ * 【实测（BV1SDJC6dE4t，T=60）】
+ *   现状：视频首包 pts=55.055、音频首包 pts=59.989 → 静音 4.93s
+ *   关键帧间隔实测：T=61..65 全部落到 K=60.060，T=66 跳到 65.065
+ *   ⇒ B 站这个片源 GOP≈5s，最坏情况静音接近 5 秒。
+ *
+ * 【修法】把音频也 seek 到**同一个关键帧 K**，两路首包 PTS 就对齐了：
+ *   视频 -ss T（仍让 ffmpeg 自己找 K，等价于 -ss K）
+ *   音频 -ss K（显式给，精确落到 K 附近）
+ * 实测（T=62/100/200）：视频首包 60.060/95.095/195.195，
+ *                      音频首包 60.053/95.083/95.179 → 只差 7~16ms，听不出来。
+ *
+ * 【代价】多一次 ffprobe（约 550~570ms，`-read_intervals T%+2` 只读 2 秒窗口，
+ * 不是全片扫描）。只在 seek（baseMs > 0）时做，起播（baseMs == 0）不做 ——
+ * 起播本来就从头开始，K=0 无差值。探测失败（网络抖动/ffprobe 不存在）时
+ * 返回 -1，调用方退回「音频也用 T」，即旧行为（有静音但不错位）。
+ */
+static long long probe_video_keyframe_ms(const char *input, const char *ua, const char *ref,
+                                        long long targetMs) {
+    char cmd[1024];
+    char uaarg[384];
+    char refarg[704];
+    char buf[512];
+    FILE *fp;
+    long long k = -1;
+
+    /*
+     * 【1 条缓存】自愈重试（check_first_frame 的 retry 分支）会用**同一个
+     * baseMs** 再调一次 pb2_src_open。ffprobe 一次 550~750ms，重试时再探一次
+     * 纯属浪费，还会拖长「源秒退后自愈」的恢复时间。同一个 (input, targetMs)
+     * 只探一次。URL 每次刷新都会变，所以用 input 全串做 key 不会串味。
+     */
+    if (g_kf_k >= 0 && g_kf_target == targetMs && input && input[0] &&
+        strncmp(g_kf_input, input, sizeof(g_kf_input) - 1) == 0) {
+        pb2_logf("kf: cache hit K=%lldms (T=%lldms)", g_kf_k, targetMs);
+        return g_kf_k;
+    }
+
+    if (!input || !input[0] || targetMs <= 0) return -1;
+    if (strncmp(input, "http://", 7) != 0 && strncmp(input, "https://", 8) != 0) return -1;
+
+    /* 参数都要单引号包住：UA 含空格和括号，Referer 含冒号和斜杠。
+     * 单引号内的单引号无法转义，直接放弃带该参数的探测（回退旧行为）。 */
+    uaarg[0] = '\0';
+    if (ua && ua[0]) {
+        if (strchr(ua, '\'')) return -1;
+        snprintf(uaarg, sizeof(uaarg), " -user_agent '%s'", ua);
+    }
+    refarg[0] = '\0';
+    if (ref && ref[0]) {
+        if (strchr(ref, '\'')) return -1;
+        snprintf(refarg, sizeof(refarg), " -headers 'Referer: %s'", ref);
+    }
+
+    /*
+     * 【窗口只用 +1，且第一行就是关键帧 —— 这是实测出来的，不是猜的】
+     *
+     * ffprobe 的 `-read_intervals T%+1` 会**先 seek 到 T 之前最近的关键帧**
+     * 再开始输出包，所以输出的第一行必然是 K（而不是从 T 精确开始）。设备实测：
+     *   T=28  -> 25.000000,K_     T=60  -> 55.000000,K_
+     *   T=200 -> 195.000000,K_    T=698 -> 695.000000,K_
+     * 耗时 616~760ms，与窗口大小基本无关（主要是 HTTP 建连）。
+     *
+     * 以前写的是「先用 %+2，失败再退 %+6」，但 %+2 经常拿不到 K（GOP 实测 5s，
+     * 从 T 起 2 秒内可能一个 K 都没有），于是**每次都要跑两遍 ffprobe**，
+     * 实测探测 1575ms（737+838），把 seek 端到端推到 3234ms。
+     * 改单次 %+1 后探测稳定在 ~700ms，端到端回落到 ~2000ms 以内。
+     */
+    snprintf(cmd, sizeof(cmd),
+             "%s -v error%s%s -select_streams v -show_entries packet=pts_time,flags "
+             "-read_intervals %lld%%+1 -of csv=p=0 '%s' 2>/dev/null",
+             PB2_FFPROBE, uaarg, refarg, targetMs / 1000, input);
+
+    fp = popen(cmd, "r");
+    if (!fp) {
+        pb2_logf("kf: popen failed (%s)", strerror(errno));
+        return -1;
+    }
+    while (fgets(buf, sizeof(buf), fp)) {
+        /* 行格式 "55.054813,K_" —— 逗号后是 flags，K 表示关键帧 */
+        char *comma = strchr(buf, ',');
+        if (!comma) continue;
+        if (strncmp(comma + 1, "K", 1) != 0) continue;
+        *comma = '\0';
+        k = (long long)(atof(buf) * 1000.0 + 0.5);
+        break;
+    }
+    pclose(fp);
+
+    /*
+     * 一次没探到 K 就放弃，调用方回退「音频也用 T」= 旧行为（有静音但不错位）。
+     * 不再做第二次 ffprobe —— 双倍延迟比偶尔的静音更糟。
+     */
+    if (k >= 0) {
+        snprintf(g_kf_input, sizeof(g_kf_input), "%s", input);
+        g_kf_target = targetMs;
+        g_kf_k = k;
+    } else {
+        pb2_logf("kf: no keyframe within +1s of %lldms, fallback to exact -ss",
+                 targetMs);
+    }
+    return k;
+}
+
 static pid_t spawn_ffmpeg(const char *fifo, const char *input, const char *input2,
                           const char *ua, const char *ref, long long baseMs,
                           long long durationMs, int map_mode) {
     posix_spawn_file_actions_t fa;
     pid_t pid = 0;
     char ss[32];
+    char ss2[32];
+    long long audio_ss_ms = -1;
     char tlimit[32];
     char uabuf[320];
     char hdrbuf[640];
@@ -226,6 +351,22 @@ static pid_t spawn_ffmpeg(const char *fifo, const char *input, const char *input
 
     snprintf(ss, sizeof(ss), "%lld.%03lld", baseMs / 1000, baseMs % 1000);
     if (baseMs < 0) snprintf(ss, sizeof(ss), "0");
+
+    /*
+     * 【关键 3】seek 时探测视频关键帧 K，让音频也 seek 到 K（见函数顶部长注释）。
+     * 只在双输入 + seek（baseMs>0）时做；探测失败保持 -1 → 走旧行为（音频也用 T）。
+     * 起播（baseMs==0）不做：K 本来就是 0，没有差值，省掉 550ms。
+     */
+    if (map_mode == MAP_DUAL_IN && input2 && input2[0] && baseMs > 0) {
+        long long k = probe_video_keyframe_ms(input, ua, ref, baseMs);
+        if (k >= 0 && k <= baseMs) {
+            audio_ss_ms = k;
+        } else {
+            pb2_logf("src: keyframe probe failed (k=%lld, T=%lldms) -> audio seeks to T "
+                     "(may be silent for up to one GOP)",
+                     k, baseMs);
+        }
+    }
 
     /* 【关键】-copyts 语义坑（真机实测，2026-10-31）：
      * -copyts 下输出包保留原始 PTS（≈ -ss 的秒数），而 ffmpeg 的 `-t` 是
@@ -294,8 +435,24 @@ static pid_t spawn_ffmpeg(const char *fifo, const char *input, const char *input
             argv[i++] = (char *)"-headers";
             argv[i++] = hdrbuf;
         }
-        argv[i++] = (char *)"-ss";
-        argv[i++] = ss;
+        /*
+         * 【关键 3：修「seek 后开头静音 T-K 秒」】音频要 seek 到视频关键帧 K，
+         * 不能也 seek 到 T。视频 `-c copy` 只能从关键帧起，音频 `-ss T` 是
+         * 精确的 —— 两路首包 PTS 差 T-K，`-copyts` 下 matroskademux 以
+         * min(K,T)=K 为 segment 起点，于是视频先播 K→T 这段静音画面。
+         * 详见 probe_video_keyframe_ms() 顶部注释与实测数据。
+         */
+        if (audio_ss_ms >= 0 && audio_ss_ms != baseMs) {
+            snprintf(ss2, sizeof(ss2), "%lld.%03lld", audio_ss_ms / 1000, audio_ss_ms % 1000);
+            argv[i++] = (char *)"-ss";
+            argv[i++] = ss2;
+            pb2_logf("src: audio -ss aligned to video keyframe K=%lldms (target T=%lldms, "
+                     "would-be silent %lldms)",
+                     audio_ss_ms, baseMs, baseMs - audio_ss_ms);
+        } else {
+            argv[i++] = (char *)"-ss";
+            argv[i++] = ss;
+        }
         argv[i++] = (char *)"-i";
         argv[i++] = (char *)input2;
     }
