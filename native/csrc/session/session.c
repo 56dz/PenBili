@@ -64,7 +64,16 @@
  * 起播缓冲门超时（见 do_open 里的长注释）。
  * 4s 足够覆盖实测最慢的 2100ms 首帧，超时就退化放行，绝不让用户卡住。
  */
+/*
+ * 起播缓冲门的超时。蓝牙时单独放宽到 6s：bluealsa 打开 PCM 要额外
+ * 走一次 D-Bus + 编码器初始化，实测 BT 的 gate 耗时 1.7~2.5s，比扬声器
+ * 的 1.7~2.4s 只多一点，但边缘情况（耳机刚唤醒/编码器重配）会明显更久。
+ * 门一旦超时就会「不等音频直接开播」，而音频分支稍后起来会把时钟起点
+ * 拉到它自己那里，视频前几秒全被判迟到丢弃 —— 用户看到的就是
+ * 「起播直接卡到第 3 秒」。所以蓝牙多给 2s 余量，宁可多等也不跳帧。
+ */
 #define PB2_START_GATE_TIMEOUT_MS 4000
+#define PB2_START_GATE_TIMEOUT_BT_MS 6000
 /*
  * 【P0-1】首帧超时：OPEN（或 seek 重建）之后这么久还没有任何一帧上屏，
  * 就判失败。B 站 m4s URL 带 deadline（约 2h 过期）、断网、ffmpeg 秒退
@@ -172,8 +181,59 @@
  * 万一将来在某些直播源上出现「队列满 → soup 背压 → 卡顿」，把这个值
  * 调大即可 —— 它只是延迟/抗抖动之间的取捨，不涉及正确性。
  */
-#define PB2_LIVE_VIDEO_QUEUE_NS 2000000000LL
+/*
+ * 【直播缓冲】从 2s 提到 4s。
+ *
+ * 用户反馈直播每 2~5 秒闪一次屏，怀疑是数据包传输不稳定 —— 方向对。
+ * 2s 的队列在 B 站直播（GOP 1~2s + CDN 抖动）下余量太薄：一次稍长的
+ * 抖动就把队列抽干，souphttpsrc 背压 → 恢复时一批帧集中涌入 → 要么被
+ * max-lateness 丢掉（闪黑），要么积压。4s 能吸收两倍抖动，延迟代价
+ * 可接受（直播本来就比现场慢）。
+ */
+#define PB2_LIVE_VIDEO_QUEUE_NS 4000000000LL
 #define PB2_LIVE_VIDEO_QUEUE_BYTES 3000000
+
+/*
+ * 【蓝牙耳机】ALSA 缓冲：**保持 30ms/10ms，与扬声器一致**。
+ *
+ * 曾经试过放大到 200ms/40ms（以为 A2DP 需要更大抖动缓冲），真机实测
+ * 反而更差：20 秒平面采样 vid_fps 从 29.95 掉到 **19.70**，帧间隔稳定
+ * 47ms（≈21fps）—— 说明 alsasink 的 buffer-time 不只是「抖动缓冲」，
+ * 它同时决定 sink 报给 pipeline 的 latency，进而影响时钟与 videorate
+ * 的节奏。放大 buffer 等于把整条管线的时钟拖慢，视频跟着降帧。
+ *
+ * 所以蓝牙也维持 30ms。真正的卡顿根因不在缓冲大小（见下面 ts-offset
+ * 与直播队列两处注释）。保留这两个宏只是为了让「蓝牙要不要不同缓冲」
+ * 这个决定有据可查，将来若真遇到 underrun 可以改这里做 A/B。
+ */
+#define PB2_BT_AUDIO_BUFFER_US 30000LL
+#define PB2_BT_AUDIO_LATENCY_US 10000LL
+
+/*
+ * 【蓝牙耳机】音画偏移补偿：把**视频提前**多少毫秒。
+ *
+ * 用户实测：连蓝牙耳机后音频比视频快约 150ms，要求压到 100ms 以内。
+ *
+ * 机制：A2DP 的端到端延迟（bluealsa 编码 + 无线 + 耳机解码缓冲）约
+ * 150~250ms，这段延迟发生在 bluealsa 之后，ALSA/GStreamer 完全看不见。
+ * pipeline 时钟认为「内容 T 的声音在 T 时刻已播出」，实际要到 T+L 才
+ * 到耳朵；视频按这个时钟渲染，于是声音先到、画面后到。
+ *
+ * 补偿必须落在 **kmssink**（不提供时钟的那一端），用负 ts-offset 让
+ * 视频时间戳整体提前 L，画面就早 L 渲染，与晚到 L 的声音对齐。
+ *
+ * 【为什么不能放 alsasink】alsasink 是 pipeline 的时钟提供者
+ * （provide-clock 默认 true，实测不能关，见 spike-report：关掉后视频
+ * 飙到 88~119fps）。给时钟提供者自己的输入加 ts-offset，等于把整条
+ * 管线的时间轴一起平移 —— 视频是 slave 跟着这个时钟走的，相对关系
+ * 完全不变。真机实测证实：alsasink ts-offset 0/150/300 三档下
+ * `av: avSkewMs` 毫无变化（-1494/-1786 同一量级），且 pauseProbe 的
+ * 恢复后帧率从 29.94fps 飙到 99.30fps（时钟被推快，视频疯狂追帧）。
+ *
+ * 默认 150ms。真机标定：echo <ms> > /tmp/pb2_avoffset 后重开播放生效，
+ * 正值 = 视频提前更多（画面显得更早）。若调大反而更差就写负数。
+ */
+#define PB2_BT_VIDEO_TS_OFFSET_MS 150
 
 /*
  * 【P1-4】直播「可恢复断流」的错误码。
@@ -286,6 +346,8 @@ typedef struct {
     int bt_present;         /* 上次探测时蓝牙是否可用（用于检测插拔） */
     int bt_vol_applied;     /* 已下发给耳机的 AVRCP 音量（-1 = 未下发） */
     char bt_ctl_name[64];   /* 耳机的 mixer 控件名，形如 "Redmi Buds 6 - A2DP" */
+    /* 蓝牙音画偏移补偿（ns，正值 = 视频提前），见 PB2_BT_VIDEO_TS_OFFSET_MS */
+    long long bt_ts_offset_ns;
     GstBus *bus;
     int vbranch;
     int abranch;
@@ -572,6 +634,25 @@ static int on_audio_buffer(GstPad *pad, GstPadProbeInfo *info, void *ud);
 static int on_audio_list(GstPad *pad, GstPadProbeInfo *info, void *ud);
 /* 起播/seek 后的迟到宽限（实现见 check_plane 之前） */
 static void arm_late_grace(void);
+
+/*
+ * 读取蓝牙音画偏移覆盖值（毫秒，可负）。
+ * 真机标定用：echo 150 > /tmp/pb2_avoffset 后重启播放生效。
+ * 无文件时用编译期默认 PB2_BT_TS_OFFSET_MS。
+ */
+static long long read_bt_ts_offset_ns(void) {
+    FILE *fp = fopen("/tmp/pb2_avoffset", "r");
+    long v = 0;
+    if (fp) {
+        if (fscanf(fp, "%ld", &v) != 1) v = 0;
+        fclose(fp);
+        if (v < -2000) v = -2000;
+        if (v > 2000) v = 2000;
+        pb2_logf("audio: bt ts-offset from /tmp/pb2_avoffset = %ldms", v);
+        return (long long)v * 1000000LL;
+    }
+    return (long long)PB2_BT_VIDEO_TS_OFFSET_MS * 1000000LL;
+}
 static void apply_volume_now(void);
 /*
  * 【直播】refresh_audio_route() 在 teardown/build 之前就定义了，
@@ -844,6 +925,35 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
          */
         int qbufs = g_w.is_live ? 0 : PB2_VIDEO_QUEUE_BUFS;
         /*
+         * 【直播闪屏】直播把 max-lateness 关掉（-1）并停用 qos。
+         *
+         * 用户实测：直播每 2~5 秒闪一次屏。
+         * 机制：直播是长连接，CDN 抖动 / GOP 边界都会让一批帧晚到；
+         * max-lateness=40 判定它们「迟到」直接丢弃，kmssink 丢掉一整个
+         * GOP 的帧就表现为一次黑屏闪烁。点播可以丢（丢的是用户已经
+         * 跳过的中间内容），直播不能丢（丢的是正在看的那一段）。
+         * 直播本来就靠 skip-vsync=true 立刻上屏，不存在「追上」的需求。
+         */
+        int late_ms = g_w.is_live ? -1 : PB2_MAX_LATENESS;
+        const char *qos_s = g_w.is_live ? "false" : "true";
+        /*
+         * 蓝牙时给视频负 ts-offset 把它整体提前，抵消 A2DP 端到端延迟。
+         * 为什么必须放在 kmssink 而不是 alsasink，见
+         * PB2_BT_VIDEO_TS_OFFSET_MS 的注释。
+         */
+        char tsoff[48];
+        if (g_w.adev[0] && g_w.bt_ts_offset_ns != 0) {
+            /*
+             * 取反后直接按有符号打印。**不要**写成 "ts-offset=-%lld" 再传
+             * 正值：标定时写负数会得到 `ts-offset=--2000000000`，gst 解析
+             * 失败、属性保持默认 0，而日志看起来「设了」——真机踩过一次。
+             */
+            snprintf(tsoff, sizeof(tsoff), " ts-offset=%lld",
+                     -g_w.bt_ts_offset_ns);
+        } else {
+            tsoff[0] = '\0';
+        }
+        /*
          * 点播把 max-size-time 归零。queue 的多个上限是「或」关系，
          * 只把 buffers 改成 240 而留着 time=8s 等于没改（time 先满足）。
          * 直播仍保留 2s 时间上限（直播延迟就是队列上限，不能用计数制）。
@@ -873,11 +983,11 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
                       * update_late_policy() 直接 return，sink 就**永远**停在
                       * -1/false —— 实测 seek 落点耗时从 412ms 恶化到 1398~2485ms。
                       */
-                     "max-lateness=%d qos=true force-aspect-ratio=false skip-vsync=true "
+                     "max-lateness=%d qos=%s force-aspect-ratio=false skip-vsync=true%s "
                      "render-rectangle=%s",
                      qbufs, qbytes, qns,
                      g_w.rotate, fpscap, PB2_PANEL_RATE, PB2_KMS_PLANE_ID,
-                     PB2_MAX_LATENESS, g_w.rect);
+                     late_ms, qos_s, tsoff, g_w.rect);
         } else if (strstr(cn, "h265") || strstr(cn, "hevc")) {
             snprintf(desc, sizeof(desc),
                      "queue max-size-buffers=%d max-size-bytes=%d "
@@ -897,15 +1007,17 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
                       * update_late_policy() 直接 return，sink 就**永远**停在
                       * -1/false —— 实测 seek 落点耗时从 412ms 恶化到 1398~2485ms。
                       */
-                     "max-lateness=%d qos=true force-aspect-ratio=false skip-vsync=true "
+                     "max-lateness=%d qos=%s force-aspect-ratio=false skip-vsync=true%s "
                      "render-rectangle=%s",
                      qbufs, qbytes, qns,
                      g_w.rotate, fpscap, PB2_PANEL_RATE, PB2_KMS_PLANE_ID,
-                     PB2_MAX_LATENESS, g_w.rect);
+                     late_ms, qos_s, tsoff, g_w.rect);
         } else {
             pb2_logf("pad-added: unsupported video caps %s", cn);
             return;
         }
+        pb2_logf("pad-added: video desc late=%d qos=%s%s", late_ms, qos_s,
+                 tsoff[0] ? tsoff : " (no ts-offset)");
         bin = parse_bin(desc);
         if (!bin) {
             pb2_stats_patch_error(&g_w.stats, PB2_E_PIPELINE, "video branch build failed");
@@ -942,10 +1054,35 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
          */
         {
             char devarg[192];
+            char asink_arg[320];
             if (g_w.adev[0]) {
                 snprintf(devarg, sizeof(devarg), " device=\"%s\"", g_w.adev);
             } else {
                 devarg[0] = '\0';
+            }
+            /*
+             * 蓝牙 vs 扬声器用不同的 ALSA 缓冲，理由见
+             * PB2_BT_AUDIO_BUFFER_US 的注释。
+             *
+             * 【音画偏移不在这里】alsasink 是时钟提供者，给它加 ts-offset
+             * 等于平移整条管线（视频跟着时钟走，相对关系不变），真机实测
+             * 也证实无效且会让恢复后帧率飙到 99fps。偏移落在 kmssink 上，
+             * 见 PB2_BT_VIDEO_TS_OFFSET_MS 的注释。
+             */
+            if (g_w.adev[0]) {
+                snprintf(asink_arg, sizeof(asink_arg),
+                         "alsasink name=asink buffer-time=%lld latency-time=%lld%s",
+                         (long long)PB2_BT_AUDIO_BUFFER_US,
+                         (long long)PB2_BT_AUDIO_LATENCY_US, devarg);
+                pb2_logf("audio: BT sink params buffer=%lldus latency=%lldus "
+                         "(video ts-offset=-%lldms)",
+                         (long long)PB2_BT_AUDIO_BUFFER_US,
+                         (long long)PB2_BT_AUDIO_LATENCY_US,
+                         g_w.bt_ts_offset_ns / 1000000LL);
+            } else {
+                snprintf(asink_arg, sizeof(asink_arg),
+                         "alsasink name=asink buffer-time=30000 latency-time=10000%s",
+                         devarg);
             }
         if ((strncmp(cn, "audio/mpeg", 10) == 0 && mpegversion == 4) ||
             strstr(cn, "aac") || strstr(cn, "AAC")) {
@@ -953,22 +1090,19 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
                      "queue max-size-buffers=32 max-size-bytes=0 max-size-time=0 ! "
                      "aacparse ! faad ! audioconvert ! audioresample ! "
                      "audio/x-raw,rate=48000,channels=2 ! volume name=vvol ! "
-                     "alsasink name=asink buffer-time=30000 latency-time=10000%s",
-                     devarg);
+                     "%s", asink_arg);
         } else if (strstr(cn, "x-ac3") || strstr(cn, "x-eac3") || strstr(cn, "x-a52")) {
             snprintf(desc, sizeof(desc),
                      "queue max-size-buffers=32 ! ac3parse ! a52dec ! audioconvert ! "
                      "audioresample ! audio/x-raw,rate=48000,channels=2 ! volume name=vvol ! "
-                     "alsasink name=asink buffer-time=30000 latency-time=10000%s",
-                     devarg);
+                     "%s", asink_arg);
         } else {
             /* 未知音频编码：只要有 parser 就走通用链路，失败也只是没声音 */
             pb2_logf("pad-added: audio caps %s, trying generic chain", cn);
             snprintf(desc, sizeof(desc),
                      "queue max-size-buffers=32 ! decodebin ! audioconvert ! "
                      "audioresample ! audio/x-raw,rate=48000,channels=2 ! volume name=vvol ! "
-                     "alsasink name=asink buffer-time=30000 latency-time=10000%s",
-                     devarg);
+                     "%s", asink_arg);
         }
         } /* end devarg scope */
         bin = parse_bin(desc);
@@ -1220,15 +1354,27 @@ static void refresh_audio_route(void) {
         goto rebuild;
     }
     /*
-     * 蓝牙探测独立节流。【P1-8】从 5s 降到 1s：pb2_bt_pcm_detect 内部要起
-     * bluetoothctl（devices + 每台 info，共 2~3 次 fork/exec，实测 60~200ms），
-     * 那是「真发生了探测」的成本；这里只控制探测频率。插拔耳机是秒级事件，
-     * 以前用户插上耳机最多要等 5 秒声音才切过去，感知很差；1s 与音量那条
-     * 复查同频，成本从「每 5 秒 60~200ms」变成「每 1 秒 60~200ms」，
-     * 最坏占 worker 20%，只在播放中发生，实测 worker 空转率仍绰绰有余。
-     * 如果将来真机上看到 CPU 明显上升，把这里调回 2000 即可。
+     * 蓝牙探测节流：**已连上时放慢到 5s，未连上时保持 1s**。
+     *
+     * 成本：pb2_bt_pcm_detect 每次要 popen bluetoothctl（devices 25ms +
+     * 每台 info 25ms），真机实测单次 50~60ms，而且是 fork/exec ——
+     * 在 4 核 A35 上 fork 本身就会抢 CPU。
+     *
+     * 【P1-8 曾经的错误】为了「插上耳机快点出声」把节流从 5s 降到 1s，
+     * 结果**已连蓝牙时也每秒 fork 两次**：日志里 `bt: pcm via bluetoothctl`
+     * 每秒一条刷屏，20 秒内 20 条。用户反馈「连蓝牙耳机后播放经常卡顿、
+     * 观感只有 1 帧」——每秒 50~60ms 的 fork 风暴叠加 A2DP 编码，
+     * 正好卡在解码线程的节拍上。
+     *
+     * 现在的策略按「有没有需要发现的变化」分档：
+     *   - 未连蓝牙（bt_present=0）：1s，用户刚插上耳机能快速切过去；
+     *   - 已连蓝牙（bt_present=1）：5s，只需要发现「耳机掉了」，
+     *     这个延迟用户完全能接受（声音最多晚 5s 回扬声器）。
      */
-    if (now - g_w.bt_check_ms < 1000) return;
+    {
+        long long period = g_w.bt_present ? 5000 : 1000;
+        if (now - g_w.bt_check_ms < period) return;
+    }
     g_w.bt_check_ms = now;
     if (pb2_bt_pcm_detect(bt, (int)sizeof(bt)) == 0) {
         if (!g_w.bt_present || strcmp(bt, g_w.adev) != 0) {
@@ -1255,6 +1401,7 @@ static void refresh_audio_route(void) {
                     }
                 }
             }
+            g_w.bt_ts_offset_ns = read_bt_ts_offset_ns();
             pb2_logf("audio: BT sink appeared (%s) -> rebuild pipeline to route audio", bt);
             g_w.vol_applied = -1; /* 新分支的 volume 元素还没设过 */
             goto rebuild;
@@ -2202,6 +2349,7 @@ static void do_open(pb2_open_req_t *req) {
      * 「真的连了蓝牙」时才走 BlueZ 分支；没连时 bluetoothctl devices
      * 通常直接返回（实测 40ms 左右）。可接受。
      */
+    g_w.bt_ts_offset_ns = read_bt_ts_offset_ns();
     if (pb2_bt_pcm_detect(g_w.adev, (int)sizeof(g_w.adev)) == 0) {
         const char *mac;
         g_w.bt_present = 1;
@@ -2351,7 +2499,8 @@ static void do_open(pb2_open_req_t *req) {
 
     {
         long long t_gate = pb2_now_ms();
-        long long gate_ms = PB2_START_GATE_TIMEOUT_MS;
+        long long gate_ms = g_w.adev[0] ? PB2_START_GATE_TIMEOUT_BT_MS
+                              : PB2_START_GATE_TIMEOUT_MS;
         int want_audio = req->audio ? 1 : 0;
         int ready = 0;
         /*
@@ -2436,7 +2585,13 @@ static void do_open(pb2_open_req_t *req) {
     pb2_mp3_marker_set();
     g_w.last_marker_ms = pb2_now_ms();
     /* 【起播迟到宽限】视频分支晚 900~2100ms 才出帧，这段时间不判迟到 */
-    arm_late_grace();
+    /*
+     * 【直播不 arm 迟到宽限】
+     * 直播的 desc 里已经把 max-lateness 设成 -1 / qos=false（丢帧会让
+     * 整个 GOP 黑掉 = 用户看到的闪屏）。如果这里照常 arm，3 秒后
+     * update_late_policy() 会把 sink 收紧回 40/true，闪屏立刻回来。
+     */
+    if (!g_w.is_live) arm_late_grace();
     pb2_logf("OPEN done in %lldms", pb2_now_ms() - t0);
 }
 
@@ -3202,6 +3357,11 @@ static void arm_late_grace(void) {
 }
 
 static void update_late_policy(void) {
+    /*
+     * 直播的 sink 策略由 desc 决定（-1 / qos=false），worker tick 绝不能
+     * 干预，否则闪屏复现。见 do_open 里 arm_late_grace() 处的注释。
+     */
+    if (g_w.is_live) return;
     if (g_w.late_grace_until_ms <= 0) return;
     /*
      * 【关键】首帧还没上屏时绝不收紧。
