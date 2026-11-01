@@ -61,6 +61,11 @@
 #define PB2_SEEK_ASYNC_TIMEOUT_MS 3000
 #define PB2_PREROLL_TIMEOUT_MS 12000
 /*
+ * 起播缓冲门超时（见 do_open 里的长注释）。
+ * 4s 足够覆盖实测最慢的 2100ms 首帧，超时就退化放行，绝不让用户卡住。
+ */
+#define PB2_START_GATE_TIMEOUT_MS 4000
+/*
  * 【P0-1】首帧超时：OPEN（或 seek 重建）之后这么久还没有任何一帧上屏，
  * 就判失败。B 站 m4s URL 带 deadline（约 2h 过期）、断网、ffmpeg 秒退
  * 都会落进这个窗口。以前这里是「永久挂起且不报错」。
@@ -2302,7 +2307,80 @@ static void do_open(pb2_open_req_t *req) {
         pb2_logf("mixer: muted=0 (source=%s) -> will open speaker", pb2_mute_reason());
     }
 
-    /* 起播 */
+    /*
+     * ================== 起播缓冲门（用户方案，2026-11-01） ==================
+     *
+     * 用户反馈：「为什么不直接加播放缓冲，在点击播放时缓冲 1-2 秒后，
+     * 音频和视频同时起播」。
+     *
+     * 之前的做法（直接 PLAYING + 起播迟到宽限）只能让积压帧**补播**，
+     * 用户看到的是「先黑屏 → 画面低帧率追赶 → 2 秒后才正常」。
+     *
+     * 根因：alsasink 的 preroll 只拿到第一个音频缓冲就完成，管线时钟立刻
+     * 起跑；视频分支（matroskademux 解析首簇 + mppvideodec 初始化 + 硬解
+     * 首帧）晚 900~2100ms 才出帧，这段时间的帧全部「迟到」。
+     *
+     * 做法：管线先进 PAUSED —— **时钟不走**，所以没有任何帧会迟到；
+     * 分支由 pad-added 动态建，sync_state_with_parent 会把它们同步到
+     * PAUSED，各自完成 preroll（视频 = 首帧已解码待显示，音频 = 首个
+     * PCM 缓冲已就绪）。等两个分支都就绪再一起切 PLAYING，两路从同一
+     * 时刻起跑，天然对齐，没有追赶期。
+     *
+     * ⚠️ 不能只靠 get_state 判 preroll：desc 里**没有 sink**（分支全靠
+     * pad-added），PAUSED 会立即返回 SUCCESS，那时一个分支都还没建，
+     * 等于没缓冲。必须自己轮询分支就绪标志。
+     *
+     * 就绪判据：
+     *   - 视频：vbranch 且 frames > 0（首帧真的解出来了）
+     *   - 音频：有音轨时必须 abranch；无音轨（req->audio == 0）不等
+     * 超时（PB2_START_GATE_TIMEOUT_MS）无条件放行，退化成旧行为，
+     * 绝不让用户看到错误或永久等待。
+     *
+     * seek 不走这个门：seek 有 SEEK first frame 指标，实测直接 PLAYING
+     * 只要 413~516ms，加门只会更慢。
+     */
+    sr = gst_element_set_state(g_w.pipe, GST_STATE_PAUSED);
+    pb2_logf("set_state(PAUSED) -> %d (+%lldms)", sr, pb2_now_ms() - t0);
+
+    if (sr == GST_STATE_CHANGE_FAILURE) {
+        pb2_stats_patch_error(&g_w.stats, PB2_E_OPEN_FAILED, "set_state(PAUSED) failed");
+        pb2_stats_patch_state(&g_w.stats, PB2_STATE_ERROR);
+        teardown_pipeline();
+        return;
+    }
+
+    {
+        long long t_gate = pb2_now_ms();
+        long long gate_ms = PB2_START_GATE_TIMEOUT_MS;
+        int want_audio = req->audio ? 1 : 0;
+        int ready = 0;
+        /*
+         * 诊断覆盖：/tmp/pb2_startgate 写毫秒数可改超时（0 = 关闭缓冲门，
+         * 用于 A/B 对比「加门 vs 不加门」的起播表现）。
+         */
+        {
+            FILE *gf = fopen("/tmp/pb2_startgate", "r");
+            if (gf) {
+                long long v = -1;
+                if (fscanf(gf, "%lld", &v) == 1 && v >= 0 && v <= 30000) gate_ms = v;
+                fclose(gf);
+            }
+        }
+        while (pb2_now_ms() - t_gate < gate_ms) {
+            int v_ok = g_w.vbranch &&
+                       atomic_load_explicit(&g_w.probe.frames, memory_order_relaxed) > 0;
+            int a_ok = want_audio ? g_w.abranch : 1;
+            if (v_ok && a_ok) { ready = 1; break; }
+            pb2_sleep_ms(20);
+        }
+        pb2_logf("start gate: %s in %lldms (v=%d/%lld frames=%lld a=%d/%d want_audio=%d)",
+                 ready ? "both ready" : "timeout",
+                 pb2_now_ms() - t_gate,
+                 g_w.vbranch ? 1 : 0, 1,
+                 (long long)atomic_load_explicit(&g_w.probe.frames, memory_order_relaxed),
+                 g_w.abranch ? 1 : 0, want_audio, want_audio);
+    }
+
     sr = gst_element_set_state(g_w.pipe, GST_STATE_PLAYING);
     pb2_logf("set_state(PLAYING) -> %d (+%lldms)", sr, pb2_now_ms() - t0);
 
@@ -3665,19 +3743,31 @@ static void process_cmd(pb2_cmd_t *c) {
              * 只对暂停态脉冲：播放态本来就会 reconfigure，加脉冲纯属多余
              * 且可能引起掉帧。
              */
-            if (g_w.paused) {
-                gst_element_set_state(g_w.pipe, GST_STATE_PLAYING);
-                /* 等 sink 真的完成 configure（实测 30~60ms） */
-                pb2_sleep_ms(60);
-                rect_pulsed = 1;
-            }
-
+            /*
+             * 【顺序绝对不能反】属性必须先设、再脉冲 PLAYING。
+             *
+             * render-rectangle 是 write-only，kmssink 只在 reconfigure
+             * （分配 plane）那一刻读它。所以：
+             *   先脉冲再设属性 -> reconfigure 读到的是**旧值**，设完不会
+             *                     再 configure 一次 -> 暂停态完全无效
+             *   先设属性再脉冲 -> reconfigure 读到新值 -> 生效
+             * 上一版就是反的，探针里「看起来生效」是因为 2.5s 后恢复动作
+             * 又触发了一次 configure，把结果掩盖了。
+             *
+             * 脉冲时长给 200ms：实测 mppvideodec 从 PAUSED 恢复出帧
+             * 需要 100~180ms，60ms 经常还没走到 configure 就切回去了。
+             */
             if (want_hide) {
                 gst_util_set_object_arg(g_w.vsink_el, "render-rectangle", rect);
                 g_w.rect_hidden = 1;
+                if (g_w.paused && g_w.pipe && g_w.pipeline_alive) {
+                    gst_element_set_state(g_w.pipe, GST_STATE_PLAYING);
+                    pb2_sleep_ms(200);
+                    rect_pulsed = 1;
+                }
                 pb2_logf("SET_RECT %s (hide) took %lldms%s", rect,
                          pb2_now_ms() - t0_rect,
-                         rect_pulsed ? " [paused->pulse PLAYING]" : "");
+                         rect_pulsed ? " [property first, then pulse PLAYING]" : "");
             } else if (g_w.rect_hidden) {
                 /*
                  * 恢复：把目标矩形写进 g_w.rect（build_pipeline 用它），
@@ -3709,9 +3799,14 @@ static void process_cmd(pb2_cmd_t *c) {
                 /* 正常尺寸之间改矩形：直接 set 即可，不会踩棘轮 */
                 gst_util_set_object_arg(g_w.vsink_el, "render-rectangle", rect);
                 snprintf(g_w.rect, sizeof(g_w.rect), "%s", rect);
+                if (g_w.paused && g_w.pipe && g_w.pipeline_alive) {
+                    gst_element_set_state(g_w.pipe, GST_STATE_PLAYING);
+                    pb2_sleep_ms(200);
+                    rect_pulsed = 1;
+                }
                 pb2_logf("SET_RECT %s took %lldms%s", rect,
                          pb2_now_ms() - t0_rect,
-                         rect_pulsed ? " [paused->pulse PLAYING]" : "");
+                         rect_pulsed ? " [property first, then pulse PLAYING]" : "");
             }
 
             /*
