@@ -661,6 +661,156 @@ int pb2_mixer_pre_mute(void) {
     return rc == 0 ? 0 : -1;
 }
 
+/* ========================= 蓝牙 A2DP 输出设备探测 =========================
+ *
+ * 见 cmd.h 里 pb2_bt_pcm_detect() 的注释。这里只说实现上的三个坑：
+ *
+ * 坑 1：`bluealsa-aplay -L` 在本机会 stack smashing 崩溃（v3.0.0, Mar 18 2024），
+ *       abort 前 stdout 未 flush，popen 永远读到空 ⇒ 只看它会导致蓝牙永远
+ *       选不中。所以它是「首选但不唯一」，必须有 BlueZ 回退。
+ *
+ * 坑 2：匹配串必须是 "bluealsa:" 而不是 "bluealsa:DEV="。真实输出形如
+ *       `bluealsa:SRV=org.bluealsa,DEV=<MAC>,PROFILE=a2dp`，DEV 前面还有
+ *       SRV=...（v1 注释里明确记着这个坑「已踩过」）。
+ *
+ * 坑 3：`bluetoothctl devices` 只列**已配对**设备，不区分是否连接。必须逐台
+ *       `info` 看 `Connected: yes`，且必须有 `Audio Sink`（A2DP Sink =
+ *       0000110b）。只有 AVRCP/HFP 的设备能连上但放不出声，误选就是静默无声。
+ */
+
+#define PB2_BTCTL "/usr/bin/bluetoothctl"
+#define PB2_BT_LIST_CMD "/usr/bin/bluealsa-aplay -L 2>/dev/null"
+#define PB2_BT_MAX_DEVS 8
+
+/* 单台设备是否「已连接 + 有 A2DP Sink」→ 1/0 */
+static int bt_dev_is_connected_sink(const char *mac) {
+    char cmd[192];
+    char line[256];
+    FILE *fp;
+    int connected = 0;
+    int sink = 0;
+
+    if (!mac || !mac[0]) return 0;
+    snprintf(cmd, sizeof(cmd), "%s info '%s' 2>/dev/null", PB2_BTCTL, mac);
+    fp = popen(cmd, "r");
+    if (!fp) return 0;
+    while (fgets(line, sizeof(line), fp)) {
+        if (strstr(line, "Connected: yes")) {
+            connected = 1;
+        } else if (strstr(line, "Audio Sink")) {
+            sink = 1;
+        }
+    }
+    pclose(fp);
+    return (connected && sink) ? 1 : 0;
+}
+
+/* BlueZ 回退：扫已配对设备，挑第一台「已连接 + A2DP Sink」 */
+static int bt_detect_via_bluez(char *out, int out_cap) {
+    char macs[PB2_BT_MAX_DEVS][24];
+    int n_mac = 0;
+    int i;
+    char cmd[192];
+    char line[256];
+    FILE *fp;
+
+    snprintf(cmd, sizeof(cmd), "%s devices 2>/dev/null", PB2_BTCTL);
+    fp = popen(cmd, "r");
+    if (!fp) return -1;
+    while (fgets(line, sizeof(line), fp) && n_mac < PB2_BT_MAX_DEVS) {
+        /* 形如 "Device B0:A3:F2:AD:7E:FA Redmi Buds 6" */
+        char mac[24];
+        if (strncmp(line, "Device ", 7) != 0) continue;
+        if (sscanf(line + 7, "%23s", mac) != 1) continue;
+        /* MAC 形如 XX:XX:XX:XX:XX:XX，长度 17 */
+        if (strlen(mac) != 17 || mac[2] != ':' || mac[5] != ':') continue;
+        snprintf(macs[n_mac], sizeof(macs[n_mac]), "%s", mac);
+        n_mac++;
+    }
+    pclose(fp); /* 先关外层 pipe 再逐台 info，避免嵌套 popen 管道缠绕 */
+
+    for (i = 0; i < n_mac; i++) {
+        if (!bt_dev_is_connected_sink(macs[i])) continue;
+        snprintf(out, (size_t)out_cap, "bluealsa:DEV=%s,PROFILE=a2dp", macs[i]);
+        return 0;
+    }
+    return -1;
+}
+
+int pb2_bt_pcm_detect(char *out, int out_cap) {
+    FILE *fp;
+    char line[256];
+
+    if (!out || out_cap <= 0) return -1;
+    out[0] = '\0';
+
+    /* ① 首选 bluealsa-aplay -L（拿到的是完整 PCM 名，最省事） */
+    fp = popen(PB2_BT_LIST_CMD, "r");
+    if (fp) {
+        while (fgets(line, sizeof(line), fp)) {
+            char *p = strstr(line, "bluealsa:");
+            if (p) {
+                char *end = p;
+                while (*end && *end != ' ' && *end != '\n' && *end != '\r' &&
+                       *end != '\t') {
+                    end++;
+                }
+                if (end > p && (int)(end - p) < out_cap) {
+                    memcpy(out, p, (size_t)(end - p));
+                    out[end - p] = '\0';
+                    pclose(fp);
+                    pb2_logf("bt: pcm via bluealsa-aplay -L -> %s", out);
+                    return 0;
+                }
+            }
+        }
+        pclose(fp);
+    }
+
+    /* ② 回退 BlueZ（本机 bluealsa-aplay -L 会崩，这是实际生效的路径） */
+    if (bt_detect_via_bluez(out, out_cap) == 0) {
+        pb2_logf("bt: pcm via bluetoothctl -> %s", out);
+        return 0;
+    }
+
+    pb2_logf("bt: no connected A2DP sink, use default pcm (speaker)");
+    return -1;
+}
+
+int pb2_bt_name_detect(const char *mac, char *out, int out_cap) {
+    char cmd[192];
+    char line[256];
+    FILE *fp;
+
+    if (!mac || !mac[0] || !out || out_cap <= 0) return -1;
+    out[0] = '\0';
+    snprintf(cmd, sizeof(cmd), "%s devices 2>/dev/null", PB2_BTCTL);
+    fp = popen(cmd, "r");
+    if (!fp) return -1;
+    while (fgets(line, sizeof(line), fp)) {
+        /* 形如 "Device B0:A3:F2:AD:7E:FA Redmi Buds 6" */
+        char m[24];
+        char *name;
+        char *nl;
+        if (strncmp(line, "Device ", 7) != 0) continue;
+        if (sscanf(line + 7, "%23s", m) != 1) continue;
+        if (strcmp(m, mac) != 0) continue;
+        /* 名字在 MAC 之后，前导一个空格 */
+        name = line + 7 + strlen(m);
+        while (*name == ' ' || *name == '\t') name++;
+        nl = strchr(name, '\n');
+        if (nl) *nl = '\0';
+        nl = strchr(name, '\r');
+        if (nl) *nl = '\0';
+        if (!name[0]) continue;
+        snprintf(out, (size_t)out_cap, "%s", name);
+        pclose(fp);
+        return 0;
+    }
+    pclose(fp);
+    return -1;
+}
+
 int pb2_mp3_marker_set(void) {
     int fd = open(PB2_MP3_MARKER, O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
     if (fd < 0) return -1;

@@ -85,6 +85,45 @@ int pb2_mixer_mute(void);
 int pb2_mixer_pre_mute(void);
 
 /*
+ * 蓝牙 A2DP 音频输出设备探测（返回 ALSA PCM 名，如
+ * `bluealsa:DEV=B0:A3:F2:AD:7E:FA,PROFILE=a2dp`）。
+ *
+ * 【2026-11-01 用户反馈】「我连上蓝牙耳机了，播放视频的声音还是外放」。
+ *
+ * 根因：本机音频不走一个统一的「系统混音器」，而是三条互不相干的通路：
+ *   1) 内置喇叭：`/etc/asound.conf` 的 `pcm.!default -> speaker -> spk_softvol
+ *      -> resample_spk -> hw:1,0`（aw883xx 功放）
+ *   2) 蓝牙 A2DP：bluealsa 的 D-Bus 通道，PCM 名形如
+ *      `bluealsa:DEV=<MAC>,PROFILE=a2dp`，**完全不经过 asound.conf**
+ *   3) 有线耳机：asound.conf 里的 `ana_phone` / `tc_analog` 等
+ * 所以「连上蓝牙」不会自动改变 `pcm.!default`，播放器必须自己挑 device。
+ *
+ * 旧 v1（`native/csrc/player.c` 的 `detect_bt_pcm()`）有此逻辑，player2 重写
+ * 时丢了。这里按 v1 的两级策略恢复：
+ *   ① 首选 `bluealsa-aplay -L`（输出里直接有完整 PCM 名）
+ *   ② 但本机该命令**会 stack smashing 崩溃**（abort 前 stdout 未 flush ⇒
+ *      popen 永远读到空），所以必须有 ③
+ *   ③ 回退 BlueZ：`bluetoothctl devices` 列已配对设备，逐台 `info` 判
+ *      `Connected: yes` + `Audio Sink`（A2DP Sink = 0000110b；只有 AVRCP
+ *      的设备能连但放不出声，必须排除），命中即拼出 PCM 名。
+ *
+ * 返回 0 = 找到蓝牙设备并写进 out；-1 = 没有（调用方用默认 PCM = 喇叭）。
+ * 会 fork/exec（两次 popen，~40~120ms），**只在 worker 线程调用**。
+ */
+int pb2_bt_pcm_detect(char *out, int out_cap);
+
+/*
+ * 取某台蓝牙设备的别名（"Redmi Buds 6"），用于拼 bluealsa 的 mixer 控件名
+ * （形如 "Redmi Buds 6 - A2DP"）。mac 传 "B0:A3:F2:AD:7E:FA" 这种格式。
+ * 成功返回 0 并写 out，失败返回 -1。
+ *
+ * 为什么要这个：bluealsa 把每台设备的 AVRCP 绝对音量暴露成一个独立 mixer
+ * 控件，名字是 "<别名> - A2DP"，而 amixer 只能按名字操作（没有按 MAC 的
+ * 寻址方式）。不查别名就没法同步耳机音量。
+ */
+int pb2_bt_name_detect(const char *mac, char *out, int out_cap);
+
+/*
  * /tmp/mp3playing 标记文件管理。
  * /usr/bin/system_sleep_wakeup 里的 check_mp3_status() 检查这个文件，
  * 存在则跳过整机休眠 —— 这是厂商自己的约定，也是挡住 600s 息屏休眠的唯一手段。

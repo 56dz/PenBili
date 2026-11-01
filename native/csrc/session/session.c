@@ -149,6 +149,28 @@ typedef struct {
      */
     int rect_hidden;
     GstElement *asink;      /* 音频分支的 alsasink */
+    /*
+     * 音频输出设备名。空串 = 走 ALSA 默认（pcm.!default -> speaker -> hw:1,0）。
+     * 蓝牙耳机连上时是 "bluealsa:DEV=<MAC>,PROFILE=a2dp"。
+     * 【为什么必须显式传】蓝牙 A2DP 走的是 bluealsa 的 D-Bus 通道，完全
+     * 不经过 /etc/asound.conf，所以「连上蓝牙」不会改变 pcm.!default，
+     * 不显式指定就永远从喇叭出声（实测确认）。
+     */
+    char adev[128];
+    /*
+     * 播放器自己的音量（0..100）。GStreamer 侧用 volume 元素，不碰 ALSA
+     * 混音器 —— 实测 hw:1,0 直连时 hal-audio 写的 card1 numid54 根本不进
+     * 播放链路（softvol 层没生效），所以系统控制中心调音量对播放无效。
+     * 我们的做法：读 sys_config 的 spk_volume / bt_volume 映射到 volume 属性。
+     */
+    GstElement *vvol;       /* 音频分支里的 volume 元素 */
+    int vol_pct;            /* 当前应用音量 0..100 */
+    int vol_applied;        /* 已下发到 vvol 的值（-1 = 未下发） */
+    long long vol_check_ms; /* 上次复查系统音量的时间（节流） */
+    long long bt_check_ms;  /* 上次探测蓝牙路由的时间（独立节流，见下） */
+    int bt_present;         /* 上次探测时蓝牙是否可用（用于检测插拔） */
+    int bt_vol_applied;     /* 已下发给耳机的 AVRCP 音量（-1 = 未下发） */
+    char bt_ctl_name[64];   /* 耳机的 mixer 控件名，形如 "Redmi Buds 6 - A2DP" */
     GstBus *bus;
     int vbranch;
     int abranch;
@@ -380,6 +402,8 @@ static GstElement *parse_bin(const char *desc) {
 static int on_video_buffer(GstPad *pad, GstPadProbeInfo *info, void *ud);
 static int on_audio_buffer(GstPad *pad, GstPadProbeInfo *info, void *ud);
 static int on_audio_list(GstPad *pad, GstPadProbeInfo *info, void *ud);
+static void apply_volume_now(void);
+static void apply_bt_avrcp_volume(void);
 
 static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
     char capsbuf[128];
@@ -477,26 +501,44 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
          * 也接受 caps 里带 "aac" 字样（某些 demuxer 会给 audio/x-h264 之外的别名）。
          * mpegversion=1 是 MP3，走 decodebin 通用链路。
          */
+        /*
+         * alsasink 的 device= 参数。
+         *   adev 为空 -> 不写（走 pcm.!default = speaker = hw:1,0）
+         *   adev 非空 -> device="<adev>"（蓝牙 bluealsa PCM）
+         * gst-launch 风格 desc 里带逗号/冒号的值必须用引号包住，
+         * 否则 parse_bin 会在 ':' ',' 处截断。
+         */
+        {
+            char devarg[192];
+            if (g_w.adev[0]) {
+                snprintf(devarg, sizeof(devarg), " device=\"%s\"", g_w.adev);
+            } else {
+                devarg[0] = '\0';
+            }
         if ((strncmp(cn, "audio/mpeg", 10) == 0 && mpegversion == 4) ||
             strstr(cn, "aac") || strstr(cn, "AAC")) {
             snprintf(desc, sizeof(desc),
                      "queue max-size-buffers=32 max-size-bytes=0 max-size-time=0 ! "
                      "aacparse ! faad ! audioconvert ! audioresample ! "
-                     "audio/x-raw,rate=48000,channels=2 ! "
-                     "alsasink name=asink buffer-time=30000 latency-time=10000");
+                     "audio/x-raw,rate=48000,channels=2 ! volume name=vvol ! "
+                     "alsasink name=asink buffer-time=30000 latency-time=10000%s",
+                     devarg);
         } else if (strstr(cn, "x-ac3") || strstr(cn, "x-eac3") || strstr(cn, "x-a52")) {
             snprintf(desc, sizeof(desc),
                      "queue max-size-buffers=32 ! ac3parse ! a52dec ! audioconvert ! "
-                     "audioresample ! audio/x-raw,rate=48000,channels=2 ! "
-                     "alsasink name=asink buffer-time=30000 latency-time=10000");
+                     "audioresample ! audio/x-raw,rate=48000,channels=2 ! volume name=vvol ! "
+                     "alsasink name=asink buffer-time=30000 latency-time=10000%s",
+                     devarg);
         } else {
             /* 未知音频编码：只要有 parser 就走通用链路，失败也只是没声音 */
             pb2_logf("pad-added: audio caps %s, trying generic chain", cn);
             snprintf(desc, sizeof(desc),
                      "queue max-size-buffers=32 ! decodebin ! audioconvert ! "
-                     "audioresample ! audio/x-raw,rate=48000,channels=2 ! "
-                     "alsasink name=asink buffer-time=30000 latency-time=10000");
+                     "audioresample ! audio/x-raw,rate=48000,channels=2 ! volume name=vvol ! "
+                     "alsasink name=asink buffer-time=30000 latency-time=10000%s",
+                     devarg);
         }
+        } /* end devarg scope */
         bin = parse_bin(desc);
         if (!bin) {
             pb2_logf("pad-added: audio branch build failed, continue video-only");
@@ -590,12 +632,215 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
     } else {
         g_w.asink = bin;
         g_w.has_audio = 1;
+        /*
+         * 取出音量元素。volume 是 linear 0..1 的属性（不是 dB），
+         * 所以百分比要除以 100。拿不到就退化为「不控制音量」，
+         * 不影响播放本身。
+         */
+        g_w.vvol = gst_bin_get_by_name((GstBin *)bin, "vvol");
+        g_w.vol_applied = -1;
+        if (g_w.vvol) {
+            apply_volume_now();
+            apply_bt_avrcp_volume();
+        } else {
+            pb2_logf("audio: no volume element (vvol) in branch, volume control disabled");
+        }
         /* 【P0-4】同上 */
         g_w.abranch = 1;
         pb2_stats_patch_audio(&g_w.stats, 1, 0);
-        pb2_logf("audio branch ready (probe attached)");
+        pb2_logf("audio branch ready (probe attached) dev=%s vol=%d%%",
+                 g_w.adev[0] ? g_w.adev : "(default speaker)", g_w.vol_pct);
     }
     gst_object_unref(sink);
+}
+
+/* ============================ 音量（应用级） ============================ */
+
+/*
+ * 把 g_w.vol_pct 下发到 volume 元素。
+ *
+ * 【为什么不用 ALSA 混音器】实测：alsasink 直开 hw:1,0 时，hal-audio
+ * 写的 card1 numid54 完全不进播放链路（asound.conf 的 softvol 层没有
+ * 真正生效），所以系统控制中心调音量对播放零影响。我们改成自己在
+ * GStreamer 里做增益，读的仍是系统音量（sys_config 的 spk_volume /
+ * bt_volume），这样控制中心和播放器保持一致，且不破坏用户设置。
+ */
+/*
+ * 把音量同步给蓝牙耳机的 AVRCP 绝对音量（bluealsa 的 'Xxx - A2DP' 控件）。
+ *
+ * 【为什么还要这一手】GStreamer 的 volume 元素只在本地做软件增益，而蓝牙
+ * 耳机的**硬件**音量是独立的（bluealsa 暴露的 pvolume，实测默认卡在 30%
+ * 从不变化）。只做软件增益的话：用户把控制中心拉到 0 时耳机确实静音了
+ * （软件增益 0），但拉到 100 时耳机仍按自己的 30% 播放，听感上限被锁死。
+ * 同步过去让两边一致。失败不影响播放（耳机可能不支持绝对音量）。
+ *
+ * 只在路由是蓝牙时做；值没变就不重复下发（amixer 一次 ~30ms）。
+ */
+static void apply_bt_avrcp_volume(void) {
+    char vol[16];
+    char out[256];
+    char *argv[8];
+    int rc;
+
+    if (!g_w.bt_present || !g_w.adev[0]) return;
+    if (g_w.bt_vol_applied == g_w.vol_pct) return;
+    snprintf(vol, sizeof(vol), "%d%%", g_w.vol_pct);
+    argv[0] = (char *)"/usr/bin/amixer";
+    argv[1] = (char *)"-D";
+    argv[2] = (char *)"bluealsa";
+    argv[3] = (char *)"sset";
+    argv[4] = (char *)g_w.bt_ctl_name; /* 设备名 - A2DP，探测时填 */
+    argv[5] = vol;
+    argv[6] = NULL;
+    if (!g_w.bt_ctl_name[0]) return;
+    /*
+     * 必须捕获输出：宿主 SIGCHLD=SIG_IGN 让 waitpid 恒 ECHILD，pb2_run 只能
+     * 靠 /proc 判活，返回 0 表示「进程跑过了」而不是「成功了」。amixer 失败
+     * 时退出码非 0 但拿不到，所以只能看它打印了什么。
+     */
+    rc = pb2_run(argv, out, (int)sizeof(out), 1500);
+    if (out[0]) {
+        char *nl = strchr(out, '\n');
+        if (nl) *nl = '\0';
+    }
+    g_w.bt_vol_applied = g_w.vol_pct;
+    pb2_logf("audio: bt avrcp volume -> %s (rc=%d) ctl='%s' out='%s'", vol, rc,
+             g_w.bt_ctl_name, out);
+}
+
+static void apply_volume_now(void) {
+    if (!g_w.vvol) return;
+    if (g_w.vol_applied == g_w.vol_pct) return;
+    g_object_set(g_w.vvol, "volume", (double)g_w.vol_pct / 100.0, NULL);
+    g_w.vol_applied = g_w.vol_pct;
+    pb2_logf("audio: volume %d%% -> %.3f", g_w.vol_pct, (double)g_w.vol_pct / 100.0);
+}
+
+/*
+ * 读 /data/cfg/sys_config.conf 里的某个整数键（spk_volume / bt_volume）。
+ *
+ * 为什么不调 hal-audio 读：hal-audio 只有 -g（读）但输出的是 "file:0" 这种
+ * 无意义内容（实测），而 sys_config.conf 是纯文本 key=value，直接读更可靠，
+ * 也不需要起子进程（省 30ms+ 且不依赖 PATH）。
+ * 返回 0..100；读不到返回 -1。
+ */
+static int read_sys_config_int(const char *key, int defval) {
+    FILE *fp;
+    char line[256];
+    size_t klen = strlen(key);
+    int val = -1;
+
+    fp = fopen("/data/cfg/sys_config.conf", "r");
+    if (!fp) return defval;
+    while (fgets(line, sizeof(line), fp)) {
+        if (strncmp(line, key, klen) != 0) continue;
+        if (line[klen] != '=') continue;
+        val = atoi(line + klen + 1);
+        break;
+    }
+    fclose(fp);
+    if (val < 0) return defval;
+    if (val > 100) val = 100;
+    return val;
+}
+
+/*
+ * 周期性同步「系统音量」和「音频路由」。
+ *
+ * 两条独立的事：
+ *   ① 音量：控制中心改的是 sys_config.conf 的 spk_volume（实测 hal-audio -s N
+ *      同时写 numid54 和这个文件）。播放器读它映射到 volume 元素，这样
+ *      下拉控制中心才真正影响播放。
+ *   ② 路由：蓝牙耳机插拔后必须重建音频分支才能换 device —— alsasink 的
+ *      device 属性在 PLAYING 状态下改了也不会重开 PCM。这里检测到变化就
+ *      投递一次原地 seek（复用已有的重建机制，代价 ~1.3s），比偷偷重建
+ *      音频分支安全得多（后者要处理 pad 重新 link、时钟重锚一堆状态）。
+ */
+static void refresh_audio_route(void) {
+    long long now = pb2_now_ms();
+    char bt[128];
+
+    if (now - g_w.vol_check_ms < 1000) return;
+    g_w.vol_check_ms = now;
+
+    /* ① 音量：spk_volume 是控制中心唯一写的键（见 do_open 里的实测说明） */
+    {
+        int pct = read_sys_config_int("spk_volume", -1);
+        if (pct >= 0 && pct != g_w.vol_pct) {
+            g_w.vol_pct = pct;
+            apply_volume_now();
+            apply_bt_avrcp_volume();
+        }
+    }
+
+    /* ② 路由（只在有会话、已建音频分支时才关心） */
+    if (!g_w.req || !g_w.pipeline_alive) return;
+    /*
+     * 蓝牙探测独立节流到 5s：pb2_bt_pcm_detect 内部要起 bluetoothctl
+     * （devices + 每台 info，共 2~3 次 fork/exec，实测 60~200ms）。
+     * 每秒跑一次会吃掉 worker 近 20% 的 CPU，而插拔耳机是秒级事件，
+     * 5s 的检测延迟完全够用。
+     */
+    if (now - g_w.bt_check_ms < 5000) return;
+    g_w.bt_check_ms = now;
+    if (pb2_bt_pcm_detect(bt, (int)sizeof(bt)) == 0) {
+        if (!g_w.bt_present || strcmp(bt, g_w.adev) != 0) {
+            g_w.bt_present = 1;
+            snprintf(g_w.adev, sizeof(g_w.adev), "%s", bt);
+            g_w.bt_vol_applied = -1;
+            {
+                const char *mac = strstr(bt, "DEV=");
+                g_w.bt_ctl_name[0] = '\0';
+                if (mac) {
+                    char macbuf[24];
+                    const char *e = mac + 4;
+                    size_t n2 = 0;
+                    while (*e && *e != ',' && n2 + 1 < sizeof(macbuf)) {
+                        macbuf[n2++] = *e++;
+                    }
+                    macbuf[n2] = '\0';
+                    if (n2 == 17) {
+                        char nm[48];
+                        if (pb2_bt_name_detect(macbuf, nm, (int)sizeof(nm)) == 0) {
+                            snprintf(g_w.bt_ctl_name, sizeof(g_w.bt_ctl_name),
+                                     "%s - A2DP", nm);
+                        }
+                    }
+                }
+            }
+            pb2_logf("audio: BT sink appeared (%s) -> rebuild pipeline to route audio", bt);
+            g_w.vol_applied = -1; /* 新分支的 volume 元素还没设过 */
+            goto rebuild;
+        }
+    } else {
+        if (g_w.bt_present || g_w.adev[0]) {
+            g_w.bt_present = 0;
+            g_w.adev[0] = '\0';
+            g_w.bt_ctl_name[0] = '\0';
+            g_w.bt_vol_applied = -1;
+            pb2_logf("audio: BT sink gone -> rebuild pipeline to use speaker");
+            g_w.vol_applied = -1;
+            goto rebuild;
+        }
+    }
+    return;
+
+rebuild:
+    if (g_w.paused) {
+        /*
+         * 暂停态不重建（重建会把画面刷出来）。记一个待办，等 resume 后
+         * 由下一次 tick 再触发 —— 那时 g_w.paused 已经是 0。
+         */
+        pb2_logf("audio: route change deferred (paused)");
+        g_w.vol_check_ms = 0;
+        return;
+    }
+    if (g_w.seek_pending) return; /* 已经在重建了 */
+    g_w.seek_target = g_w.last_pos_ms;
+    g_w.seek_pending = 1;
+    g_w.seek_last_ms = pb2_now_ms() - PB2_SEEK_DEBOUNCE_MS - 1;
+    pb2_stats_patch_seek(&g_w.stats, g_w.seek_target, 1);
+    pb2_logf("audio: rebuild at %lldms for route change", g_w.seek_target);
 }
 
 /* ============================ 视频帧计数 probe ============================ */
@@ -805,6 +1050,8 @@ static void teardown_pipeline_ex(int close_src) {
     g_w.vsink_el = NULL;
     g_w.rect_hidden = 0;
     g_w.asink = NULL;
+    g_w.vvol = NULL;
+    g_w.vol_applied = -1;
     g_w.vbranch = 0;
     g_w.abranch = 0;
     g_w.has_audio = 0;
@@ -1121,6 +1368,67 @@ static void do_open(pb2_open_req_t *req) {
     g_w.first_frame_retries = 0; /* 每个新会话重新给满自愈配额 */
     /* 【P1-18】帧率上限：0 = 不限制，>0 时在 mppvideodec 之后插 videorate max-rate */
     g_w.fps_cap = req->fpsCap;
+
+    /*
+     * 音频路由 + 音量：**必须在建管线之前定好**，因为 device= 是拼进
+     * desc 里的（alsasink 的 device 在 PLAYING 下改了不会重开 PCM）。
+     *
+     * 蓝牙探测要起 2~3 个子进程（bluetoothctl devices + 每台 info），
+     * 耗时 60~200ms，所以放在 OPEN 的关键路径上是有代价的。但只有
+     * 「真的连了蓝牙」时才走 BlueZ 分支；没连时 bluetoothctl devices
+     * 通常直接返回（实测 40ms 左右）。可接受。
+     */
+    if (pb2_bt_pcm_detect(g_w.adev, (int)sizeof(g_w.adev)) == 0) {
+        const char *mac;
+        g_w.bt_present = 1;
+        g_w.bt_vol_applied = -1;
+        /*
+         * 从 "bluealsa:DEV=B0:A3:F2:AD:7E:FA,PROFILE=a2dp" 里抠出 MAC，
+         * 再查别名拼 AVRCP 控件名（见 apply_bt_avrcp_volume 的注释）。
+         * 查不到就留空 —— 那只是不同步耳机硬件音量，不影响出声。
+         */
+        g_w.bt_ctl_name[0] = '\0';
+        mac = strstr(g_w.adev, "DEV=");
+        if (mac) {
+            char macbuf[24];
+            const char *end = mac + 4;
+            size_t n = 0;
+            while (*end && *end != ',' && n + 1 < sizeof(macbuf)) {
+                macbuf[n++] = *end++;
+            }
+            macbuf[n] = '\0';
+            if (n == 17) {
+                char name[48];
+                if (pb2_bt_name_detect(macbuf, name, (int)sizeof(name)) == 0) {
+                    snprintf(g_w.bt_ctl_name, sizeof(g_w.bt_ctl_name), "%s - A2DP",
+                             name);
+                }
+            }
+        }
+        pb2_logf("audio: open with BT sink %s (mixer ctl='%s')", g_w.adev,
+                 g_w.bt_ctl_name[0] ? g_w.bt_ctl_name : "?");
+    } else {
+        g_w.bt_present = 0;
+        g_w.adev[0] = '\0';
+        g_w.bt_ctl_name[0] = '\0';
+        g_w.bt_vol_applied = -1;
+        pb2_logf("audio: open with default pcm (speaker)");
+    }
+    /*
+     * 音量来源：**永远读 spk_volume**。
+     *
+     * 实测（2026-11-01，蓝牙已连）：`hal-audio -s 40` 只写 spk_volume，
+     * 既不改 bt_volume 也不改 bluealsa 的 AVRCP 音量 —— 而 hal-audio 正是
+     * 下拉控制中心和设置页背后的那个 HAL 二进制。所以「用户调音量」这件事
+     * 的唯一权威值就是 spk_volume，跟当前走喇叭还是耳机无关。
+     * （bt_volume 是给蓝牙设置页用的独立档位，控制中心不碰它。）
+     */
+    g_w.vol_pct = read_sys_config_int("spk_volume",
+                                      read_sys_config_int("bt_volume", 100));
+    g_w.vol_applied = -1;
+    g_w.vol_check_ms = pb2_now_ms();
+    g_w.bt_check_ms = pb2_now_ms();
+
     pb2_stats_patch_resync(&g_w.stats, 0, 0);
 
     pb2_probe_reset(&g_w.probe);
@@ -2185,6 +2493,7 @@ static void *worker_main(void *arg) {
 
             refresh_position();
             refresh_fps();
+            refresh_audio_route();
             check_plane();
             /* 【P0-1】首帧看门狗：15s 无帧或源先死 → error（含拆管线） */
             check_first_frame();
