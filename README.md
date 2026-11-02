@@ -21,7 +21,7 @@
 
 ## 截图
 
-全部为 X6 Pro 真机 `miniapp_cli capture` 采集，960×266。
+全部为 X6 Pro 真机采集，960×266。
 
 **推荐流**
 
@@ -47,7 +47,11 @@
 
 ![我的](docs/screenshots/x6-mine.png)
 
-> 截图只含 Falcon 画布层。视频是走 DRM/KMS 硬件平面直出的，不在画布里，所以播放页截图里视频区是黑的——这不是 bug。
+> 除播放页外，其余都是 `miniapp_cli capture` 原样抓的 Falcon 画布层。视频走 DRM/KMS
+> 硬件平面直出，不在画布里，所以画布截图里视频区是黑的——不是 bug。播放页那张为了
+> 展示真实效果，用 `kmssrc` 单独抓了平面帧，按平面几何（`/sys/kernel/debug/dri/0/summary`
+> 里的 `Esmart1-win0` dst）贴回画布。抓帧必须在暂停后做，否则拿到的是解码器正在写的
+> 缓冲区，全是撕裂条。
 
 ---
 
