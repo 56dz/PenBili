@@ -1,5 +1,17 @@
 # X6 Pro 视频播放链路（KMS overlay）与音频通路
 
+> **阅读提示（v3.5.2 起）**：当前默认播放实现是 **player2**（`native/csrc/jsapi_player2.c`
+> + `session/`、`source/`、`audio/`、`video/`、`core/`），架构与本文描述的 v1
+> （`native/csrc/player.c`，`gst-launch-1.0` 子进程 + 两条 FIFO）**完全不同**。
+> player2 的设计与决策见 [`../README.md`](../README.md) 的「技术实现」章节。
+>
+> 本文仍然有效的是**平台层事实**：屏幕几何与旋转变换（§2）、为什么必须走 KMS
+> overlay 而不能自己 SETPLANE（§3.1）、`force-aspect-ratio` / 旋转交给解码器
+> （§3.2/§3.3）、音频通路与 `Playback Path` 出厂 OFF（§5）、`amixer cget` 的解析坑
+> （§5.0）、蓝牙 `bluealsa-aplay -L` 崩溃与 BlueZ 回退（§5.3）。
+> **已过时**的是渲染后端细节（§3 的 gst-launch 管线图、§3.4 的音频锚 PLL、
+> §3.5 孤儿 gst-launch 回收、§7 里的 `/tmp/vp_trend.log`）——那是 v1 的实现。
+
 本文记录 X6 Pro（RK3562，Buildroot 4.3.5，aarch64）上把视频真正画到屏幕上、
 并把声音从扬声器放出来的整条链路。X5 那一套 `/dev/fb0` + fbdev blit 在 X6 Pro 上
 **完全不可用**，原因见 §1。
@@ -70,14 +82,16 @@ y: Math.round((panel.height - ph) / 2),   // 面板内垂直居中
 |---|---|---|---|
 | X5 老（左 176 / 列 608 / 右 176，全高） | `x=244, w=473, h=266` | `(107, 243, 266, 473)` | `(107, 244, 266, 473)` — 差 1px，看不出 |
 | X6 v3（视频区 64,0,448,240） | `x=75, w=427, h=240` | `(107, **458**, 240, 427)` | `(107, 458, 240, 427)` — 此处两式同值，但 y 与尺寸都变了 |
+| X6 v3.5（视频区 213,0,469,240） | `x=234, w=427, h=240` | `(107, **299**, 240, 427)` | `(107, 299, 240, 427)` — 现行布局 |
 
 注意真变换里**面板 x = 107 + logical_y**，改左右栏宽度只改 `logical_x` ⇒ **只改面板 y，
 不改面板 x 与视频尺寸**。这是设计新布局时最容易搞反的一点（面板两轴与逻辑两轴交叉映射）。
 
 ### 2.2 v3 布局：视频区高度 240，底部 26px 留给进度条
 
-`BAR_WIDTH = 76`（主页左栏）、`ICON_BAR_WIDTH = 64`（播放态左图标栏）、
-`VIDEO_AREA = {x:64, y:0, width:448, height:240}`。
+`LEFT_COL_WIDTH = 213`（播放态左列，含标题/UP主/简介/三枚互动按钮）、
+`MID_COL_WIDTH = 469`（视频列）、`RIGHT_COL_WIDTH = 278`（评论区），三列合计 960。
+`VIDEO_AREA = {x:213, y:0, width:469, height:240}`。
 
 **为什么高度是 240 而不是 266**：视频走 KMS overlay 平面，**盖在 Falcon UI 之上**，
 UI 在视频矩形内画任何东西都会被覆盖。所以进度条必须落在视频矩形之外 ——
@@ -116,7 +130,7 @@ ffmpeg -c:v copy -bsf:v h264_mp4toannexb -f h264  ──压缩 H.264 Annex-B─�
    （`plane[76]: fb=0` 不变，退出码却是 0）。
 2. **只有 kmssink 能真正占到该平面**：起链后
    `/sys/kernel/debug/dri/0/summary` 里出现
-   `Esmart1-win0: ACTIVE, format NV12, zpos 2, dst pos[107,450] rect[240x427]`，
+   `Esmart1-win0: ACTIVE, format NV12, zpos 2, dst pos[107,299] rect[240x427]`，
    而 UI 在 `Esmart0-win0 zpos 0` —— 视频硬件叠在 UI 之上，Falcon 的合成器完全不参与。
 3. 用 FIFO + `filesrc blocksize=` 而不是 `fdsrc`：这台设备的 `fdsrc` 拿来做定长
    切分**会短读并崩流**（`gst_base_src_loop: streaming stopped, reason error (-5)`），
@@ -332,11 +346,11 @@ aarch64 用 `zig cc -target aarch64-linux-gnu.2.17` + `native/stubs-aarch64/`
 # 平面状态：谁是 ACTIVE、谁是 fb=0
 grep -a -A9 'Esmart' /sys/kernel/debug/dri/0/summary
 
-# 当前播放子进程
-grep -a 'gst-launch\|ffmpeg' /proc/*/cmdline 2>/dev/null
+# 当前播放子进程（player2 只起 ffmpeg 拉流，gst 在进程内）
+grep -a 'ffmpeg' /proc/*/cmdline 2>/dev/null
 
-# 播放趋势日志（帧号/位置/跳帧）
-tail -20 /tmp/vp_trend.log
+# player2 日志（需先建开关文件；默认关闭）
+touch /tmp/pb2.enable && tail -40 /tmp/pb2.log
 
 # 唤醒面板（面板睡着时 kmssrc 抓到 0 字节）
 hal-screen on; hal-screen keep
@@ -344,3 +358,6 @@ hal-screen on; hal-screen keep
 # 日志一律 grep -a：文件含二进制字节，普通 grep 返回空
 grep -a '\[bili\]' /userdata/applog/DictPen_*.log | tail -40
 ```
+
+> v1 专用的 `/tmp/vp_trend.log` / `/tmp/vp_vid.log` 只在 `player.c` 下产生；
+> player2 对应的诊断开关是 `/tmp/pb2.enable`（日志）与 `/tmp/pb2_gstdebug`（GStreamer 调试）。

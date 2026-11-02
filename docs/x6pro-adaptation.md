@@ -1,5 +1,12 @@
 # X6 Pro 适配记录
 
+> **阅读提示（v3.5.2 起）**：当前界面是「左列 213 / 中列 469 / 右列 278」的三列播放布局，
+> 本文 §1 末尾的「栏位骨架」与 §4 的截图清单停留在 v3.0.0 的「64 / 432 / 448」旧布局，
+> 数值已过时；**屏幕几何（§1 前半）、触控坐标映射（§2）、以及 §3 的 Falcon 运行时坑
+> 全部仍然有效**，它们是平台层事实，与界面布局无关。
+> 现行几何常量以 `src/services/screen.js` 的 `LEFT_COL_WIDTH` / `MID_COL_WIDTH` /
+> `RIGHT_COL_WIDTH` 与 `src/styles/base.less` 顶部注释为准。
+
 本文件记录把 PenBili 从**有道词典笔 X5**（逻辑 800×254）适配到 **X6 Pro**（逻辑 960×266）的过程、
 真机测得的几何常量、以及踩到的坑。所有数字都来自真机截屏与像素测量，不是估算。
 
@@ -143,19 +150,21 @@ Falcon 的 `<text>` 标签，内容**写在新的一行就整段不渲染**（�
 
 | 文件 | 画面 |
 | --- | --- |
-| `x6-home.png` | 推荐流（4 列封面卡片网格 + B 站粉圆角方形导航） |
+| `x6-home.png` | 推荐流（5 列封面卡片网格 + B 站粉圆角方形导航） |
 | `x6-hot.png` | 热门 |
-| `x6-search.png` | 搜索「图文」栏结果 |
-| `x6-article.png` | 图文详情（正文列 592 宽） |
+| `x6-search.png` | 搜索「游戏」，视频/图文/直播三栏 |
+| `x6-play.png` | 播放页三列布局（左信息与互动 / 中视频与进度条 / 右评论） |
+| `x6-article.png` | 图文详情（标题、作者、正文段落） |
 | `x6-comments.png` | 播放态评论区浮层 |
 | `x6-mine.png` | 我的（登录态、播放历史卡片） |
 | `x6-qr.png` | 扫码登录（二维码取景盒 228×228 居中） |
 | `x6-diag.png` | 链路自检页 |
 
 > `miniapp_cli capture` **只能截到 Falcon 画布，截不到 DRM 视频平面**（`captureFB` 在本机返回
-> `{"ret":-1}`，没有 `/dev/fb0`）。视频画面本身要用
-> `gst-launch-1.0 kmssrc plane-id=<N> num-buffers=1 ! videoconvert ! pngenc ! filesink location=...`
-> 回读。所以上表没有「播放中」截图。
+> `{"ret":-1}`，没有 `/dev/fb0`）。所以 `x6-play.png` 中间的视频区是黑的 —— 那是正常现象，
+> 不是 bug。视频画面本身要用 `gst-launch-1.0 kmssrc plane-id=<N> num-buffers=1 ! videoconvert
+> ! jpegenc ! multifilesink location=...` 回读（注意必须先 `videoconvert` 再缩放，
+> 直接对 NV12 缩放会得到斜纹垃圾数据）。
 
 ## 5. 回归测试
 
@@ -163,12 +172,12 @@ Falcon 的 `<text>` 标签，内容**写在新的一行就整段不渲染**（�
 `playVideoRects` / `probeVideoRects`）全部有单测，适配 960 时只改常量就能跑：
 
 ```bash
-cd PenBili && node test/run.js     # 122 passed
+cd PenBili && node test/run.js     # 191 passed
 ```
 
-新增的两条与本次适配直接相关：
-- 16:9 视频在 960×266 下的物理矩形 → `{x:0, y:450, width:240, height:427}`
-- 竖屏稿件在 432 列信箱后的物理竖柱矩形
+与适配直接相关的断言：
+- 16:9 视频在 960×266、视频区 `{x:213,y:0,w:469,h:240}` 下的物理矩形 → `{x:107, y:299, width:240, height:427}`
+- 竖屏稿件在 469 列信箱后的物理竖柱矩形
 
 ## 6. 已完成项（v3.0.0）
 
