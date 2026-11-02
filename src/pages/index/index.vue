@@ -228,6 +228,31 @@
           <text class="mine-label">PenBili</text>
           <text class="mine-value">v3.5.2 · {{ profile ? '已登录' : '匿名' }}</text>
         </div>
+
+        <!-- 关于：项目信息（GitHub / 开源协议 / 免责）。
+             词典笔上没有能唤起浏览器的 JSAPI，所以 GitHub 地址同时给二维码，
+             手机扫一下就能打开仓库——比让用户在 266px 高的屏上抄 URL 现实。 -->
+        <div class="mine-secrow">
+          <text class="mine-sec">关于</text>
+        </div>
+        <div class="mine-about">
+          <div class="mine-about-text">
+            <text class="mine-about-title">PenBili · 有道词典笔 B 站客户端</text>
+            <text class="mine-about-line">作者 56dz · 开源协议 GPL-3.0</text>
+            <text class="mine-about-line">github.com/56dz/PenBili</text>
+            <text class="mine-about-line">基于 Falcon 小程序运行时，视频由本机 MPP 硬解</text>
+            <text class="mine-about-note">第三方客户端，与哔哩哔哩无隶属关系；所有内容版权归原作者及平台所有</text>
+          </div>
+          <div class="mine-about-qr">
+            <div v-for="(row, ri) in aboutQrRows" :key="'aq' + ri" class="qr-row">
+              <div
+                v-for="(seg, si) in row"
+                :key="'aqs' + si"
+                :class="seg.dark ? 'qr-seg qr-dark ' + seg.cls : 'qr-seg ' + seg.cls"
+              ></div>
+            </div>
+          </div>
+        </div>
       </scroller>
 
       <!-- 扫码视图：二维码真正水平居中（左右等宽弹力列夹持），状态/按钮在左列 -->
@@ -575,17 +600,19 @@ const QR_QUIET = 4;
 
 // grid → 交替段行（白/暗首尾 quiet 补齐；宽度全部映射 qr-l-N 静态 class，零 inline style，
 // 相邻同类段自动合并；每行总宽恒 = size + 2*quiet）
-function gridToRows(grid, size) {
+// prefix 允许复用同一套逻辑渲染第二种尺寸（关于区的小二维码用 aq-l-N，单元 2px）。
+function gridToRows(grid, size, prefix) {
+  const p = prefix || 'qr-l-';
   const quiet = QR_QUIET;
   const rows = [];
   const blankLen = size + quiet * 2;
-  const blank = () => [{ dark: false, cls: 'qr-l-' + blankLen }];
+  const blank = () => [{ dark: false, cls: p + blankLen }];
   const push = (segs, dark, len) => {
     const prev = segs[segs.length - 1];
     if (prev && prev.dark === dark) {
-      segs[segs.length - 1] = { dark: dark, cls: 'qr-l-' + (lenOf(prev.cls) + len) };
+      segs[segs.length - 1] = { dark: dark, cls: p + (lenOf(prev.cls, p) + len) };
     } else {
-      segs.push({ dark: dark, cls: 'qr-l-' + len });
+      segs.push({ dark: dark, cls: p + len });
     }
   };
   for (let i = 0; i < quiet; i++) rows.push(blank());
@@ -607,9 +634,19 @@ function gridToRows(grid, size) {
   return rows;
 }
 
-function lenOf(cls) {
-  return parseInt(cls.slice('qr-l-'.length), 10) || 0;
+function lenOf(cls, prefix) {
+  const p = prefix || 'qr-l-';
+  return parseInt(cls.slice(p.length), 10) || 0;
 }
+
+// 关于区的 GitHub 二维码：URL 是常量，模块加载时算一次即可（不必放进 computed
+// 每次重算——编码要走完整的 Reed-Solomon，在 A35 上是实打实的开销）。
+const ABOUT_URL = 'https://github.com/56dz/PenBili';
+const ABOUT_QR_ROWS = (() => {
+  const enc = encodeQr(ABOUT_URL, {});
+  if (!enc.ok) return [];
+  return gridToRows(enc.grid, enc.size, 'aq-l-');
+})();
 
 function idlePlay() {
   return { state: 'idle', session: null, positionMs: 0, frames: 0, note: '' };
@@ -729,6 +766,10 @@ export default {
     };
   },
   computed: {
+    // 关于区的小二维码（模块加载时已编码好，这里只做取值，避免每次重算 RS 编码）
+    aboutQrRows() {
+      return ABOUT_QR_ROWS;
+    },
     currentItems() {
       return this.tab === 'hot' ? this.hotItems : this.rcmdItems;
     },
