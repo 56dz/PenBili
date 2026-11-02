@@ -220,7 +220,7 @@ npm ci
 # 交叉编译 native（产出三个 .so 到 libs/）
 npm run native
 
-# 打 AMR 包（产出 8002026091900004.3_5_2.amr，约 217 KB）
+# 打 AMR 包（产出 8002026110200001.3_5_2.amr，约 217 KB）
 npm run build
 
 # 单测
@@ -240,12 +240,12 @@ npm test
 ## 安装
 
 ```bash
-adb push 8002026091900004.3_5_2.amr /tmp/
-adb shell "miniapp_cli install /tmp/8002026091900004.3_5_2.amr"   # 必须返回 "ret":0
+adb push 8002026110200001.3_5_2.amr /tmp/
+adb shell "miniapp_cli install /tmp/8002026110200001.3_5_2.amr"   # 必须返回 "ret":0
 
 # 冷启动：先切桌面再起目标页，保证重建页面实例
 adb shell "miniapp_cli start 8080222437664451"
-adb shell "miniapp_cli start 8002026091900004 index"
+adb shell "miniapp_cli start 8002026110200001 index"
 ```
 
 几个容易踩的点：
@@ -258,7 +258,7 @@ adb shell "miniapp_cli start 8002026091900004 index"
 自检页只能这样进（主界面没有入口）：
 
 ```bash
-adb shell "miniapp_cli start 8002026091900004 diag"
+adb shell "miniapp_cli start 8002026110200001 diag"
 ```
 
 ## 调试

@@ -17,7 +17,7 @@ import os
 import subprocess
 import sys
 
-APPID = "8002026091900004"
+APPID = "8002026110200001"
 REMOTE = "/userdisk/miniapp/data/mini_app/pkg/%s/data/sharedpreferences/preferences.json" % APPID
 ADB = os.environ.get("ADB", r"D:\Program Files\YoudaoPenToolbox\adb.exe")
 

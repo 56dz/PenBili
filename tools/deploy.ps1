@@ -22,7 +22,7 @@ $adb = $env:BILI_ADB
 if (-not $adb) { $c = Get-Command adb -ErrorAction SilentlyContinue; if ($c) { $adb = $c.Source } }
 if (-not $adb) { $cand = Join-Path $root '..\env\adb\adb.exe'; if (Test-Path $cand) { $adb = (Resolve-Path $cand).Path } }
 if (-not $adb) { throw '找不到 adb：请设置 BILI_ADB 指向 adb.exe，或将 adb 加入 PATH' }
-$appid = '8002026091900004'
+$appid = '8002026110200001'
 $desktop = '8080222437664451'
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $ev = Join-Path $root 'profiles\evidence'
