@@ -1,4 +1,4 @@
-// 网络 adapter（真机证据 youdao-x5-fw3.4.6，见 profiles/youdao-x5.md）：
+// 网络 adapter（以下均为 X6 Pro 真机实测结论）：
 //   - jsapi 只有 http（无 net 命名空间）：http.request / downloadFile / ...
 //   - 自定义请求头字段是 header（单数，对象）；query 走 urlParams
 //   - 成功 {result:<body>}（无 statusCode）；非 2xx {error:3,result:{errorMessage:'curl ... resCode:N'}}
@@ -133,7 +133,7 @@ export function httpGet(url, opts) {
 
 // ---- 原生 form POST（native httpjson）----
 // B 站 TV 登录接口 GET=405、且必须原样 x-www-form-urlencoded body；
-// jsapi http 的 data 会被二次 JSON 序列化（deepseek-x5 实测）发不了 form → 只走 native。
+// jsapi http 的 data 会被二次 JSON 序列化（真机实测）发不了 form → 只走 native。
 // 模块：libs/libjsapi_httpjson.so（同固件已验证；startPost 异步 + takeResult 轮询，不卡 JS）
 
 export function headersToLines(headers) {

@@ -1,5 +1,5 @@
 // B 站 API 客户端（笔端直连 api.bilibili.com）。
-// 事实来源：bilibili-API-collect；风险码语义与本机网络面见 profiles/youdao-x5.md。
+// 事实来源：bilibili-API-collect；风险码语义与本机网络面均为真机实测结论。
 //
 // 职责：
 //   1. 请求头装配（B 站要求浏览器 UA + Referer 才能过风控；Cookie=buvid3 匿名触点）

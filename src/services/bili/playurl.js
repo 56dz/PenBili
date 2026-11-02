@@ -1,5 +1,5 @@
 // playurl 参数、响应解析与流地址校验。
-// 事实（profiles/youdao-x5.md）：
+// 事实（均经真机实测确认）：
 //   - 匿名 html5 单文件（fnval=1, platform=html5）：qn=32/16 → 640x360 AVC+AAC，免 Referer，只需浏览器 UA
 //   - qn=64 → 720p，本机软解 0.76x 实时，**禁止提供**
 //   - 流地址有效期约 120 分钟；native open() 的 input 上限 1024 字符

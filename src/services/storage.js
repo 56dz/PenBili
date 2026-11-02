@@ -1,4 +1,4 @@
-// 存储 adapter（真机证据 youdao-x5-fw3.4.6，见 profiles/youdao-x5.md）——
+// 存储 adapter（以下均为 X6 Pro 真机实测结论）——
 //   getStorage({key}) → Promise<{data:string}>；setStorage({key, data}) 才落盘
 //   （传 value/content 会落盘为空串；字符串形态 setStorage(k,v) 的 promise 永不 settle）
 // 统一走对象形态 + 超时保护；失败时保留内存态。高频写入串行化。

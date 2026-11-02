@@ -1,7 +1,6 @@
 // 系统输入法会话（搜索关键词输入用）
 //
-// 移植自 deepseek-x5/src/services/im.js 的 textEdit 部分（该实现在 youdao-x5-fw3.4.6
-// 真机验证过：能可靠拉起系统输入法、支持中文、多形态回调兼容）：
+// 移植自已验证的 textEdit 实现（能可靠拉起系统输入法、支持中文、多形态回调兼容）：
 //   import globalModule from 'global'         ← 运行时原生模块（构建器会提示"原生模块请忽略"）
 //   new globalModule.Global()
 //   startTextEdit(JSON字符串{ text, placeholder, maxlength, autofocus }) → uuid（同步）

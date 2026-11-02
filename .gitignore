@@ -2,6 +2,7 @@
 node_modules/
 .falcon_/
 .falcon_tmp/
+.tmpbuild/
 *.log
 
 # 本地工具（便携 git 等，不入库）

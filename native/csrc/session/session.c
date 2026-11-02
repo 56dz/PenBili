@@ -898,8 +898,10 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
          * 【P1-3】队列上限按源类型选：
          *   点播 -> 8s/6MB（为了装下 seek 时 demuxer 把落后一路推进到对齐点
          *                  的量，见 PB2_VIDEO_QUEUE_NS 的实测矩阵）
-         *   直播 -> 2s/3MB（队列上限就是播放延迟的下限，见
-         *                   PB2_LIVE_VIDEO_QUEUE_NS；FLV 单流交织，不需要推进）
+         *   直播 -> 4s/3MB（队列上限就是播放延迟的下限，见
+         *                   PB2_LIVE_VIDEO_QUEUE_NS；FLV 单流交织，不需要推进。
+         *                   实测 2s 在 B 站直播（GOP 1~2s + CDN 抖动）下余量
+         *                   太薄，一次稍长抖动就抽干队列，故放到 4s）
          */
         int qbytes = g_w.is_live ? PB2_LIVE_VIDEO_QUEUE_BYTES : PB2_VIDEO_QUEUE_BYTES;
         long long qns = g_w.is_live ? PB2_LIVE_VIDEO_QUEUE_NS : PB2_VIDEO_QUEUE_NS;
@@ -925,17 +927,64 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
          */
         int qbufs = g_w.is_live ? 0 : PB2_VIDEO_QUEUE_BUFS;
         /*
-         * 【直播闪屏】直播把 max-lateness 关掉（-1）并停用 qos。
+         * 【直播闪屏】直播和点播一律使用严格的 max-lateness=40 / qos=true。
          *
-         * 用户实测：直播每 2~5 秒闪一次屏。
-         * 机制：直播是长连接，CDN 抖动 / GOP 边界都会让一批帧晚到；
-         * max-lateness=40 判定它们「迟到」直接丢弃，kmssink 丢掉一整个
-         * GOP 的帧就表现为一次黑屏闪烁。点播可以丢（丢的是用户已经
-         * 跳过的中间内容），直播不能丢（丢的是正在看的那一段）。
-         * 直播本来就靠 skip-vsync=true 立刻上屏，不存在「追上」的需求。
+         * 历史：曾经以为「直播每 2~5 秒闪一次屏」是丢帧造成的，于是把直播
+         * 改成 max-lateness=-1 + qos=false（不判迟到、一帧不丢）。真机量化
+         * （.tmp/spike_test.sh，录 kmssink 平面后逐帧算 Y 平均亮度）证明
+         * **这个改动本身就是闪屏的成因**：
+         *
+         *   late=40  qos=true  -> 45 秒内亮条带 1 次（点播 60 秒 0 次）
+         *   late=40  qos=false -> 7 次
+         *   late=-1  qos=true  -> 22 次（maxY 211.8，出现真正白屏）
+         *   late=-1  qos=false -> 20 次
+         *
+         * 机制：关掉迟到判定后，起播/抖动期间积压的帧会一次性涌进 kmssink，
+         * 每一帧都立刻上屏（skip-vsync=true），于是同一时刻有多个 page flip
+         * 排队打到同一个 plane，屏幕上就出现「部分区域闪白一帧」——正是
+         * 用户描述的现象。max-lateness=40 的丢弃恰恰是在保护 plane 不被
+         * 过载。
          */
-        int late_ms = g_w.is_live ? -1 : PB2_MAX_LATENESS;
-        const char *qos_s = g_w.is_live ? "false" : "true";
+        int late_ms = PB2_MAX_LATENESS;
+        const char *qos_s = "true";
+        /*
+         * 【直播「部分区域闪白一帧」的根因与修法】
+         *
+         * mppvideodec 的 ignore-error 出厂默认为 **true** —— 解码出错时
+         * 不报错、照常输出一帧损坏画面。直播是长连接，网络丢包会让某个
+         * 参考帧缺失，于是 P 帧解出来的就是「部分区域错位/发白」的坏帧，
+         * 用户看到的就是闪白。
+         *
+         * 真机对照（同一时段交替跑，排除画面内容随时间变化的影响）：
+         *   ignore-error=true  -> 40s 内 3 组 / 5 组闪白
+         *   ignore-error=false -> 40s 内 0 组 / 0 组闪白
+         *
+         * 另外三组对照排除了网络与显示链路：
+         *   同一份流用 ffmpeg 软解      -> 0 组（软解会丢弃坏帧）
+         *   同一份流先录成 FLV 再硬解   -> 0 组（本地文件不丢包）
+         *   同一份流直播 + 硬解         -> 4 组
+         * 所以不是 CDN 的问题，也不是 kmssink / videorate 的问题。
+         *
+         * max-errors=16：连续 16 帧都解不出来才报 flow error（默认 -1 是
+         * 无限容忍，直播里会一直吐坏帧）。
+         */
+        const char *mpperr = " ignore-error=false max-errors=16";
+        /*
+         * videorate 把源帧率归一到面板率（30fps -> 59.88fps，复制帧）。
+         * 曾怀疑它复制帧时复用 buffer 造成闪白，实测旁路掉反而更差
+         * （40s 内 3 组 vs 1 组），故保留。
+         */
+        char vrate[160];
+        snprintf(vrate, sizeof(vrate),
+                 " videorate ! video/x-raw,framerate=%s ! ", PB2_PANEL_RATE);
+        /*
+         * skip-vsync=true：不等 page flip 完成就立刻提交下一帧。
+         * 实测把它关掉（skip-vsync=false）闪白次数无差异（1 组 vs 1 组），
+         * 所以它不是闪白的原因，保留以维持帧率。
+         * 显式设 sync-mode 同样无收益，故不设（用驱动默认 auto flip）。
+         */
+        const char *skip_s = "skip-vsync=true";
+        const char *syncmode = "";
         /*
          * 蓝牙时给视频负 ts-offset 把它整体提前，抵消 A2DP 端到端延迟。
          * 为什么必须放在 kmssink 而不是 alsasink，见
@@ -968,9 +1017,9 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
                      /* 视频队列必须按「时间/字节」限界，不能按 buffer 个数（见 PB2_VIDEO_QUEUE_*） */
                      "queue max-size-buffers=%d max-size-bytes=%d "
                      "max-size-time=%lld ! "
-                     "h264parse ! mppvideodec rotation=%d ! "
+                     "h264parse ! mppvideodec rotation=%d%s ! "
                      "%s"
-                     "videorate ! video/x-raw,framerate=%s ! "
+                     "%s"
                      "kmssink name=vsink plane-id=%d driver-name=rockchip sync=true "
                      /*
                       * 默认严格（PB2_MAX_LATENESS / qos=true）。起播时的
@@ -983,18 +1032,18 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
                       * update_late_policy() 直接 return，sink 就**永远**停在
                       * -1/false —— 实测 seek 落点耗时从 412ms 恶化到 1398~2485ms。
                       */
-                     "max-lateness=%d qos=%s force-aspect-ratio=false skip-vsync=true%s "
+                     "max-lateness=%d qos=%s force-aspect-ratio=false %s%s%s "
                      "render-rectangle=%s",
                      qbufs, qbytes, qns,
-                     g_w.rotate, fpscap, PB2_PANEL_RATE, PB2_KMS_PLANE_ID,
-                     late_ms, qos_s, tsoff, g_w.rect);
+                     g_w.rotate, mpperr, fpscap, vrate, PB2_KMS_PLANE_ID,
+                     late_ms, qos_s, tsoff, skip_s, syncmode, g_w.rect);
         } else if (strstr(cn, "h265") || strstr(cn, "hevc")) {
             snprintf(desc, sizeof(desc),
                      "queue max-size-buffers=%d max-size-bytes=%d "
                      "max-size-time=%lld ! "
-                     "h265parse ! mppvideodec rotation=%d ! "
+                     "h265parse ! mppvideodec rotation=%d%s ! "
                      "%s"
-                     "videorate ! video/x-raw,framerate=%s ! "
+                     "%s"
                      "kmssink name=vsink plane-id=%d driver-name=rockchip sync=true "
                      /*
                       * 默认严格（PB2_MAX_LATENESS / qos=true）。起播时的
@@ -1007,17 +1056,18 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
                       * update_late_policy() 直接 return，sink 就**永远**停在
                       * -1/false —— 实测 seek 落点耗时从 412ms 恶化到 1398~2485ms。
                       */
-                     "max-lateness=%d qos=%s force-aspect-ratio=false skip-vsync=true%s "
+                     "max-lateness=%d qos=%s force-aspect-ratio=false %s%s%s "
                      "render-rectangle=%s",
                      qbufs, qbytes, qns,
-                     g_w.rotate, fpscap, PB2_PANEL_RATE, PB2_KMS_PLANE_ID,
-                     late_ms, qos_s, tsoff, g_w.rect);
+                     g_w.rotate, mpperr, fpscap, vrate, PB2_KMS_PLANE_ID,
+                     late_ms, qos_s, tsoff, skip_s, syncmode, g_w.rect);
         } else {
             pb2_logf("pad-added: unsupported video caps %s", cn);
             return;
         }
-        pb2_logf("pad-added: video desc late=%d qos=%s%s", late_ms, qos_s,
-                 tsoff[0] ? tsoff : " (no ts-offset)");
+        pb2_logf("pad-added: video desc late=%d qos=%s%s mpp:%s", late_ms, qos_s,
+                 tsoff[0] ? tsoff : " (no ts-offset)",
+                 mpperr[0] ? mpperr : " (vendor defaults)");
         bin = parse_bin(desc);
         if (!bin) {
             pb2_stats_patch_error(&g_w.stats, PB2_E_PIPELINE, "video branch build failed");
@@ -2591,7 +2641,7 @@ static void do_open(pb2_open_req_t *req) {
      * 整个 GOP 黑掉 = 用户看到的闪屏）。如果这里照常 arm，3 秒后
      * update_late_policy() 会把 sink 收紧回 40/true，闪屏立刻回来。
      */
-    if (!g_w.is_live) arm_late_grace();
+    arm_late_grace();
     pb2_logf("OPEN done in %lldms", pb2_now_ms() - t0);
 }
 
@@ -3361,7 +3411,6 @@ static void update_late_policy(void) {
      * 直播的 sink 策略由 desc 决定（-1 / qos=false），worker tick 绝不能
      * 干预，否则闪屏复现。见 do_open 里 arm_late_grace() 处的注释。
      */
-    if (g_w.is_live) return;
     if (g_w.late_grace_until_ms <= 0) return;
     /*
      * 【关键】首帧还没上屏时绝不收紧。

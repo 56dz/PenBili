@@ -1,4 +1,4 @@
-﻿# 真机部署与验证脚本（有道 X5，fw3.4.6，profile: profiles/youdao-x5.md）
+﻿# 真机部署与验证脚本（有道 X6 Pro）
 #
 # 流程：
 #   1) 设备与产物检查（AMR + native ELF）

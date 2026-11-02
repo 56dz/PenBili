@@ -1,11 +1,11 @@
 // 图文（专栏）详情 adapter
-// 事实来源：xieren58/bilibili-API-collect 契约 + 2026-10-04 探针（tools/probe_search.mjs）+ dsh bilibili_x5 实证：
+// 事实来源：xieren58/bilibili-API-collect 契约 + 2026-10-04 探针（tools/probe_search.mjs）+ 真机实证：
 //   读 GET /x/article/view?id=<aid> —— 需 WBI 签名（无签名 -509/-352 风控，见 fetchArticle）
 //     data: { id, title, type(ftype: 0=HTML正文 3=富文本), author:{name}, content(HTML/ops JSON),
 //             opus:{content:{paragraphs[]}, article:{cover[]}}（type3 新版）, image_urls[], words, stats ... }
-//   正文三形态优先级（对齐 dsh bilibili_x5 实证）：opus 富文本段 > content.ops（type3 老） > content HTML（type0）
+//   正文三形态优先级（真机实证）：opus 富文本段 > content.ops（type3 老） > content HTML（type0）
 //   评论：/x/v2/reply 族 **type=12** oid=<aid>（探针实测；17 旧文档值 -404）
-// 图片渲染关键（dsh 实证）：**falcon image 以样式定尺寸**——image 元素必须带 inline style 宽高，
+// 图片渲染关键（真机实证）：**falcon image 以样式定尺寸**——image 元素必须带 inline style 宽高，
 //   仅属性不足以撑开（.thumb 能显示是因其宽高来自 CSS）。图块统一 https 直链 + 每图精确 dw/dh。
 // 日志卫生：不记正文内容。
 

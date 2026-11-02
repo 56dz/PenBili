@@ -1,4 +1,4 @@
-// 统一资源回收的页面基类（与 deepseek-x5 上真机验证过的实现一致）：
+// 统一资源回收的页面基类（已在真机验证）：
 // 跟踪 $falcon.on token、timeout、interval，在 onUnload 的 finally 中释放。
 class ResourcePage extends $falcon.Page {
   constructor() {
