@@ -1,342 +1,299 @@
 # PenBili
 
-**有道词典笔（X5 / X6 Pro）上的哔哩哔哩播放器**（Falcon / QuickJS mini-app，Vue 2 SFC）。本发布以仓库 `v2.7.0` 源码为基线，当前版本号为 `3.2.0`。
+把哔哩哔哩装进有道词典笔。
 
-在逻辑分辨率 800×254（X5）与 **960×266（X6 Pro）** 的设备屏幕上提供推荐流、DASH 播放、视频/图文/直播三栏搜索、图文阅读、评论浏览/发表、TV 协议扫码登录与播放历史。
+这是一款跑在有道词典笔上的 B 站客户端，用有道自家的 Falcon 小程序框架（QuickJS + Vue 2 单文件组件）写成。屏幕只有 960×266 点，指甲盖大小，所以我按 iPad 版 B 站的骨架重做了界面，把推荐、搜索、播放、评论、图文、直播全塞进这一个页面里。
 
-> **X6 Pro 适配**：屏幕从 800×254 换成 960×266，界面按 iPad 版 B 站重做——左侧窄导航栏（76px，只包住按钮文字）+ 884px 内容区 5 列封面卡片网格。**播放页为三列**：左列 213px（上方标题/UP 主/简介，下方点赞 / 投币 / 收藏三枚按钮，计数在图标下方）、中列 469px（视频区 469×240 + 下方 26px 可拖动进度条，点视频区暂停/继续）、右列 278px（评论区 + 右下输入框与发送按钮，点收藏切换到收藏夹覆盖层）。配色 B 站粉 `#FB7299` / 蓝 `#00AEEC`，各选项框为雾化玻璃材质（半透明白底 + 1px 边框）。真机几何常量、测量方法与踩坑记录见 **[`docs/x6pro-adaptation.md`](docs/x6pro-adaptation.md)**，播放链路见 **[`docs/x6pro-video-playback.md`](docs/x6pro-video-playback.md)**。
-
-弹幕已于 v2.7.0 移除，以避免弱设备上的逐帧文字渲染拖慢视频解码。
-
-> **`2.9.0` 变更**：**直播间播放上线** —— 搜索三栏的「直播」由占位转为可用：直播间经**服务端转码**取 360/480/540p 流（服务端以 **HLS 分片**回传，笔端当点播地址播放）；「我的 → 直播设置」配置转码服务器地址与起播缓冲，并带**重定向解析缓存**（外网端口每次打洞都会变，启动时 2s 探测、失效自动重解析）。
-> **`2.9.1` 变更**：**修掉搜索偶发「B站 code=?：WBI 密钥获取失败」** —— 根因是笔端 HTTP 栈偶发 DNS 解析超时（真机 `YHttpManager` 日志 `Resolving timed out after 6000 milliseconds`，连系统自有域名一起偶发），`nav` 取签名密钥被殃及。改为**短退避重试 3 趟（jsapi → native libcurl → jsapi）+ 双栈兜底**，单趟超时收敛到 7s；同时把真实失败原因（stage/code）透传到界面，不再只显示 `code=?`。新增 `wbiStress` 诊断种子与 5 条单测（107 条全绿）。
-> **`2.9.2` 变更**：**修掉直播卡顿/帧率低（~4fps）且无声** —— 根因是 native 播放器的「音频锚节流」在**单进程音视频**路径（直播）上形成自锁：视频 pipe 上限仅 1MB、音频 writer 要等环形缓冲蓄满 800ms 才开写、而 ffmpeg 同进程产出音视频 → 视频 writer 等音频锚（恒 0，实测 `drift ≡ -frames×33ms`）每帧撞满 200ms 限幅 → ffmpeg 被满 pipe 堵死 → 环永远蓄不满 → **帧率恒 4.2fps 且 aplay 全程无数据（无声）**。改为**直播走墙钟节拍**（`duration_ms<=0`）+ **直播关闭水位滞回**（可闻滞后收敛到管道+ALSA ≈0.56s）+ 墙钟基线对齐首帧、并按音频管道延迟补偿画面。同时把直播默认画质从 480p 改为 **254（= 视口 452×254，1:1 无缩放）**：480p 在本机软解+缩放+转置+rgb32 链上只有 0.83x（必卡），254 有 2.3~2.8x。实测：**4.2fps → 30.0fps**、音频 19.7KB/s → **176KB/s（实时）**、欠载 0、音画偏移稳定 -0.5s（不再漂移）。
-> **`2.9.3` 变更**：**给笔端真正加上缓冲，消掉「卡一下→画面突然加快」的循环**。① 笔端的缓冲深度由**两条管道**决定（视频 pipe = 画面延迟、aplay pipe = 声音延迟），而视频 pipe 的 8MB 扩容**一直没生效**（`/proc/sys/fs/pipe-max-size` 默认 1MB 把申请顶回去，程序无 CAP_SYS_RESOURCE）→ 现在启动时先放宽该 sysctl，视频 pipe 实测拿到 **32MB（≈1.5–2s 存量）**，直播同时把 aplay 管道加深到 256KB（≈1.68s）使两侧量级相当；② 墙钟落后时的追赶**限制在 1.25 倍速**（原来是不限速快放，所以观感是「整段突然加快」）；③ 新增**自适应音画对齐伺服**：用实测 avDrift 反向微调画面目标，把这台设备/这套缓冲下的残差压到 **±30ms**（起播约 10s 内收敛）。另：把设置项「起播缓冲」正名为 **「服务端分片窗口」**——它只决定服务端保留多少分片（笔端落后时的抗抖动余量），**并不影响起播时间**（此前命名误导）。
-> **`3.0.0` 变更（X6 Pro）**：**芯片硬解 + 直播去云端转码 + 界面重做**。
-> ① **视频硬解**：X6 Pro 是 RK3562，带 MPP 视频解码单元。`ffmpeg` 只做 demux + `-c:v copy`（把压缩包原样搬进 FIFO），解码交给 GStreamer 的 `mppvideodec`，再直接送 `kmssink`（DRM 平面 76）上屏。实测 720p **33x 实时**，CPU 从「软解 + 每帧 rgb32 拷贝」降到「只搬压缩包」。旋转也交给解码器（`mppvideodec rotation=`），不再走 ffmpeg `transpose` 滤镜。
-> ② **直播改本地直连**：X5 时代 4×A53 软解 720p 只有 0.76x 实时，只能靠自建转码服务器把 480p30 HLS 推回来。X6 Pro 上这条链路**整体删除**——笔端直接调 `getRoomPlayInfo` 取 `http_stream/flv/avc` 直链（实测 1.2~2.2Mbps，设备外网吞吐 10Mbps），本机硬解播放。「我的 → 直播设置」（服务器地址 / 分片窗口 / 画质档 / 测连 / 解析缓存）随之移除。
-> ③ **界面重做**：见上方 X6 Pro 适配说明。
-> ④ **互动补齐**：播放页左列接入点赞 / 投币 / 收藏（含收藏夹选择），右栏评论区 + 输入框，底部进度条可拖动定位。
-> **`3.1.x` 变更**：**修掉「约一秒卡一次」** —— 根因是 `filesrc` 攒满 `blocksize` 才下推 + `kmssink` 默认 QoS 丢帧，详见下方「性能诊断记录」。同时把选流从「取最小像素」改为「取最高可用分辨率与帧率」（软解时代的保守策略在硬解后纯属画质损失），直播改选 480p 直连并显式请求低分辨率流。
-> **`3.2.0` 变更**：**画质与帧率可调** —— 「我的」菜单在「刷新登录态」下方新增「视频调节」（分辨率、帧率）与「直播」（分辨率、刷新率）四行设置，点整行轮转选项、立即落盘。帧率上限由 native 在 `mppvideodec` 之后插 `videorate max-rate=N` 实现（只封顶不插帧）。
-> **`3.3.0` 变更**：**分辨率与帧率合并为单一「画质」档**。原先两个独立选项允许选出「360p + 60fps」这种服务端根本不存在的组合（B 站 qn 编码里 60fps 只有 116/74 两个专档，480p/360p 只有 30fps 变体），选流会先按 qn 卡死再白等一轮降级。现在每个画质档自带 `(ladder, maxPixels, fpsCap)`，菜单里直接写成 `1080p 60fps` / `1080p 30fps` / `720p 60fps` / `720p 30fps` / `480p 30fps` / `360p 30fps`，不存在非法组合。老记录（v1 的 `videoQuality`+`videoFps` 两字段）按迁移表自动折算到合并档，「360p+60fps」这类组合收成 `360p30`，认不出的落 `auto`。
-> **`3.4.0` 变更**：**修掉「选了 60fps 档还是卡顿」** —— 两个叠加根因，都不在解码器上（清场实测 `mppvideodec` 720p60 有 4.1x、1080p60 有 2.2x 实时余量）。
-> ① **kmssink 双份 vsync 等待**：原子驱动下 `sync=true` 的等待被做了两遍，60fps 素材只跑到 **57.45fps**（8s 素材耗时 8747ms）。加 `skip-vsync=true` 后 8410ms / **60.19fps** —— 只跳过 flip 之后那次多余等待，仍按 PTS 对齐 vblank，不撕裂。
-> ② **30/24fps 内容在 59.88Hz 面板上的 3:2 抖动**：面板实测 59.88Hz（`modetest -c`），30fps 每帧 1.996 个刷新周期、24fps 2.495 个，`kmssink` 在 2 与 3 个刷新之间来回跳 —— 这才是「720p60 档仍然卡」的真实原因：服务端给该档的源**绝大多数本身就是 30fps**（实测 34 条稿件 maxfps ≤ 30.3）。
-> 修法是 `mppvideodec` 之后插 `videorate` 把帧率**归一到面板率 `1497/25`**（=59.88，严格相等；写 `60/1` 会差 0.2%，长跑每 ~8s 多一帧），再配合 `skip-vsync=true`。实测 30/60/24fps 三种源全部稳定 **59.3~60.2fps、`dropped: 0`**，CPU 单核仅 5.7%→6.3%（`videorate` 复制的是 NV12 指针，caps 协商确认全程无 `videoconvert`）。
-
-> **`2.9.4` 变更**：**修掉「连续播放 30 分钟后音频落后视频约 1.5 秒」+ 打通外网直播链路**。
-> ① **音视频分离双进程**：单进程 ffmpeg 串行写视频/音频两个输出，视频 pipe（32MB 缓冲）被填满时 ffmpeg **整体阻塞** → 音频同停 → 环/管道被抽干 → ALSA underrun（真机实测 8 次、最长 2.36s）→ **音频内容永久落后**（累计 3.17s）。改为视频进程 + 音频进程各自独立拉同一条转码地址，视频背压不再牵连音频产出。
-> ② **外网链路修复**（STUN 打洞 + Cloudflare 301 场景）：CF 的 301 规则**会丢弃 query string**（`best/live?room=...` → `xyz:端口/live`，服务端 400）；`jsapi.http` 不跟随 301，重定向解析改走 **native libcurl**（`FOLLOWLOCATION=1`）拿终点 host 回写 `resolvedAddr`，播放直连打洞地址绕过 301；降级（解析失败）不再回写缓存；探测超时 2s/5s → 8s/15s（打洞端口 TCP connect 实测可达 5s+）；直播首帧上限 15s→60s、并禁用断流重启（`-ss` seek 对 HLS 直播滑动窗口无效，会卡死循环）。
-> **30 分钟外网长测**（某在播房间，手机热点 + STUN 打洞）：帧率 **29.95fps**、位置增速 **1.00x 实时**、**underrun 0 次**（修复前 8 次累计 3.17s）、丢帧/重启 0；音画偏移 `d` 全程稳定，仅 19.7 分钟处一次外网抖动导致音频进程短暂断供 ~2s（偏移最深 -2232ms），**伺服 30s 内自愈到 -40ms，无永久落后**（修复前会永久落后 1.5s）。
+当前版本 `3.5.2`，只支持 **X6 Pro**（RK3562）。X5 分支已停止维护。
 
 ![version](https://img.shields.io/badge/version-3.5.2-blue)
 ![license](https://img.shields.io/badge/license-GPL--3.0-green)
 
+---
+
+## 为什么值得做
+
+词典笔是个奇怪的目标设备：4 核 A35、1GB 内存、一块 480×960 的竖屏（系统把它旋转 270° 当横屏用）、没有触摸屏只有一块手写板、跑着裁剪过的 Linux 和一套私有小程序运行时。
+
+它能播 B 站，但难点不在"能不能播"，而在**播放质量**。B 站点播是 DASH 分离流（视频 m4s + 音频 m4s），设备上现成的播放器方案要么软解跑不动 720p，要么 seek 一次卡十几秒。所以我把整条播放链路重写了一遍——这才是这个项目的主要工作量。
+
+---
+
 ## 截图
 
-**X6 Pro（960×266，B 站风格界面）**
+全部为 X6 Pro 真机 `miniapp_cli capture` 采集，960×266。
 
 **推荐流**
 
-![X6 Pro 推荐流](docs/screenshots/x6-home.png)
+![推荐流](docs/screenshots/x6-home.png)
 
 **热门**
 
-![X6 Pro 热门](docs/screenshots/x6-hot.png)
+![热门](docs/screenshots/x6-hot.png)
 
-**搜索（图文栏）**
+**搜索（视频 / 图文 / 直播三栏）**
 
-![X6 Pro 搜索](docs/screenshots/x6-search.png)
+![搜索](docs/screenshots/x6-search.png)
+
+**播放页** —— 左列信息与互动、中列视频、右列评论
+
+![播放页](docs/screenshots/x6-play.png)
 
 **图文详情**
 
-![X6 Pro 图文详情](docs/screenshots/x6-article.png)
-
-**评论区**
-
-![X6 Pro 评论区](docs/screenshots/x6-comments.png)
+![图文详情](docs/screenshots/x6-article.png)
 
 **我的**
 
-![X6 Pro 我的](docs/screenshots/x6-mine.png)
+![我的](docs/screenshots/x6-mine.png)
 
-**扫码登录**
+> 截图只含 Falcon 画布层。视频是走 DRM/KMS 硬件平面直出的，不在画布里，所以播放页截图里视频区是黑的——这不是 bug。
 
-![X6 Pro 扫码登录](docs/screenshots/x6-qr.png)
-
-以上为 X6 Pro 真机 `miniapp_cli capture` 采集（截图为 Falcon 画布，不含 DRM 视频平面）。
-
-**X5（800×256，`2.7.1` 旧界面）**
-
-**主页（推荐流）**
-
-![主页](docs/screenshots/home.png)
-
-**播放中**
-
-![播放中](docs/screenshots/playing.png)
-
-**评论区**
-
-![评论区](docs/screenshots/comments.png)
-
-以上为 `2.7.1` 在真机 有道 X5 上的实测截图  
+---
 
 ## 功能
 
-- **播放**：DASH 分离视频与 AAC 音轨，**按 qn 阶梯请求最高可用档**（`116`=1080P60 → `80`=1080P → `74`=720P60 → `32`=480P → `16`=360P），同档内优先 AVC、再按分辨率与帧率取最高；必要时回退单文件流；按视频实际宽高信箱适配，支持 ±20 秒定位与播放历史。未登录时服务端最高只给 480P30，登录后才会给到 1080P。
-- **画质与帧率设置**：「我的 → 视频调节」可选分辨率（自动/1080p/720p/480p/360p）与帧率（自动/60/30），「我的 → 直播」可选分辨率（480p/720p/自动）与刷新率（自动/30/60）。点整行轮转选项，选择立即落盘、重启后仍生效。帧率上限由 native 在解码器后插 `videorate max-rate=N` 实现（只封顶不插帧，30fps 源直通）。
-- **音画同步**：轻微漂移时平滑追赶；音频领先超过 1 秒时只重启视频流并重新对齐，音频不中断；首帧等待有 15 秒上限，失败后自动恢复。
-- **网络抖动缓冲**：FFmpeg 输入线程预取压缩数据包（视频队列 300、音频队列 700）；它不是解码后的视频帧缓存，也不保证所有网络条件下固定 15 秒可用缓冲。
-- **音频**：独立解码进程与音频环形缓冲，支持设备默认输出和 A2DP 音频路由。
-- **评论**：分页浏览、子回复、系统输入法发表评论；播放页右栏内嵌输入框 + 发送按钮；评论类型参数化（视频=1、专栏图文=12）。
-- **搜索**：关键词搜索，结果分「视频 / 图文 / 直播」三栏，各自独立缓存与分页。
-- **直播播放**：搜索直播间 → 直接调 `getRoomPlayInfo` 取 `http_stream/flv/avc` 直链，笔端本地解码播放，不再依赖任何自建服务器。`durationMs=0` → 不判播完、不提供定位；直播地址带 `expires`，过期后自动重取一次。未登录上限 720p（`current_qn=250`），默认请求 480p 省流。
-- **图文阅读**：专栏详情以文本/图片混排块渲染（opus 结构化段落优先，content HTML 兜底）；正文按块级标签分段（每段独立成块），段内 `<br>` 视为软换行；`/x/article/view` 需 WBI 签名，走 native libcurl 传输并携带完整浏览器头（瘦请求头会被风控判 -352）；图片按原始比例等比渲染。
-- **登录**：TV 协议扫码登录、登录态持久化、过期检查与刷新。
+**浏览**
 
-## 设备与兼容性
+- 推荐流、热门、搜索、我的四个 tab，卡片网格 5 列，加载更多按整行裁剪不留半行
+- 搜索分「视频 / 图文 / 直播」三栏，各自独立缓存、独立页码，来回切换零请求
 
-| 项目 | 值 |
+**播放**
+
+- DASH 分离流按 qn 阶梯取最高可用档（`116`=1080P60 → `80`=1080P → `74`=720P60 → `32`=480P → `16`=360P），同档优先 AVC
+- 点视频区暂停/继续；进度条拖动定位（拖动过程中零请求，松手后 250ms 才下发一次）
+- 画质七档：「我的 → 视频调节」，`auto` / `1080p60` / `1080p30` / `720p60` / `720p30` / `480p30` / `360p30`
+- 播放历史（最近 10 条，在「我的」页）
+
+**互动**
+
+- 点赞、投币（2 币，可同时点赞）、收藏（可挑收藏夹）
+- 评论区：主楼 10 条/页、子楼 20 条/页，点主楼展开；系统输入法发评论
+- 发评论时视频平面会自动隐藏，避免盖住键盘
+
+**直播**
+
+- 直连 B 站 `http_stream/flv/avc` 直链本地解码，不经过任何自建转码服务器
+- 四档画质，下播检测、断流自动重连（退避 0/2/4/6/8 秒，最多 5 次）
+- 直播态自动隐藏评论区、互动按钮和进度条，视频区撑满
+
+**图文**
+
+- 专栏详情按 `opus` 富文本段 → `content.ops` → `content` HTML 三级回退渲染
+- 图片等比缩放，评论走 `type=12`
+
+**登录**
+
+- B 站 TV 协议扫码，二维码纯 CSS 渲染（零 inline style）
+- 登录态持久化，过期前 60 秒判定失效
+
+---
+
+## 技术实现
+
+### 播放子系统：为什么不能用现成方案
+
+设备自带 GStreamer 1.22 和 Rockchip MPP 硬解，看起来直接用 `playbin` 就完事了。实际试下来每条路都堵死：
+
+| 方案 | 结果 |
 | --- | --- |
-| 机型 | 有道词典笔 X5 / **X6 Pro** |
-| 运行时 | Falcon mini-app / QuickJS 20200705 |
-| 逻辑屏幕 | X5：800×254　**X6 Pro：960×266** |
-| 视频区域 | X5：452×254　**X6 Pro：469×240**（三列布局中间列，下方 26px 进度条） |
-| 面板朝向 | `direction = 270`，物理面板 480×960（X6 Pro） |
+| `souphttpsrc` 直连 HTTP 播放 | **永远无法 seek**。souphttpsrc 只实现 push 模式的 `create()`、不实现 `pull_range`，qtdemux 在 push 模式下直接丢弃 seek 事件。它报的 `seekable: 1` 是骗人的，只看 `Accept-Ranges` 头 |
+| ffmpeg 软解 + 逐帧贴 fb0 | 720p 只有 0.76x 实时，必卡 |
+| ffmpeg 下载到本地 MP4 再播 | 增长中的 MP4 用 `filesrc` 读会永久卡死——`filesrc` 在打开时就把文件长度快照下来了 |
+| ffmpeg 转 MPEG-TS 边下边播 | 双分支 preroll 永久卡死，且 ffmpeg 输出的时间戳错乱 |
+| ffmpeg 转 fragmented MP4 边下边播 | 视频帧间隔严重超标（`<20ms` 区间 169 帧） |
 
-两套几何由 `src/app.js` 的 `DESIGN_WIDTH` 与 `src/services/screen.js` 的
-`LOGICAL` / `PHYSICAL` / `VIDEO_COL_WIDTH` / `BAR_WIDTH` 决定；X6 Pro 的真机测量过程见
-[`docs/x6pro-adaptation.md`](docs/x6pro-adaptation.md)。
-
-设备画像、诊断日志、运行截图及本地环境信息不随此版本分发。更换设备或固件时应重新验证屏幕几何与解码能力。
-
-## X6 Pro 适配待办
-
-- [x] 逻辑画布 960×266（`src/app.js` `DESIGN_WIDTH = 960`）
-- [x] 三栏骨架 176 / 608 / 176，几何纯函数与单测同步到 960×266
-- [x] B 站风格视觉重做（`src/styles/var.less` + `src/styles/base.less`）
-- [x] 封面图 CDN 重写（`src/services/imgurl.js`，规避 hdslb 域名解析失败）
-- [x] 历史封面同样归一化（`src/services/history.js`）
-- [x] `flex: 1` 简写改长写（Falcon 运行时简写会算错 flex 子项宽度）
-- [x] aarch64 `libjsapi_httpjson.so` 落地 → 图文详情、扫码登录恢复
-- [x] aarch64 `libjsapi_player.so` 落地（MPP 硬解 + KMS 平面直出）→ 播放态恢复
-- [x] 播放页改手绘三列布局（左 213 信息+互动 / 中 469 视频+进度条 / 右 278 评论+输入框）
-- [x] 主页网格按列数裁剪，加载更多后不留半行
-- [x] 点视频区暂停/继续
-- [x] 雾化玻璃材质（半透明白底 + 1px 边框，Falcon 无 backdrop-filter）
-- [x] 「我的 → 视频调节 / 直播」画质设置（分辨率与帧率合并为单档，如 `1080p 60fps`）
-- [x] 帧率归一到面板率 59.88Hz（`videorate` + `kmssink skip-vsync=true`）
-- [x] 暂停同时冻结上屏进程（此前只停 ffmpeg/aplay，画面会自顾自播完缓冲）
-- [x] 起播定格门：画面先出首帧、定格等音频就绪再一起起播（音画起播差实测 0ms）
-- [x] 小数帧率解析修复（`29.97 fps` 曾被解析成 97，导致 3.2 倍速快放）
-- [x] 迟到帧可丢（`max-lateness=40` + `qos=true`），修「暂停恢复后画面卡一下」
-- [x] seek 落点补偿（关键帧回退导致音画错位，丢弃多出的视频帧对齐音频起点）
-
-## 性能诊断记录
-
-### v3.5.2：暂停恢复卡顿 + seek 音画错位（用户反馈驱动）
-
-**① 暂停几秒再恢复，画面「轻微卡顿」一下。**
-真机取证（`fpsdisplaysink` 逐秒 `current`）：
+最终方案是 **ffmpeg → 命名管道 → GStreamer**：
 
 ```
-稳态            59.8  59.9  59.8
-恢复后第 1 秒    7.0        ← 一帧都出不来
-恢复后第 2 秒  418.3        ← 一秒内涌出 400+ 帧
-恢复后第 3 秒   59.8        ← 才回稳态
+ffmpeg (-ss T, -c copy, -copyts, -f matroska) ──→ FIFO ──→ filesrc
+                                                              │
+                                    ┌─────────────────────────┴──────────────────┐
+                                    │ matroskademux                              │
+                                    ├── video: queue → h264parse → mppvideodec ──┤
+                                    │          → videorate → kmssink(plane 76)   │
+                                    └── audio: queue → aacparse → faad ──────────┤
+                                               → audioresample → alsasink       │
 ```
 
-根因：`SIGSTOP` 冻结 `gst-launch` 期间 **GstSystemClock 仍在走**，恢复后暂停期间
-该播的 6s × 60fps ≈ 360 个 buffer 的 PTS 全部过期。旧配置 `max-lateness=-1`
-（永不判迟到）+ `qos=false`（不向上游报告）让 kmssink 把这些过期帧**全部照单翻页**。
+几个关键决策，每一条都是实测撞出来的：
 
-排除矩阵（判据统一为恢复后峰值 `current`）全部落空：`sync=true/false` 都爆发（241/268）；
-只停 gst / 只停 ffmpeg / 两个都停都爆发（415/348/420）；`ffmpeg -re` 与全速都爆发（418/301）；
-去掉 `videorate` 仍爆发（205）；`max-duplication-time` 100/200ms 无效；`drop-only=true` 起不来管线。
+**容器必须是 Matroska。** 只有它逐簇写入、头部写完就能解码、不需要回填索引。MP4 的 moov 在尾部，TS 和 fMP4 各有各的坑。这个结论花了整整一轮实验才确认。
 
-解法是**让迟到帧可丢**：`max-lateness=40`（一帧 33ms 的 1.2 倍）+ `qos=true`。
+**单 FIFO + 单 demuxer，不是双 FIFO + 双 demuxer。** 早期版本让音视频各走一个 FIFO、各配一个 demuxer，结果 seek 后音频稳定领先视频 1~2 秒。根因是两个 demuxer 各自把 `segment.start` 定成"自己第一条流的 PTS"——视频从关键帧 K 开始（K ≤ T），音频精确从 T 开始，两条分支都在自己的 base_time 起播，于是内容 K 和内容 T 同时播，差 T−K（B 站关键帧间隔 1~2 秒）。改成单 demuxer 后只有一个 segment（start = 全局最小 PTS = K），内容 c 在两路的 PTS 都是 c、running_time 都是 c−K，天然对齐。
 
-| 配置 | 稳态 dropped | 冻结 6s 后峰值 |
-|---|---|---|
-| `max-lateness=-1 qos=false`（旧） | 0 | **417.84**，新增 832 帧 |
-| `max-lateness=40 qos=false` | — | 仍 417.72 |
-| `max-lateness=100 qos=false` | — | 仍 415.21 |
-| **`max-lateness=40 qos=true`** | **0**（20s ×2 复测） | **61.27**，尾段回 59.8 |
+**`-copyts` 是 A/V 对齐的必要条件，但它和 `-t` 是致死组合。** `-copyts` 保留原始 PTS，这正是不对齐能修复的原因。但 ffmpeg 4.4.1 在 `-copyts` 下 `-t` 是按**原始时间轴**截断的——我原来的公式 `durationMs − baseMs + 5s` 在 base 较大时会算出小于原始 PTS 的值，于是所有包都被过滤掉，ffmpeg 返回码 0、输出 0 个包、stderr 全空。这个 bug 表现为"第三次 seek 必然起不来"，查了很久才发现。修法是 `-t` 直接用 `durationMs + 5s`。
 
-为什么现在 `qos=true` 是安全的：历史上它曾把播放打到 0.90fps（18872 条
-`Dropping frame due to QoS`），因为当年 `mppvideodec` 不产 PTS，每帧都被判迟到。
-现在上游有 `videorate` 归一到面板率，PTS 由它按到达时间重新生成，可信。
+**`render-rectangle` 是 write-only 的，而且只在 reconfigure 时被读取。** 键盘避让需要动态改视频矩形。播放态直接设属性就生效，但暂停态怎么设都没用——kmssink 只在重新分配 plane 时才读这个属性，PAUSED 下没有新帧流过就不会 reconfigure。所以暂停态改矩形必须**先设属性、再临时脉冲 PLAYING 触发 reconfigure、设完立刻切回 PAUSED**。顺序反了（先脉冲再设）就是 configure 读到旧值，完全无效——我在这里踩过一次，还因为探针设计不当误判成"已修好"。
 
-**② 拖进度条后音画不同步。**
-根因：`-c:v copy` 的 `-ss` 只能落在**关键帧**上（本机实测关键帧间隔 5s），
-而音频是解码输出、能精确落点。真机实测 `-ss 155.366`：
+另外两个坑：`render-rectangle` 只能缩小不能放大（1×1 之后想恢复必须整条管线过一次 READY，走 seek 重启路径）；零宽高不会隐藏平面，kmssink 会回退成"未设置 ⇒ 全屏"，所以隐藏必须用 1×1。
 
-```
-视频首包 pkt_pts_time = -0.365s   （回退到关键帧 155.001s）
-音频首包 pts_time    = -0.001s   （几乎精确）
-```
+**起播要缓冲门，不能直接 PLAYING。** 直接 PLAYING 时，音频分支先 preroll 完成、管线时钟随即起跑，而视频分支（硬解首帧 + 队列排空）要晚 900~2100ms 才出帧，这批帧相对已经跑起来的时钟全部"迟到 >40ms"，被 `max-lateness` 成批丢弃——用户看到的就是"起播不是从头开始，直接从第 3 秒播"。修法是两段式：先 `set_state(PAUSED)`（时钟不走，没有帧会迟到），轮询等音视频分支都就绪，再切 PLAYING。代价是起播慢 1.7~2.4 秒，换来起播即满帧。
 
-⇒ 画面永久领先声音 365ms，且不会自愈（`video_base_ms` 仍是 `start_ms`）。
-老代码其实早就解析了 `seek_land_ms`（`-debug_ts` 的 `pkt_pts_time`），但**从未被任何代码读取**
-——`seek_land_applied` 只声明、从未赋值，是个半成品。
+注意这里**不能用 `get_state` 判断 preroll 是否完成**——我们的管线描述里刻意不放任何 sink（分支全靠 `pad-added` 动态建），`set_state(PAUSED)` 会立即返回 SUCCESS，那时一个分支都还没建。
 
-修法：把 `|land|` 换算成帧数，把视频前 N 帧**直接丢弃**（不写 FIFO），
-首帧上屏时内容位置正好等于 `start_ms`，与音频起点一致。真机实测：
+**直播不走 ffmpeg，直连 `souphttpsrc ! flvdemux`。** B 站直播 FLV 的 PTS 是绝对值（实测约 2854014 秒），ffmpeg 转封装后流式 matroskademux 面对"首 PTS 巨大"会永久停在 PREROLLING。同样的流 ffmpeg 先落普通文件再读就正常，所以是"FIFO 上的流式 demux 无法处理巨大起始 PTS"。点播 m4s 的 PTS 从 0 附近开始，所以点播没这个问题。
+
+### 直播闪屏：一个默认值引发的
+
+用户反馈"直播每 2~5 秒部分区域闪白一帧"。查这个 bug 花了很久，因为所有常规怀疑对象都排除了：
+
+- 平面元数据完全稳定（1ms 间隔采样 60 秒，18001 次采样，active/几何/格式/源全无变化）
+- 没有丢帧（`buffer late, dropping` 计数 0）
+- 解码器无错误、kmssink 无错误、dmesg 无异常
+- 帧率正常（30.25fps）、平面几何正常
+
+转折点是把画面录下来逐帧分析。**判定"闪白"的检测器改了三次**：整帧平均亮度会被换镜头误报，条带孤立变亮会被真实运动误报（导出的 PNG 肉眼看全是正常画面）。最后用**交替 A/B**（同一时段两种配置轮流跑，消除内容随时间变化的影响）才拿到可信数据：
 
 ```
-seek start_ms=177589 land=-2589ms skip=78 fps=30 vbase=175000
-  skip done in 1171ms
-之后 poll tick drift 从 -2589ms 收敛到 +5ms，skip=0，wgap=33
+ignore-error=true  （mppvideodec 出厂默认）→ 40 秒内 3 组 / 5 组闪白
+ignore-error=false（丢弃坏帧）             → 40 秒内 0 组 / 0 组闪白
 ```
 
-为什么丢弃而不是平移 `video_base_ms`：`mppvideodec` 不产 PTS，下游 `videorate`
-按**到达时间**重排时间戳，平移内容时钟对不上真实帧序列；只有丢掉多出来的那段帧，
-送进管线的第一帧才真的是 `start_ms` 那一帧。
+另外三组对照排除了网络和显示链路：同一份流录成文件再硬解 0 组、ffmpeg 软解 0 组、直播流直接硬解 4 组。
 
-代价：最坏空解 5s 内容（≈150 帧），实测 2589ms 落点用了 **1171ms**，用户看到的是
-「拖完稍等再出画」而不是「先出画再错位」。上限 8s 防脏值。
+根因是 `mppvideodec` 的 `ignore-error` **出厂默认 true**——解码出错时不报错、照常输出一帧损坏画面。直播是长连接，丢包导致参考帧缺失时 P 帧会解出"部分区域错位/发白"的坏帧。软解会丢弃坏帧，所以软解干净；本地文件不丢包，所以文件干净。
 
-A/B 对照（同一 tap 位置）：补偿开 `land=-3611ms skip=108`，补偿关 `skip=0`，
-证明补偿确实生效。排查开关：`touch /tmp/vp_noseekskip.on`。
+修法就是 `ignore-error=false max-errors=16`。
 
-### v3.5.1：三个真机 bug（都由用户反馈驱动）
+### 音画同步与音量
 
-**① 暂停后画面还在放。** 视频走独立进程 `gst-launch-1.0 ... kmssink`，`js_pause` 只给
-`ff_pid` / `aplay_pid` 发 `SIGSTOP`，漏了 `g_rd.gst_pid`。kmssink 手里还压着 FIFO 里的帧，
-`sync=true` 会按 PTS 继续 page-flip 直到吐完缓冲——于是声音停了、画面还在动。
-修法：pause 时一并 `SIGSTOP`，resume 时 `SIGCONT` 配对。真机验收看进程状态：
-暂停后 `gst-launch` 必须是 `T`，恢复后回到 `S`。
+**ts-offset 必须加在 kmssink，不能加在 alsasink。** 蓝牙耳机有 150ms 端到端延迟，需要把视频整体提前。但 alsasink 是管线的时钟提供者（`provide-clock` 默认 true，实测关掉后视频飙到 88~119fps），给它自己的输入加 ts-offset 等于把整条管线时间轴一起平移，视频是 slave、相对关系完全不变——实测三档偏移 `avSkewMs` 毫无变化。补偿必须落在不提供时钟的那一端。
 
-**② 拖动进度条 / 起播时音画不同时。** 音频 writer 线程有起播门（等视频首帧 + KMS 平面
-ACTIVE），但视频侧**没有反向的门**：首帧一上屏，节拍器就按名义帧率往下推，音频还在门里等。
-修法：加「起播定格门」——视频写出 6 帧后定格，不读新帧、不推进 position，直到音频真正
-开写（`writer_bytes > 0`）才放行。
+**播放器不拥有音量。** 早期版本每次 open/seek 都把 `Playback Path` 设成 SPK、`Master` 设成 100%，用户抱怨"一会儿有声音一会儿没声音"、"音量默认特别大"。现在只做两件事：读 Master 判断用户是否主动静音（是就不碰任何东西），以及仅在 `Playback Path == OFF` 时切到 SPK。**永不写 Master**——那是用户的音量设置，压 0 会销毁它且无法还原。
 
-这里踩了一个自造的坑：最初阈值定 2 帧，结果 kmssink 双缓冲 + PREROLL 要 4~5 个 buffer
-才开始翻页，KMS 平面永远不 ACTIVE，音频门的 `wait_kms_video()` 只能等超时——起播总耗时
-从 3.4s 涨到 **4.6s**。改成「等视频写出 6 帧」后脱离了这个耦合，起播 3.4s，
-`audioLateVisibleMs`（声音比画面**可见**晚多少）实测 **0ms**。
+### 屏幕保活
 
-注意这个指标不能用「首帧写进 FIFO」当基准：gst-launch 从拿到首帧到平面 ACTIVE 要
-1.2~1.9s（spawn + 打开 mppvideodec + PREROLL + 首次 page-flip），那段时间屏幕是黑的，
-不构成音画不同步。`status.audioLateVisibleMs` 以 KMS ACTIVE 为基准，`audioLateMs`
-以首帧为基准，后者会虚高约 1.2s。
+设备空闲 30 秒调暗、60 秒熄屏（出厂值）。播放中必须保活，但 `hal-screen keep` 本身只续 30 秒窗口，所以每 20 秒续一次。深熄态（`bl_power=4`）单次调用不够，要连发两次。
 
-**③ `29.97 fps` 被解析成 97fps → 3.2 倍速快放。** `parse_fps_line()` 从 `" fps"` 向前扫数字，
-遇到小数点就停，于是 `29.97 fps` 得到 `97`、`59.94 fps` 得到 `94`。节拍器按 97fps 排程
-（10.3ms/帧）去喂 30fps 的内容，画面快放、`drift` 一路飙到十几秒、`skip` 每秒几十次。
-修法：向前扫描时把 `.` 一起吞掉，用 `atof` 取小数再四舍五入到整数。
-**B 站大量稿件是 29.97 / 23.976 / 59.94，这个 bug 影响面很大**——历史记录里
-`BV1azJz6mEte`(29.972)、`BV1gfJ46jEsF`(29.971) 就是这类，用户反馈的「这个视频卡、
-其他不卡」正是它。
+`onHide` 必须停保活——应用在后台每 20 秒唤一次屏等于永不熄屏，既烧屏又费电。
 
-### 帧率归一到面板率（v3.4.0）
+### 代码结构
 
-X6 Pro 换用芯片硬解后，视频解码不再占用 CPU。`ffmpeg` 只做 demux 与容器解包（`-c:v copy`），
-压缩后的 H.264 Annex-B 码流经 FIFO 交给 `mppvideodec`，解码结果直接由 `kmssink` 送上 KMS 覆盖平面。
-实测 640×360@30 的直播源，解码吞吐约 **33 倍实时**——瓶颈完全落在网络而非算力。
+```
+src/
+  pages/index/index.vue   单页应用：浏览 4 tab + 播放 + 图文（3437 行）
+  services/
+    play_session.js       会话编排：解析流地址 → open → 轮询 → seek/recover/close
+    player.js             native player 模块封装（v2/v1 双实现，16 参数 open 契约）
+    screen.js             屏幕几何纯函数 + 保活 + 进度条几何
+    bili/                 接口层：client / wbi / playurl / live / article / reply / action / qrlogin
+  styles/base.less        全站样式
+native/csrc/              交叉编译的 JSAPI 原生模块（20 个 .c/.h，约 13.5k 行）
+test/run.js               单测（191 条）
+```
 
-画面节拍以音频时钟为锚：每帧按 `1/fps` 排程，再用「当前可闻音频位置 − 本帧应有位置」的残余漂移
-做 ±1~3ms 的低通微调，而不是硬等到音频位置跨过阈值才放行。早期版本正是硬等音频锚（以 8KB
-写块为单位，约 46ms 一台阶），导致连续几帧卡在同一台阶、台阶一跳又整批放行，
-表现为**约每秒一次的顿挫**；改为节拍器后实测相邻两次上屏的最大间隔从 126ms 降到 30~33ms
-（正好一帧），丢帧计数从 544 降到 2，音画漂移稳定在 ±60ms 内。
+页面只有两个（`index` 和 `diag`）。单页应用的理由是 falcon 页面切换开销大，浏览/播放/图文全用 `mode` 状态机在一个页面内切换。
 
-**「约一秒卡一次」的真正根因（v3.1.2 定案）** 不在节拍器，而在 gst 源的读取语义：
-`filesrc` 会攒满 `blocksize`（64KB ≈ 20 帧 ≈ 0.66s）才把数据推给下游，而播放器每 33ms 只写
-一个约 3KB 的 AU —— 解码器一次收到一大簇、瞬间解完连画，然后干等下一簇。改用 `fdsrc fd=3
-blocksize=3000`（子进程 `dup2` 到 fd 3，必须 `O_NONBLOCK` 否则与父进程互等死锁）后，
-本地 24fps 素材的 A/B 为 `filesrc+sync=false` 22.88fps/78 次大空档 → `fdsrc+sync=true`
-24.00fps/0 次大空档。
+native 侧三个模块：
 
-**kmssink 的默认 QoS 也必须关掉**：`mppvideodec` 经常报 `MPP is not able to generate pts`，
-坏 PTS 让 sink 判定「迟到」，默认 `max-lateness=20ms` + `qos=true` 会把整链拖进
-`Dropping frame due to QoS`（实测 `sync=true` 时 0.90fps、20 秒内 8 次大空档）。
-固定用 `sync=true max-lateness=-1 qos=false`：同一份库 `sync=true` 时 29.95fps / 大空档 1 次，
-`sync=false` 反而 27.45fps / 74 次。注意 sink 的每个属性必须是**独立的 argv 元素**，
-拼成一个带空格的字符串会被 gst-launch 整体当成前一个属性的取值（曾导致「只有声音没画面」）。
+| 模块 | 职责 |
+| --- | --- |
+| `libjsapi_player2.so` | **主实现**。进程内 GStreamer，worker 线程独占所有 Gst 对象——JS 线程碰不到任何 Gst 调用，所以不需要锁，也不可能阻塞 JS 线程 |
+| `libjsapi_player.so` | 旧实现（fb0 贴帧 + aplay），性能差，仅作回退 |
+| `libjsapi_httpjson.so` | 原始 POST body + 二进制 GET。运行时的 `$falcon.jsapi.http` 会对 data 做二次 JSON 序列化且无法关闭，导致部分服务端返回 422 |
 
-旋转交给解码器：`mppvideodec` 自带 `rotation` 属性，直接按面板朝向（`direction=270`）出正立画面，
-不需要 `videoconvert` 之类的软件转换，也省掉了整帧旋转的 CPU 开销。代价是 `rotation=270` 吃掉约
-**35~48% 解码吞吐**（720p60 1311→1931ms、1080p60 2333→3696ms），但每个档都仍留有 1.5x 以上实时余量。
-平面级旋转是死路 —— 4 个 overlay 平面（54/76/90/104）的 `rotation` 属性只声明了 `rotate-0=0x1` 与
-`reflect-y=0x20`，没有 90/270 位，`kmssink plane-properties=rotation=8` 虽能跑起来但回读
-`/sys/kernel/debug/dri/0/state` 仍是 `rotation=1`，驱动直接忽略。
+---
 
-> ⚠️ **测解码吞吐必须先 `kill -9 $(pidof miniapp)`**。MPP 是单硬件实例，app 在播时并发跑基准，
-> 两路解码会串行排队，测出来的是「被抢了一半时间」的假数据（曾据此误判 1080p60 只有 0.82x、
-> 进而错误地认为 1080p 档不可用）。清场后同一份素材：720p60 1311/1931ms、1080p60 2333/3696ms
-> （`rotation=0/270`），即 720p60 有 4.1x、1080p60 有 2.2x 实时余量。
+## 构建
 
-**「选了 60fps 档还是卡」的两个根因（v3.4.0 定案）** 都不在解码能力上 —— 清场实测 720p60 有 4.1x、
-1080p60 有 2.2x 实时余量，`videorate` 归一本身只增加 7ms（3632→3639ms）。
+### 环境
 
-① **kmssink 双份 vsync 等待**。原子驱动下 `sync=true` 会做两次 vsync 等待，8s@60fps 素材耗时
-8747ms、`fpsdisplaysink` 报 57.45fps。加 `skip-vsync=true`（`kmssink` 文档写明「用于原子驱动以避免
-双重 vsync」）后 8410ms / 60.19fps，画面不撕裂 —— 它只跳过 flip 之后那次多余等待，PTS 对齐 vblank 的
-那一次保留。
+| 项 | 要求 |
+| --- | --- |
+| Node.js | 实测 v24.21.0 |
+| aiot-vue-cli | 有道小程序打包器，1.0.32 验证 |
+| Zig | 交叉编译 native 库，0.16.0 验证 |
+| adb | 部署与调试 |
+| Python | 仅部分工具脚本用；依赖 PIL 的脚本要指定带 PIL 的解释器 |
 
-② **30/24fps 内容在 59.88Hz 面板上的 3:2 抖动**。面板实测 59.88Hz（`modetest -c`：`#0 480x960 59.88`），
-30fps 每帧占 1.996 个刷新周期、24fps 占 2.495 个，`kmssink` 只能在 2 与 3 个周期之间来回跳，
-观感就是「不流畅」。而「720p 60fps」档只允许 60fps 的 qn，服务端对该档的源**绝大多数本身就是 30fps**
-（批量探测 34 条稿件 maxfps ≤ 30.3），所以用户选了 60fps 档、实际播的仍是 30fps 内容 —— 卡顿感来自这里。
-
-修法是在 `mppvideodec` 之后插 `videorate` 把帧率**归一到面板率**，再配合 `skip-vsync=true`：
-`video/x-raw,framerate=1497/25`（=59.88，与面板严格相等；写 `60/1` 差 0.2%，长跑每 ~8s 多一帧，
-会造成周期性错拍）。顺序不能反 —— 先 `max-rate` 降帧再复制，否则白跑一倍像素。实测三种源
-（30fps / 60fps / 24fps）全部稳定 59.3~60.2fps、`dropped: 0`，60s 长跑无错拍；CPU 单核 5.7%→6.3%，
-因为 `videorate` 复制的是 NV12 缓冲指针而非像素，caps 协商确认 `videorate` 输出与 `kmssink` 输入
-都是 NV12，全程没有 `videoconvert` 介入。
-
-排查开关：`touch /tmp/vp_nonorm.on` 可跳过归一化（对照旧行为）。
-
-## 构建与测试
-
-前置：Node.js 18+、有道小程序打包器 **aiot-vue-cli**（1.0.32 验证）；重建 native 库另需 Zig。
-
-X6 Pro 是 aarch64，native 库必须用 `aarch64-linux-gnu.2.17` target 重建（`EI_CLASS=64`、`machine=183`）；
-X5 用的是 `arm-linux-gnueabihf.2.23`。32 位库在 X6 Pro 上会被 `dynamic_load_jsapi` 直接拒绝
-（`wrong ELF class: ELFCLASS32`）。
+### 命令
 
 ```bash
+cd PenBili
 npm ci
-npm test                    # 140 条逻辑、协议与几何回归测试（含图文正文解析、直播地址/画质档与重定向缓存、合并画质档与 v1 迁移）
-node test/qr_login_test.js  # 21 条登录协议测试
 
-# 打包 AMR（QuickJS 生产包）
+# 交叉编译 native（产出三个 .so 到 libs/）
+npm run native
+
+# 打 AMR 包（产出 8002026091900004.3_5_2.amr，约 217 KB）
 npm run build
 
-# 可选：从 native 源码重建库
-# PowerShell: $env:ZIG_EXE = 'C:\path\to\zig.exe'; npm run native
+# 单测
+npm test
 ```
 
-## 安装与真机自检
+`npm run native` 内部是 `powershell -File native/build.ps1`，默认 target 是 `aarch64`。X6 Pro 是 **aarch64 64 位**，装 32 位库会在 `dynamic_load_jsapi` 处直接报 `wrong ELF class: ELFCLASS32`。
 
-具体命令以设备上的 `miniapp_cli --help` 为准：
+打包时出现下面这条告警是**正常的**：
+
+```
+未找到以下模块,可能会导致应用运行时异常(如模块为原生模块请忽略): global,brightness,httpjson
+```
+
+这三个是原生模块，由 `libs/` 里的 `.so` 提供，不是 JS 依赖。
+
+## 安装
 
 ```bash
-adb push PenBili.amr /tmp/PenBili.amr
-adb shell miniapp_cli install /tmp/PenBili.amr
-adb shell miniapp_cli start 8002026091900004 index   # 页面名**不带** `--`；写成 `--index` 会报 could not load module filename '--index.js'
+adb push 8002026091900004.3_5_2.amr /tmp/
+adb shell "miniapp_cli install /tmp/8002026091900004.3_5_2.amr"   # 必须返回 "ret":0
+
+# 冷启动：先切桌面再起目标页，保证重建页面实例
+adb shell "miniapp_cli start 8080222437664451"
+adb shell "miniapp_cli start 8002026091900004 index"
 ```
 
-本地部署、自检与截图采集：`npm run deploy`（依赖 ADB 可访问设备）。
+几个容易踩的点：
+
+- `miniapp_cli start <appid> index` 里的页面名**不带** `--`，写成 `--index` 会报 `could not load module filename '--index.js'`
+- 直接 `start <appid>` 可能复用旧页面实例，改了代码看不到效果，所以要先切一次桌面
+- installer 会给 `.so` 加壳重打包（本地 95KB → 设备上 198KB 是正常的，md5 必然变）
+- 每次 install 会在 `a`/`b` 两个 slot 之间轮换，旧目录被删
+
+自检页只能这样进（主界面没有入口）：
+
+```bash
+adb shell "miniapp_cli start 8002026091900004 diag"
+```
+
+## 调试
+
+日志在 `/userdata/applog/`，`YD_PEN_APP.log` 含二进制字节，**必须 `grep -a`**。
+
+验证视频是否真的上屏，不能用 `miniapp_cli capture`——它抓的是 Falcon 画布，看不到硬件视频平面。要看 KMS 平面：
+
+```bash
+adb shell "grep -a 'Esmart1-win0' -A9 /sys/kernel/debug/dri/0/summary"
+```
+
+`Esmart1-win0` 就是视频平面（plane-id 76），`dst: pos[...] rect[...]` 是它当前的屏幕矩形。
+
+---
+
+## 已知限制
+
+- **只支持 X6 Pro**。X5 的 32 位 arm 分支已停止维护
+- **无弹幕**。v2.7.0 移除，因为弱设备上逐帧文字渲染会拖垮解码
+- **无倍速播放**
+- **未登录时服务端最高只给 480P**
+- 起播比"直接开播"慢 1.7~2.4 秒，这是缓冲门的代价（换来起播即满帧，不从第 3 秒开始）
+- 直播延迟约 4 秒（视频队列深度就是延迟下限）
+
+---
 
 ## 致谢
 
-- [SocialSisterYi/bilibili-API-collect](https://github.com/SocialSisterYi/bilibili-API-collect)：
-  我基本是照着这份接口文档把点赞、投币、收藏、评论一路接完的，省了大量抓包时间。
-- 有道 Falcon 小程序的官方示例与 `falcon-ui` 组件库：布局、样式和触摸事件的行为都以它为准。
+- [SocialSisterYi/bilibili-API-collect](https://github.com/SocialSisterYi/bilibili-API-collect)：基本是照着这份接口文档把点赞、投币、收藏、评论一路接完的，省了大量抓包时间
+- 有道 Falcon 小程序的官方示例与 `falcon-ui` 组件库：布局、样式和触摸事件行为都以它为准
 
 ## 免责声明
 
-- 本项目为个人学习用途，与哔哩哔哩、有道（网易）均无关联；相关商标归其权利人所有。
-- `native/iot-miniapp-sdk/include` 为有道小程序官方 SDK 头文件，仅作为 native 模块的编译依赖随仓库分发；版权归原权利人，不适用于本仓库 GPL-3.0 授权。
-- 使用本软件访问服务时请遵守哔哩哔哩用户协议；账号安全责任自负。
-- **无任何担保**；详见 LICENSE。
+- 本项目为个人学习用途，与哔哩哔哩、有道（网易）均无关联；相关商标归其权利人所有
+- `native/iot-miniapp-sdk/include` 为有道小程序官方 SDK 头文件，仅作为 native 模块的编译依赖随仓库分发；版权归原权利人，不适用于本仓库 GPL-3.0 授权
+- 使用本软件访问服务时请遵守哔哩哔哩用户协议；账号安全责任自负
+- **无任何担保**；详见 LICENSE
 
 ## 许可证
 
-[GPL-3.0](LICENSE)（GNU General Public License v3.0）
+[GPL-3.0](LICENSE)

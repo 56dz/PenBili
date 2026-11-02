@@ -33,8 +33,5 @@ Thumbs.db
 # 中间迭代构建产物（仅发布件 PenBili.amr 入库）
 8002026091900004.*.amr
 
-# 服务端 HLS 分片缓存（运行时产物）——v3.0.0 起服务端已整体下线，仅保留以防历史分支误提交
-server/hls_cache/
-
 # Python 运行时缓存
 __pycache__/

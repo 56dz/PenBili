@@ -191,7 +191,7 @@ export function probeVideoRects(videoWidth, videoHeight) {
 // 播放态视频矩形：信箱适配到 VIDEO_AREA(448x240) 并在区内居中。
 //
 // 不能用全屏 960x266 作 box：21:9 等比 16:9 更宽的视频会按高适配得 w>448 →
-// blit 越出视频区、溢出到左右栏（X5 真机实测 bug）。也不能只约束宽度：
+// blit 越出视频区、溢出到左右栏（真机实测 bug）。也不能只约束宽度：
 // 视频区高度是 240（底部 26px 留给进度条，overlay 平面盖住 UI 画不上去）。
 export function playVideoRects(videoWidth, videoHeight, area) {
   // area 缺省 = 点播视频区（240 高）。直播传 LIVE_VIDEO_AREA（266 高）。
