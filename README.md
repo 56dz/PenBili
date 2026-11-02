@@ -273,7 +273,7 @@ adb shell "grep -a 'Esmart1-win0' -A9 /sys/kernel/debug/dri/0/summary"
 
 ## 已知限制
 
-- **只支持 X6 Pro**。X5 的 32 位 arm 分支已停止维护
+- **只支持 X6 Pro**。X5 的 32 位 arm 分支已停止维护并转移到[PenBili-CVI](https://github.com/56dz/PenBili-CVI)
 - **无弹幕**。v2.7.0 移除，因为弱设备上逐帧文字渲染会拖垮解码
 - **无倍速播放**
 - **未登录时服务端最高只给 480P**
