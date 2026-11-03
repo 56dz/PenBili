@@ -1309,7 +1309,28 @@ static void apply_bt_avrcp_volume(void) {
     int rc;
 
     if (!g_w.bt_present || !g_w.adev[0]) return;
+    if (!g_w.bt_ctl_name[0]) return;
     if (g_w.bt_vol_applied == g_w.vol_pct) return;
+    /*
+     * 【只升不降】绝不主动把耳机音量往下压。
+     *
+     * 蓝牙的 AVRCP 绝对音量由系统（hal-audio / 控制中心 / 耳机本体按键）统一管，
+     * 我们只需要在「我们要的值比当前高」时补一下（比如起播瞬间 hal-audio 还没
+     * 把 AVRCP 写到位）。反过来，一旦我们按一个**读错的值**（比如 conf 里滞后
+     * 的 0）往下压，系统不会帮我们纠正 —— 实测 `amixer -D bluealsa sset ... 0%`
+     * 之后等 15s，spk_volume 和 card1 Master 都纹丝不动，耳机就一直没声。
+     */
+    {
+        int cur = pb2_mixer_volume_read(g_w.bt_ctl_name);
+        if (cur >= 0 && g_w.vol_pct <= cur) {
+            g_w.bt_vol_applied = g_w.vol_pct;
+            if (cur != g_w.vol_pct) {
+                pb2_logf("audio: bt avrcp keep %d%% (target %d%% not higher) -> no write",
+                         cur, g_w.vol_pct);
+            }
+            return;
+        }
+    }
     snprintf(vol, sizeof(vol), "%d%%", g_w.vol_pct);
     argv[0] = (char *)"/usr/bin/amixer";
     argv[1] = (char *)"-D";
@@ -1318,7 +1339,6 @@ static void apply_bt_avrcp_volume(void) {
     argv[4] = (char *)g_w.bt_ctl_name; /* 设备名 - A2DP，探测时填 */
     argv[5] = vol;
     argv[6] = NULL;
-    if (!g_w.bt_ctl_name[0]) return;
     /*
      * 必须捕获输出：宿主 SIGCHLD=SIG_IGN 让 waitpid 恒 ECHILD，pb2_run 只能
      * 靠 /proc 判活，返回 0 表示「进程跑过了」而不是「成功了」。amixer 失败
@@ -1371,6 +1391,39 @@ static int read_sys_config_int(const char *key, int defval) {
 }
 
 /*
+ * 取「当前真正生效的音量」，这是播放器唯一应该信的值。
+ *
+ * 【2026-11-04 真机实测，修「点开视频音量自动变 0%」】
+ *   hal-audio -s N ��� card1 Master 立刻变、bluealsa AVRCP 约 4s、
+ *   /data/cfg/sys_config.conf 的 spk_volume 约 8~10s（最慢）。
+ * 以前这里和 do_open 只读 conf 的 spk_volume，于是「刚调大音量就点视频」
+ * 会读到旧值 0 → 软件增益 0 + AVRCP 0% → 耳机静音。
+ *
+ * 现在先读真实控件（蓝牙读 bluealsa AVRCP、喇叭读 card1 Master），
+ * 两者都读不到才退回 conf。会 fork/exec（一次 ~25ms），只在 worker 线程调。
+ */
+static int read_route_volume(void) {
+    int v;
+
+    /*
+     * 顺序很重要：**Master 优先，AVRCP 只作兜底**。
+     *
+     * hal-audio -s N 会立刻写 card1 Master（numid54），约 4s 写 bluealsa AVRCP，
+     * 约 8~10s 才写 sys_config.conf。也就是说 Master 是「最快且始终跟随用户
+     * 意图」的那个量；而 AVRCP 可能被我们自己历史上的错误写入残留在 0%
+     * （实测抓到时就是 Master=88% / AVRCP=0%，耳机因此没声）。
+     * 先读 Master 就同时解决了「conf 滞后」和「AVRCP 脏值」两个问题。
+     */
+    v = pb2_mixer_volume_read(NULL); /* NULL = 读 card1 Master */
+    if (v >= 0) return v;
+    if (g_w.bt_present && g_w.bt_ctl_name[0]) {
+        v = pb2_mixer_volume_read(g_w.bt_ctl_name);
+        if (v >= 0) return v;
+    }
+    return read_sys_config_int("spk_volume", read_sys_config_int("bt_volume", 100));
+}
+
+/*
  * 周期性同步「系统音量」和「音频路由」。
  *
  * 两条独立的事：
@@ -1389,9 +1442,13 @@ static void refresh_audio_route(void) {
     if (now - g_w.vol_check_ms < 1000) return;
     g_w.vol_check_ms = now;
 
-    /* ① 音量：spk_volume 是控制中心唯一写的键（见 do_open 里的实测说明） */
+    /*
+     * ① 音量：读**当前真实生效**的值（蓝牙 AVRCP / card1 Master），
+     *    不再读 sys_config.conf —— hal-audio 写 conf 有 8~10s 延迟，
+     *    用它当轮询来源会让「用户调完音量后 8 秒内播放器无反应」。
+     */
     {
-        int pct = read_sys_config_int("spk_volume", -1);
+        int pct = read_route_volume();
         if (pct >= 0 && pct != g_w.vol_pct) {
             g_w.vol_pct = pct;
             apply_volume_now();
@@ -2444,16 +2501,19 @@ static void do_open(pb2_open_req_t *req) {
         pb2_logf("audio: open with default pcm (speaker)");
     }
     /*
-     * 音量来源：**永远读 spk_volume**。
+     * 音量来源：**读当前真实生效的控件**（蓝牙 = bluealsa AVRCP，喇叭 = card1
+     * Master），读不到才退回 sys_config.conf。
      *
-     * 实测（2026-11-01，蓝牙已连）：`hal-audio -s 40` 只写 spk_volume，
-     * 既不改 bt_volume 也不改 bluealsa 的 AVRCP 音量 —— 而 hal-audio 正是
-     * 下拉控制中心和设置页背后的那个 HAL 二进制。所以「用户调音量」这件事
-     * 的唯一权威值就是 spk_volume，跟当前走喇叭还是耳机无关。
-     * （bt_volume 是给蓝牙设置页用的独立档位，控制中心不碰它。）
+     * 【为什么不再信 spk_volume（2026-11-04 真机实测纠错）】
+     * 早前这里写的是「永远读 spk_volume」，依据是「hal-audio -s 只写 spk_volume」。
+     * 实测发现那句话只对了一半：hal-audio -s N 会**同时**写
+     *   - card1 Master（立刻）
+     *   - bluealsa AVRCP 绝对音量（约 4s）
+     *   - sys_config.conf 的 spk_volume（约 8~10s，最慢）
+     * 所以 conf 是滞后的那个。用户「拉大音量 → 立刻点视频」时 conf 里还是旧值
+     * （往往是上一次的 0），起播读到 0 → 软件增益 0 + AVRCP 0% → 耳机没声。
      */
-    g_w.vol_pct = read_sys_config_int("spk_volume",
-                                      read_sys_config_int("bt_volume", 100));
+    g_w.vol_pct = read_route_volume();
     g_w.vol_applied = -1;
     g_w.vol_check_ms = pb2_now_ms();
     g_w.bt_check_ms = pb2_now_ms();

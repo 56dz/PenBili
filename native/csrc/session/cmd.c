@@ -478,26 +478,14 @@ static int mixer_get(int card, const char *ctl, char *out, size_t outsz) {
  * `hal-audio -s 0` → card1 Master=0，而 Playback Path 仍是 SPK。
  * 所以「是否静音」只能看 Master 百分比，不能看 Path。
  */
-static int mixer_get_pct(int card, const char *ctl) {
-    char buf[2048];
-    char *argv0[8];
-    const char *p;
+/*
+ * 从 amixer sget 的输出里解析第一个 "[NN%]"，返回 0-100，找不到返回 -1。
+ * 抽出来是因为 card1 Master 和 bluealsa AVRCP 两种读法的解析完全一样。
+ */
+static int parse_pct(const char *buf) {
+    const char *p = buf;
 
-    buf[0] = '\0';
-    argv0[0] = (char *)"/usr/bin/amixer";
-    argv0[1] = (char *)"-c";
-    argv0[2] = (char *)(card == 0 ? "0" : "1");
-    argv0[3] = (char *)"sget";
-    argv0[4] = (char *)ctl;
-    argv0[5] = NULL;
-    if (pb2_run(argv0, buf, sizeof(buf), 1500) != 0) {
-        argv0[0] = (char *)"/bin/amixer";
-        buf[0] = '\0';
-        if (pb2_run(argv0, buf, sizeof(buf), 1500) != 0) return -1;
-    }
-
-    /* 找第一个 "[NN%]"（Front Left；左右声道通常一致） */
-    p = buf;
+    if (!buf) return -1;
     while ((p = strchr(p, '[')) != NULL) {
         const char *q = p + 1;
         int v = 0;
@@ -512,6 +500,78 @@ static int mixer_get_pct(int card, const char *ctl) {
         p++;
     }
     return -1;
+}
+
+static int mixer_get_pct(int card, const char *ctl) {
+    char buf[2048];
+    char *argv0[8];
+
+    buf[0] = '\0';
+    argv0[0] = (char *)"/usr/bin/amixer";
+    argv0[1] = (char *)"-c";
+    argv0[2] = (char *)(card == 0 ? "0" : "1");
+    argv0[3] = (char *)"sget";
+    argv0[4] = (char *)ctl;
+    argv0[5] = NULL;
+    if (pb2_run(argv0, buf, sizeof(buf), 1500) != 0) {
+        argv0[0] = (char *)"/bin/amixer";
+        buf[0] = '\0';
+        if (pb2_run(argv0, buf, sizeof(buf), 1500) != 0) return -1;
+    }
+
+    return parse_pct(buf);
+}
+
+/*
+ * 读 bluealsa 的 AVRCP 绝对音量（0-100），读不到返回 -1。
+ *
+ * bluealsa 把每台设备的 AVRCP 音量暴露成独立 mixer 控件（"<别名> - A2DP"），
+ * 必须用 `amixer -D bluealsa` 而不是 `-c <n>`。
+ */
+static int mixer_get_pct_bluealsa(const char *ctl) {
+    char buf[2048];
+    char *argv0[8];
+
+    buf[0] = '\0';
+    argv0[0] = (char *)"/usr/bin/amixer";
+    argv0[1] = (char *)"-D";
+    argv0[2] = (char *)"bluealsa";
+    argv0[3] = (char *)"sget";
+    argv0[4] = (char *)ctl;
+    argv0[5] = NULL;
+    if (pb2_run(argv0, buf, sizeof(buf), 1500) != 0) {
+        argv0[0] = (char *)"/bin/amixer";
+        buf[0] = '\0';
+        if (pb2_run(argv0, buf, sizeof(buf), 1500) != 0) return -1;
+    }
+    return parse_pct(buf);
+}
+
+/*
+ * 读「当前真正生效」的音量百分比（0-100），读不到返回 -1。
+ *
+ * 【为什么需要这个（2026-11-04 真机实测）】
+ * `hal-audio -s N`（控制中心/设置页背后的那个二进制）会**同时**把
+ *   - card1 Master（numid=54）立刻写成 N 对应的 0..255 值；
+ *   - bluealsa 的 AVRCP 绝对音量写成 N%（约 4s 后）；
+ *   - /data/cfg/sys_config.conf 的 spk_volume 写成 N（**约 8~10s 后**）。
+ * 也就是说 conf 是**最慢**的那个信号。起播时读 conf 会读到上一次留下的旧值
+ * （用户刚调大音量时尤其明显：conf 里还是 0），于是把软件增益和耳机 AVRCP
+ * 一起压成 0% —— 这正是「点开视频音量自动变 0%、调大也没声」的根因。
+ *
+ * 所以：**能读真实控件就不要读 conf**。conf 只作最后兜底。
+ *
+ * bt_ctl_name 非空 = 当前走蓝牙，读 AVRCP；否则读 card1 Master。
+ * 会 fork/exec（一次 ~25ms），只在 worker 线程调用。
+ */
+int pb2_mixer_volume_read(const char *bt_ctl_name) {
+    int v;
+
+    if (bt_ctl_name && bt_ctl_name[0]) {
+        v = mixer_get_pct_bluealsa(bt_ctl_name);
+        if (v >= 0) return v;
+    }
+    return mixer_get_pct(1, "Master");
 }
 
 /*

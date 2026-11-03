@@ -62,6 +62,22 @@ const char *pb2_mute_reason(void);
 int pb2_mixer_setup(void);
 
 /*
+ * 读「当前真正生效」的音量百分比（0-100），读不到返回 -1。
+ *
+ * bt_ctl_name 非空 = 读 bluealsa 的 AVRCP 绝对音量（形如 "L3 anc - A2DP"）；
+ * 空 = 读 card1 Master。两者都读不到才返回 -1，调用方再退回 sys_config.conf。
+ *
+ * 【为什么不能用 sys_config.conf 当权威（2026-11-04 真机实测）】
+ * `hal-audio -s N` 写 Master 是**立刻**生效、写 AVRCP 约 4s、写 conf 约 8~10s。
+ * 起播读 conf 会拿到上一次的旧值，用户刚调大音量时 conf 里可能还是 0，
+ * 结果播放器把软件增益和耳机 AVRCP 一起压成 0% —— 听感上就是「点开视频
+ * 音量自动变 0%，播放中调大也没声」。
+ *
+ * 会 fork/exec（一次 ~25ms），只在 worker 线程调用。
+ */
+int pb2_mixer_volume_read(const char *bt_ctl_name);
+
+/*
  * 强制静音：只把 card0 Playback Path 设为 OFF，**不碰 card1 Master**。
  *
  * 为什么不再设 Master=0：Master 是用户/系统的音量设置，压到 0 就等于销毁
