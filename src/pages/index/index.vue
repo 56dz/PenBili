@@ -244,11 +244,11 @@
             <text class="mine-about-note">第三方客户端，与哔哩哔哩无隶属关系；所有内容版权归原作者及平台所有</text>
           </div>
           <div class="mine-about-qr">
-            <div v-for="(row, ri) in aboutQrRows" :key="'aq' + ri" class="qr-row">
+            <div v-for="(row, ri) in aboutQrRows" :key="'aq' + ri" class="aq-row">
               <div
                 v-for="(seg, si) in row"
                 :key="'aqs' + si"
-                :class="seg.dark ? 'qr-seg qr-dark ' + seg.cls : 'qr-seg ' + seg.cls"
+                :class="seg.dark ? 'aq-seg qr-dark ' + seg.cls : 'aq-seg ' + seg.cls"
               ></div>
             </div>
           </div>
@@ -564,7 +564,9 @@ import {
   isLiveReconnecting,
   num,
   SEEK_STEP_MS,
-  SEEK_FRAME_RETRY_DEADLINE_MS
+  SEEK_FRAME_RETRY_DEADLINE_MS,
+  SEEK_LAND_NEAR_MS,
+  seekNoteDone
 } from '../../services/play_session.js';
 import * as player from '../../services/player.js';
 import {
@@ -905,10 +907,14 @@ export default {
     /* seek 交互状态（缺陷 B 的 JS 侧体验）：
      *   _seekDebounceT = 排队中的 seek 定时器句柄（0=没有排队）
      *   _seekNoteAt    = 最近一次下发 seek 的时刻（0=没有在等首帧）→ 「定位中…」靠它撑着
-     *   _seekFrames0   = 下发 seek 前的累计帧数（用来判断首帧有没有到） */
+     *   _seekFrames0   = 下发 seek 前的累计帧数（用来判断首帧有没有到）
+     *   _seekNoteTarget= 这次 seek 的落点（毫秒），用于「位置已靠近落点」的补充判据
+     *   _seekSawPending= 是否亲眼见过 native 的 seekPending=true（判完成必须先见到它） */
     this._seekDebounceT = 0;
     this._seekNoteAt = 0;
     this._seekFrames0 = 0;
+    this._seekNoteTarget = 0;
+    this._seekSawPending = false;
     /* _noFrameAt = 「连续无视频帧」这个状态是从什么时候开始的（0=当前有帧）。
      * 用途：看门狗的「无首帧」判据（NO_FRAME_FAIL_MS）—— frames 恒为 0 时没有
      * "上次出帧时刻"可比，只能靠"零帧已经持续多久"来判断起播是不是真死了。
@@ -1841,18 +1847,34 @@ export default {
          *   1) 必须显示「定位中…」——不能是「加载中…」，也不能是黑屏无提示；
          *   2) 不能被下面「无画面帧 → 加载中…」覆盖（seek 期间 frames 会短暂停涨/归零）；
          *   3) 不能触发看门狗（seek 本身会让 videoStallMs 增长，属正常）。
-         * 判据用 frames 的增长（seek 后首帧到达 → 累计帧数一定会超过下发前的值），
+         * 判据见 play_session.js 的 seekNoteDone()：**必须先看到 st.seekPending 落回
+         * false**（= native 的 do_seek 真的跑完），再看帧数/落点。为什么不能只看
+         * frames 增长（旧实现的真 bug，真机 23:12:51 复现）：seek 下发后约 200ms 内
+         * 旧管线仍在出帧（native 还在 debounce），帧数一涨就被误判成"首帧已到"，
+         * 于是下一轮 tick 用 native 的**旧**位置覆盖刚写下的落点 → 进度条往左弹一下。
          * 4s 兜底收起，避免弱网下把用户困在提示里。 */
         let seekWaiting = false;
         if (this._seekNoteAt > 0) {
           const waited = Date.now() - this._seekNoteAt;
-          if (st.frames > this._seekFrames0) {
-            logWarn('[bili] seek 首帧到达 耗时=' + waited + 'ms frames=' + st.frames);
+          if (st.seekPending === true) this._seekSawPending = true;
+          if (
+            seekNoteDone(st, this._seekFrames0, this._seekNoteTarget, SEEK_LAND_NEAR_MS, this._seekSawPending)
+          ) {
+            logWarn(
+              '[bili] seek 首帧到达 耗时=' + waited + 'ms frames=' + st.frames +
+              ' pos=' + st.positionMs + ' target=' + this._seekNoteTarget
+            );
             this._seekNoteAt = 0;
+            this._seekSawPending = false;
             if (this.play.note === '定位中…') this.play.note = '';
           } else if (waited > SEEK_NOTE_TIMEOUT_MS) {
-            logWarn('[bili] seek 等首帧超时 ' + waited + 'ms（frames 仍为 ' + st.frames + '）→ 收起提示');
+            logWarn(
+              '[bili] seek 等首帧超时 ' + waited + 'ms（frames=' + st.frames +
+              ' pos=' + st.positionMs + ' target=' + this._seekNoteTarget +
+              ' pending=' + (st.seekPending === true ? 1 : 0) + '）→ 收起提示'
+            );
             this._seekNoteAt = 0;
+            this._seekSawPending = false;
             if (this.play.note === '定位中…') this.play.note = '';
           } else {
             seekWaiting = true; // 还在等首帧：保持提示、且不让「加载中」覆盖
@@ -1973,6 +1995,8 @@ export default {
       this.play.note = '定位中…';
       this._seekFrames0 = this.play.frames || 0;
       this._seekNoteAt = Date.now();
+      this._seekNoteTarget = 0; // 落点未定，靠帧数判完成
+      this._seekSawPending = false;
       const r = await seekBy(this.makeCtx(myGen), this.play.positionMs, s.durationMs, deltaSec * 1000);
       if (this.gen !== myGen) return;
       if (!r.ok) {
@@ -1982,6 +2006,7 @@ export default {
         return;
       }
       this.play.positionMs = r.positionMs;
+      this._seekNoteTarget = Number(r.target) > 0 ? Number(r.target) : Number(r.positionMs) || 0;
       // 「定位中…」交给 startPoll 的首帧判据清（见 tick 的 seekNote 段），不在这里清
       logWarn('[bili] seek ' + (deltaSec > 0 ? '+' : '') + deltaSec + 's → pos=' + r.positionMs + 'ms');
     },
@@ -2316,6 +2341,8 @@ export default {
       this.play.positionMs = goal;
       this._seekFrames0 = this.play.frames || 0;
       this._seekNoteAt = Date.now();
+      this._seekNoteTarget = goal;
+      this._seekSawPending = false;
       const r = await seekToAbsolute(this.makeCtx(myGen), goal, dur);
       if (this.gen !== myGen) return;
       if (!r.ok) {

@@ -746,6 +746,59 @@ export const SEEK_FRAME_DEADLINE_MS = 3000; // 首帧软上限（native 预算 P
  * 才能把自愈后的真实首帧计入；不放宽的话探针会在自愈完成前就报 TIMEOUT。 */
 export const SEEK_FRAME_RETRY_DEADLINE_MS = 12000;
 
+/* =========================================================================
+ * 「定位中…」何时可以收起（页面 tick 的 seek 段判据）
+ *
+ * 历史 bug（真机 23:12:51 复现，自检 seek+20s 报 5023→6039）：
+ *   旧判据只看 `st.frames > frames0`。seek 下发后约 200ms 内 **旧管线仍在出帧**
+ *   （native 的 seek debounce 还没到点、do_seek 还没开始），帧数一涨就被误判成
+ *   "新管线首帧已到" → `_seekNoteAt` 清零 → 下一轮 tick 用 native 的**旧**位置
+ *   覆盖页面刚写下的落点。用户看到的是"拖完往左弹一下"，看门狗也会提前解除让位。
+ *
+ * 正确判据（与 waitLanded 同一套语义）：
+ *   1) `st.seekPending` 必须已落回 false —— 只有它变 false 才证明 do_seek 真的跑完；
+ *   2) 且（帧数已越过下发前的基线 **或** 位置已靠近落点）。
+ *      为什么要有"位置靠近"这一条：do_seek 收尾会 pb2_probe_reset() 把 frames 归零，
+ *      重建管线后累计帧数可能长期小于 seek 前的值，光看帧数会等到超时。
+ *   老 native（v1）没有 seekPending 字段 → 读作 false，等价于不设这道门。
+ *
+ * 纯函数，不依赖时钟，便于单测。
+ * ========================================================================= */
+export function seekNoteDone(st, frames0, targetMs, near, sawPending) {
+  if (!st || typeof st !== 'object') return false;
+  /* native 明确还在 seek 中 → 一律不算完成。 */
+  if (st.seekPending === true) return false;
+
+  const f0 = Number(frames0) || 0;
+  const frames = Number(st.frames) || 0;
+  const grew = frames > f0;
+
+  const tol = Number(near) > 0 ? Number(near) : SEEK_LAND_NEAR_MS;
+  const pos = Number(st.positionMs);
+  const target = Number(targetMs);
+  /* 落点是否已靠近。target<=0 表示「这条 seek 没有明确落点」（例如按 ±20s 时
+   * native 回的是相对目标解析后的值，万一拿不到就退回只看帧数）。 */
+  const nearTarget =
+    isFinite(pos) && isFinite(target) && target > 0 && Math.abs(pos - target) <= tol;
+
+  /* A. 没见到 pending 也能判完成的情况：帧数涨了 **且** 位置已在落点附近。
+   *    为什么这两个必须同时成立：seek 下发后约 200ms 内旧管线仍在出帧（帧数会涨），
+   *    但那时 positionMs 还是 seek 前的旧位置 —— 单独看帧数就是旧 bug。
+   *    轮询 1s 一次、do_seek 只要 600~1400ms，完全可能整段 pending 落在两次采样之间，
+   *    所以不能只依赖 sawPending。
+   *    落点未知（target<=0，即 seekBy 还没返回）时**不算完成** —— 那种窗口里
+   *    old 帧数增长 + 落点未知，正好是最容易误判的组合。 */
+  if (target > 0 && grew && nearTarget) return true;
+
+  /* B. 亲眼见过 pending=true，且它已落回 false → do_seek 真的跑完了。
+   *    此时只要帧数已越过基线、或位置已靠近落点，就算完成。
+   *    （do_seek 收尾会 pb2_probe_reset() 把 frames 归零，重建后的累计帧数可能长期
+   *      小于 seek 前的值，所以不能只要求 grew。） */
+  if (sawPending === true && (grew || nearTarget)) return true;
+
+  return false;
+}
+
 function defaultSleep(ms) {
   return new Promise(function (resolve) {
     setTimeout(resolve, ms);

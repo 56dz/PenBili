@@ -997,7 +997,14 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
              * 正值：标定时写负数会得到 `ts-offset=--2000000000`，gst 解析
              * 失败、属性保持默认 0，而日志看起来「设了」——真机踩过一次。
              */
-            snprintf(tsoff, sizeof(tsoff), " ts-offset=%lld",
+            /*
+             * 【绝不能带前导空格】desc 里是 `%%s%%s%%s` 直接拼接，前导空格会让
+             * 边界看起来正常、实则后面的 skip-vsync=true 会粘上来，得到
+             * `ts-offset=-150000000skip-vsync=true` → parse_bin 失败 →
+             * 视频分支建不起来 → 蓝牙下整片黑屏（真机 2026-11-03 踩到）。
+             * 分隔符一律由 desc 的格式串负责。
+             */
+            snprintf(tsoff, sizeof(tsoff), "ts-offset=%lld",
                      -g_w.bt_ts_offset_ns);
         } else {
             tsoff[0] = '\0';
@@ -1032,7 +1039,7 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
                       * update_late_policy() 直接 return，sink 就**永远**停在
                       * -1/false —— 实测 seek 落点耗时从 412ms 恶化到 1398~2485ms。
                       */
-                     "max-lateness=%d qos=%s force-aspect-ratio=false %s%s%s "
+                     "max-lateness=%d qos=%s force-aspect-ratio=false %s %s %s "
                      "render-rectangle=%s",
                      qbufs, qbytes, qns,
                      g_w.rotate, mpperr, fpscap, vrate, PB2_KMS_PLANE_ID,
@@ -1056,7 +1063,7 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
                       * update_late_policy() 直接 return，sink 就**永远**停在
                       * -1/false —— 实测 seek 落点耗时从 412ms 恶化到 1398~2485ms。
                       */
-                     "max-lateness=%d qos=%s force-aspect-ratio=false %s%s%s "
+                     "max-lateness=%d qos=%s force-aspect-ratio=false %s %s %s "
                      "render-rectangle=%s",
                      qbufs, qbytes, qns,
                      g_w.rotate, mpperr, fpscap, vrate, PB2_KMS_PLANE_ID,
@@ -1065,9 +1072,9 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
             pb2_logf("pad-added: unsupported video caps %s", cn);
             return;
         }
-        pb2_logf("pad-added: video desc late=%d qos=%s%s mpp:%s", late_ms, qos_s,
-                 tsoff[0] ? tsoff : " (no ts-offset)",
-                 mpperr[0] ? mpperr : " (vendor defaults)");
+        pb2_logf("pad-added: video desc late=%d qos=%s %s mpp:%s", late_ms, qos_s,
+                 tsoff[0] ? tsoff : "(no ts-offset)",
+                 mpperr[0] ? mpperr : "(vendor defaults)");
         bin = parse_bin(desc);
         if (!bin) {
             pb2_stats_patch_error(&g_w.stats, PB2_E_PIPELINE, "video branch build failed");
@@ -2575,7 +2582,7 @@ static void do_open(pb2_open_req_t *req) {
         pb2_logf("start gate: %s in %lldms (v=%d/%lld frames=%lld a=%d/%d want_audio=%d)",
                  ready ? "both ready" : "timeout",
                  pb2_now_ms() - t_gate,
-                 g_w.vbranch ? 1 : 0, 1,
+                 g_w.vbranch ? 1 : 0, (long long)1,
                  (long long)atomic_load_explicit(&g_w.probe.frames, memory_order_relaxed),
                  g_w.abranch ? 1 : 0, want_audio, want_audio);
     }

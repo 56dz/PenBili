@@ -28,13 +28,6 @@ export const VIDEO_SETTINGS_VERSION = 2;
  * 只靠 qn 阶梯挡不住（详见 pixelBudgetFor 注释）。 */
 export const VIDEO_QUALITY_OPTIONS = [
   {
-    id: 'auto',
-    label: '自动（最高可用）',
-    ladder: [116, 80, 74, 64, 32, 16],
-    maxPixels: 1920 * 1080,
-    fpsCap: 0
-  },
-  {
     id: '1080p60',
     label: '1080p 60fps',
     ladder: [116, 80, 74, 64, 32, 16],
@@ -88,23 +81,30 @@ export const VIDEO_QUALITY_OPTIONS = [
 export const LIVE_QUALITY_OPTIONS = [
   { id: '480p30', label: '480p 30fps（省流）', qn: 150, fpsCap: 30 },
   { id: '720p30', label: '720p 30fps', qn: 250, fpsCap: 30 },
-  { id: '720p60', label: '720p 60fps', qn: 250, fpsCap: 0 },
-  { id: 'auto', label: '自动（最高可用）', qn: 10000, fpsCap: 0 }
+  { id: '720p60', label: '720p 60fps', qn: 250, fpsCap: 0 }
 ];
 
-const findById = (list, id) => list.find((x) => x.id === id) || list[0];
+/* 按 id 查档位，查不到退回该列表的默认档。
+ * v3.6.0 移除了「自动」档后，旧存储里的 'auto' 会查不到 —— 这时必须退回
+ * DEFAULT 里的 720p60，而不是 list[0]（列表第一项是 1080p60，比默认更高，
+ * 弱网下更容易缓冲）。fallback 由调用方传入，避免这里反向依赖 DEFAULT 常量。 */
+const findById = (list, id, fallback) =>
+  list.find((x) => x.id === id) ||
+  list.find((x) => x.id === fallback) ||
+  list[0];
 
 export const DEFAULT_VIDEO_SETTINGS = {
   version: VIDEO_SETTINGS_VERSION,
-  videoQuality: 'auto',
-  liveQuality: '480p30'
+  videoQuality: '720p60',
+  liveQuality: '720p60'
 };
 
 /* v1 → v2 迁移：老记录是 videoQuality('auto'|'1080p'|'720p'|'480p'|'360p')
  * + videoFps('auto'|'60'|'30') 两个独立字段，合并成单个画质 id。
- * 认不出来的组合一律落到 auto，宁可画质自动也不要因为一条旧记录起不来。 */
+ * 认不出来的组合一律落到新默认 720p60（v3.6.0 起「自动」档已移除，
+ * 不能再迁移到 'auto' 这个不存在的 id）。 */
 const LEGACY_VIDEO_MAP = {
-  'auto|auto': 'auto',
+  'auto|auto': '720p60',
   'auto|60': '1080p60',
   'auto|30': '1080p30',
   '1080p|auto': '1080p60',
@@ -128,15 +128,18 @@ const LEGACY_LIVE_MAP = {
   '720p|auto': '720p60',
   '720p|30': '720p30',
   '720p|60': '720p60',
-  'auto|auto': 'auto',
+  'auto|auto': '720p60',
   'auto|30': '720p30',
-  'auto|60': 'auto'
+  'auto|60': '720p60'
 };
 
 function migrateLegacy(raw) {
   const v = LEGACY_VIDEO_MAP[String(raw.videoQuality) + '|' + String(raw.videoFps)];
   const l = LEGACY_LIVE_MAP[String(raw.liveQuality) + '|' + String(raw.liveFps)];
-  return { videoQuality: v || 'auto', liveQuality: l || '480p30' };
+  return {
+    videoQuality: v || DEFAULT_VIDEO_SETTINGS.videoQuality,
+    liveQuality: l || DEFAULT_VIDEO_SETTINGS.liveQuality
+  };
 }
 
 /* 反序列化：任何脏数据都退回默认值，绝不因为一条坏记录让播放起不来。
@@ -150,8 +153,10 @@ export function normalizeVideoSettings(raw) {
   }
   return {
     version: VIDEO_SETTINGS_VERSION,
-    videoQuality: findById(VIDEO_QUALITY_OPTIONS, src.videoQuality).id,
-    liveQuality: findById(LIVE_QUALITY_OPTIONS, src.liveQuality).id
+    videoQuality: findById(VIDEO_QUALITY_OPTIONS, src.videoQuality,
+                           DEFAULT_VIDEO_SETTINGS.videoQuality).id,
+    liveQuality: findById(LIVE_QUALITY_OPTIONS, src.liveQuality,
+                          DEFAULT_VIDEO_SETTINGS.liveQuality).id
   };
 }
 
@@ -174,7 +179,8 @@ export function nextOptionId(list, id) {
 /* 点播的 qn 尝试阶梯（画质档自带顺序，60fps 专档已在 30fps 档里被排到末尾）。 */
 export function dashLadderFor(settings) {
   const s = normalizeVideoSettings(settings);
-  return findById(VIDEO_QUALITY_OPTIONS, s.videoQuality).ladder.slice();
+  return findById(VIDEO_QUALITY_OPTIONS, s.videoQuality,
+                 DEFAULT_VIDEO_SETTINGS.videoQuality).ladder.slice();
 }
 
 /* 点播的渲染帧率上限（0 = 不限制）。
@@ -182,7 +188,8 @@ export function dashLadderFor(settings) {
  * 拿不到 30fps 变体，只能拉 60fps 源再用 videorate 限帧（只封顶、不插帧）。 */
 export function videoFpsCapFor(settings) {
   const s = normalizeVideoSettings(settings);
-  return findById(VIDEO_QUALITY_OPTIONS, s.videoQuality).fpsCap;
+  return findById(VIDEO_QUALITY_OPTIONS, s.videoQuality,
+                 DEFAULT_VIDEO_SETTINGS.videoQuality).fpsCap;
 }
 
 /* 点播的解码像素预算 = 所选画质档的上限。
@@ -191,28 +198,33 @@ export function videoFpsCapFor(settings) {
  * 1080p。这里用所选档的 maxPixels 兜住，超了就 continue 到下一档阶梯。 */
 export function pixelBudgetFor(settings) {
   const s = normalizeVideoSettings(settings);
-  return findById(VIDEO_QUALITY_OPTIONS, s.videoQuality).maxPixels;
+  return findById(VIDEO_QUALITY_OPTIONS, s.videoQuality,
+                 DEFAULT_VIDEO_SETTINGS.videoQuality).maxPixels;
 }
 
 /* 直播的 qn。 */
 export function liveQnFor(settings) {
   const s = normalizeVideoSettings(settings);
-  return findById(LIVE_QUALITY_OPTIONS, s.liveQuality).qn;
+  return findById(LIVE_QUALITY_OPTIONS, s.liveQuality,
+                 DEFAULT_VIDEO_SETTINGS.liveQuality).qn;
 }
 
 /* 直播的渲染帧率上限（0 = 不限制）。 */
 export function liveFpsCapFor(settings) {
   const s = normalizeVideoSettings(settings);
-  return findById(LIVE_QUALITY_OPTIONS, s.liveQuality).fpsCap;
+  return findById(LIVE_QUALITY_OPTIONS, s.liveQuality,
+                 DEFAULT_VIDEO_SETTINGS.liveQuality).fpsCap;
 }
 
 /* 菜单里显示的文字（模板不能直接调模块函数，由页面转发）。 */
 export function videoQualityLabel(settings) {
   const s = normalizeVideoSettings(settings);
-  return findById(VIDEO_QUALITY_OPTIONS, s.videoQuality).label;
+  return findById(VIDEO_QUALITY_OPTIONS, s.videoQuality,
+                 DEFAULT_VIDEO_SETTINGS.videoQuality).label;
 }
 
 export function liveQualityLabel(settings) {
   const s = normalizeVideoSettings(settings);
-  return findById(LIVE_QUALITY_OPTIONS, s.liveQuality).label;
+  return findById(LIVE_QUALITY_OPTIONS, s.liveQuality,
+                 DEFAULT_VIDEO_SETTINGS.liveQuality).label;
 }

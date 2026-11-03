@@ -461,7 +461,9 @@
   text-overflow: ellipsis;
 }
 
-/* 小二维码容器：37 格 × 2px = 74px（v3 码 29 + 2×4 quiet） */
+/* 小二维码容器：37 格 × 2px = 74px（v3 码 29 + 2×4 quiet）。
+ * 行必须用专用的 .aq-row（height:2px）：共享 .qr-row 的 4px 会把 37 行渲染成
+ * 148px，而容器只有 74px + overflow:hidden → 只显示上半截，二维码扫不出来。 */
 .mine-about-qr {
   width: 74px;
   height: 74px;
@@ -470,6 +472,15 @@
   background-color: #ffffff;
   border-radius: 4px;
   overflow: hidden;
+}
+
+.aq-row {
+  height: 2px;
+  flex-direction: row;
+}
+
+.aq-seg {
+  height: 2px;
 }
 
 .mine-notice {

@@ -133,8 +133,9 @@ async function main() {
   const vsMod = await import('../src/services/video_settings.js');
   test('video_settings: 默认值与脏数据归一', () => {
     const d = vsMod.DEFAULT_VIDEO_SETTINGS;
-    assert.strictEqual(d.videoQuality, 'auto');
-    assert.strictEqual(d.liveQuality, '480p30');
+    // v3.6.0 起「自动」档被移除，点播默认改为 720p60（用户要求）
+    assert.strictEqual(d.videoQuality, '720p60');
+    assert.strictEqual(d.liveQuality, '720p60');
     assert.strictEqual(d.version, 2);
     // v3.3.0 起分辨率与帧率合并为单一画质档，旧的两个字段必须已不存在
     assert.strictEqual(d.videoFps, undefined);
@@ -142,8 +143,11 @@ async function main() {
     // 脏数据一律退回默认，绝不让一条坏记录把播放搞挂
     assert.deepStrictEqual(vsMod.normalizeVideoSettings(null), d);
     assert.deepStrictEqual(vsMod.normalizeVideoSettings('x'), d);
-    assert.deepStrictEqual(vsMod.normalizeVideoSettings({ version: 2, videoQuality: '4k' }).videoQuality, 'auto');
-    assert.deepStrictEqual(vsMod.normalizeVideoSettings({ version: 2, liveQuality: '1080p' }).liveQuality, '480p30');
+    assert.deepStrictEqual(vsMod.normalizeVideoSettings({ version: 2, videoQuality: '4k' }).videoQuality, '720p60');
+    // 旧存储里残留的 'auto'（v3.5.x 及更早）也必须被收成 720p60，不能落到 1080p60
+    assert.deepStrictEqual(vsMod.normalizeVideoSettings({ version: 2, videoQuality: 'auto' }).videoQuality, '720p60');
+    assert.deepStrictEqual(vsMod.normalizeVideoSettings({ version: 2, liveQuality: 'auto' }).liveQuality, '720p60');
+    assert.deepStrictEqual(vsMod.normalizeVideoSettings({ version: 2, liveQuality: '1080p' }).liveQuality, '720p60');
     // 合法值保留
     const ok = vsMod.normalizeVideoSettings({ version: 2, videoQuality: '720p30', liveQuality: '720p60' });
     assert.deepStrictEqual([ok.videoQuality, ok.liveQuality], ['720p30', '720p60']);
@@ -153,14 +157,13 @@ async function main() {
       assert.strictEqual(typeof q.fpsCap, 'number', q.id + ' 缺 fpsCap');
       assert.ok(q.maxPixels > 0, q.id + ' 缺 maxPixels');
       assert.ok(Array.isArray(q.ladder) && q.ladder.length > 0, q.id + ' 缺 ladder');
-      // label 必须同时写明分辨率与帧率（用户要求「写为 1080p 60fps 这样的」），
-      // 只有 auto 档允许只写「自动（最高可用）」
-      assert.ok(q.id === 'auto' || /p\s*\d+fps/.test(q.label), q.id + ' 的 label 没写清分辨率+帧率：' + q.label);
+      // label 必须同时写明分辨率与帧率（用户要求「写为 1080p 60fps 这样的」）
+      assert.ok(/p\s*\d+fps/.test(q.label), q.id + ' 的 label 没写清分辨率+帧率：' + q.label);
     }
     for (const q of vsMod.LIVE_QUALITY_OPTIONS) {
       assert.strictEqual(typeof q.fpsCap, 'number', q.id + ' 缺 fpsCap');
       assert.ok(q.qn > 0, q.id + ' 缺 qn');
-      assert.ok(/p\s*\d+fps|自动/.test(q.label), q.id + ' 的 label 不明确：' + q.label);
+      assert.ok(/p\s*\d+fps/.test(q.label), q.id + ' 的 label 不明确：' + q.label);
     }
     // 480p/360p 只有 30fps 变体：必须锁 30，且阶梯里不能出现 60fps 专档（116/74）
     const low = vsMod.VIDEO_QUALITY_OPTIONS.filter((q) => q.id === '480p30' || q.id === '360p30');
@@ -172,15 +175,17 @@ async function main() {
   });
   test('video_settings: nextOptionId 轮转（首尾闭合，未知 id 从头开始）', () => {
     const list = vsMod.VIDEO_QUALITY_OPTIONS;
-    assert.strictEqual(vsMod.nextOptionId(list, 'auto'), list[1].id);
+    assert.strictEqual(vsMod.nextOptionId(list, list[0].id), list[1].id);
     assert.strictEqual(vsMod.nextOptionId(list, list[list.length - 1].id), list[0].id);
     assert.strictEqual(vsMod.nextOptionId(list, '不存在'), list[0].id);
     assert.strictEqual(vsMod.nextOptionId([], 'x'), 'x');
     assert.strictEqual(vsMod.nextOptionId(null, 'x'), 'x');
   });
   test('video_settings: dashLadderFor 直接取画质档自带阶梯（60fps 档已把 30fps 变体排前）', () => {
-    // 默认 auto：尽量高，60fps 专档在前
-    assert.deepStrictEqual(vsMod.dashLadderFor(vsMod.DEFAULT_VIDEO_SETTINGS), [116, 80, 74, 64, 32, 16]);
+    // 默认 720p60：阶梯从 720P60 专档起，不含 1080P（116/80）
+    assert.deepStrictEqual(vsMod.dashLadderFor(vsMod.DEFAULT_VIDEO_SETTINGS), [74, 64, 32, 16]);
+    // 显式选 1080p60 才给满阶梯
+    assert.deepStrictEqual(vsMod.dashLadderFor({ version: 2, videoQuality: '1080p60' }), [116, 80, 74, 64, 32, 16]);
     // 1080p30：30fps 变体 80 优先，116/74 留作保底（有些稿件只有 60fps 档）
     assert.deepStrictEqual(vsMod.dashLadderFor({ version: 2, videoQuality: '1080p30' }), [80, 116, 74, 64, 32, 16]);
     assert.deepStrictEqual(vsMod.dashLadderFor({ version: 2, videoQuality: '720p30' }), [64, 74, 32, 16]);
@@ -189,16 +194,21 @@ async function main() {
     assert.deepStrictEqual(vsMod.dashLadderFor({ version: 2, videoQuality: '480p30' }), [32, 16]);
   });
   test('video_settings: fpsCap / pixelBudget / liveQn 与选项表一致', () => {
+    // 'auto' 已不存在 → 归一成默认 720p60（fpsCap 0）
     assert.strictEqual(vsMod.videoFpsCapFor({ version: 2, videoQuality: 'auto' }), 0);
+    assert.strictEqual(vsMod.videoFpsCapFor({ version: 2, videoQuality: '720p60' }), 0);
     assert.strictEqual(vsMod.videoFpsCapFor({ version: 2, videoQuality: '1080p60' }), 0);
     assert.strictEqual(vsMod.videoFpsCapFor({ version: 2, videoQuality: '1080p30' }), 30);
     assert.strictEqual(vsMod.videoFpsCapFor({ version: 2, videoQuality: '720p30' }), 30);
-    assert.strictEqual(vsMod.pixelBudgetFor({ version: 2, videoQuality: 'auto' }), 1920 * 1080);
+    assert.strictEqual(vsMod.pixelBudgetFor({ version: 2, videoQuality: '1080p60' }), 1920 * 1080);
+    // 旧 'auto' 记录现在按 720p60 算像素预算，不会偷偷拉 1080p
+    assert.strictEqual(vsMod.pixelBudgetFor({ version: 2, videoQuality: 'auto' }), 1280 * 720);
     assert.strictEqual(vsMod.pixelBudgetFor({ version: 2, videoQuality: '720p60' }), 1280 * 720);
     assert.strictEqual(vsMod.pixelBudgetFor({ version: 2, videoQuality: '360p30' }), 640 * 360);
     assert.strictEqual(vsMod.liveQnFor({ version: 2, liveQuality: '480p30' }), 150);
     assert.strictEqual(vsMod.liveQnFor({ version: 2, liveQuality: '720p30' }), 250);
-    assert.strictEqual(vsMod.liveQnFor({ version: 2, liveQuality: 'auto' }), 10000);
+    // 直播「自动」档已移除：旧记录归一到默认 480p30（qn=150）
+    assert.strictEqual(vsMod.liveQnFor({ version: 2, liveQuality: 'auto' }), 250);
     assert.strictEqual(vsMod.liveFpsCapFor({ version: 2, liveQuality: '480p30' }), 30);
     assert.strictEqual(vsMod.liveFpsCapFor({ version: 2, liveQuality: '720p60' }), 0);
     assert.strictEqual(vsMod.liveFpsCapFor({ version: 2, liveQuality: 'auto' }), 0);
@@ -207,24 +217,26 @@ async function main() {
     assert.strictEqual(vsMod.videoQualityLabel({ version: 2, videoQuality: '720p60' }), '720p 60fps');
     assert.strictEqual(vsMod.videoQualityLabel({ version: 2, videoQuality: '1080p30' }), '1080p 30fps');
     assert.strictEqual(vsMod.liveQualityLabel({ version: 2, liveQuality: '480p30' }), '480p 30fps（省流）');
-    // 脏值退回第一项的 label，不抛
-    assert.strictEqual(vsMod.videoQualityLabel({ version: 2, videoQuality: 'zzz' }), vsMod.VIDEO_QUALITY_OPTIONS[0].label);
+    // 脏值退回默认档（720p60）的 label，不抛
+    assert.strictEqual(vsMod.videoQualityLabel({ version: 2, videoQuality: 'zzz' }), '720p 60fps');
   });
   test('video_settings: v1 老记录（分辨率+帧率两字段）迁移到合并画质档', () => {
     const mig = (vq, vf, lq, lf) => vsMod.normalizeVideoSettings({ version: 1, videoQuality: vq, videoFps: vf, liveQuality: lq, liveFps: lf });
     // 常见组合逐个映射，且迁移后不再保留旧字段
+    // 注意：这些用例只传了 videoQuality/videoFps，直播两个字段是 undefined，
+    // 查不到迁移表 → 落到 DEFAULT.liveQuality（v3.6.0 起是 720p60）
     const cases = [
-      [['auto', 'auto'], 'auto', '480p30'],
-      [['auto', '60'], '1080p60', '480p30'],
-      [['auto', '30'], '1080p30', '480p30'],
-      [['1080p', '60'], '1080p60', '480p30'],
-      [['1080p', '30'], '1080p30', '480p30'],
-      [['720p', 'auto'], '720p60', '480p30'],
-      [['720p', '30'], '720p30', '480p30'],
-      [['480p', 'auto'], '480p30', '480p30'],
+      [['auto', 'auto'], '720p60', '720p60'],
+      [['auto', '60'], '1080p60', '720p60'],
+      [['auto', '30'], '1080p30', '720p60'],
+      [['1080p', '60'], '1080p60', '720p60'],
+      [['1080p', '30'], '1080p30', '720p60'],
+      [['720p', 'auto'], '720p60', '720p60'],
+      [['720p', '30'], '720p30', '720p60'],
+      [['480p', 'auto'], '480p30', '720p60'],
       // 老记录里能选出「360p + 60fps」这种服务端不存在的组合 → 必须收成 360p30
-      [['360p', '60'], '360p30', '480p30'],
-      [['360p', '30'], '360p30', '480p30']
+      [['360p', '60'], '360p30', '720p60'],
+      [['360p', '30'], '360p30', '720p60']
     ];
     for (const [args, vq, lq] of cases) {
       const r = mig(args[0], args[1]);
@@ -238,9 +250,9 @@ async function main() {
     assert.strictEqual(mig('auto', 'auto', '720p', '60').liveQuality, '720p60');
     assert.strictEqual(mig('auto', 'auto', '480p', '60').liveQuality, '720p60');
     assert.strictEqual(mig('auto', 'auto', '720p', '30').liveQuality, '720p30');
-    assert.strictEqual(mig('auto', 'auto', 'auto', 'auto').liveQuality, 'auto');
-    // 认不出来的老组合一律落 auto，不能因为一条旧记录起不来
-    assert.strictEqual(vsMod.normalizeVideoSettings({ version: 1, videoQuality: '4k', videoFps: '144' }).videoQuality, 'auto');
+    assert.strictEqual(mig('auto', 'auto', 'auto', 'auto').liveQuality, '720p60');
+    // 认不出来的老组合一律落 720p60，不能因为一条旧记录起不来
+    assert.strictEqual(vsMod.normalizeVideoSettings({ version: 1, videoQuality: '4k', videoFps: '144' }).videoQuality, '720p60');
   });
 
   const feedMod = await import('../src/services/feed.js');
@@ -293,7 +305,8 @@ async function main() {
     isLiveReconnecting,
     LIVE_RECONNECT_ERR,
     SEEK_LAND_NEAR_MS,
-    SEEK_LAND_DEADLINE_MS
+    SEEK_LAND_DEADLINE_MS,
+    seekNoteDone
   } = await import('../src/services/play_session.js');
   const { fetchReplies, addReply, parseReplies, normalizeReply, replyType } = await import('../src/services/bili/reply.js');
   const { isAutotestSeedEnabled, readAutotestSeed } = await import('../src/services/autotest_seed.js');
@@ -2406,6 +2419,74 @@ async function main() {
     assert.strictEqual(normalizeState(0), 'error');
     assert.strictEqual(normalizeState('PLAYING'), 'error', '大小写敏感：不猜');
   });
+  /* ================= 「定位中…」收起判据 / seekNoteDone =================
+   * 真机 bug（2026-11-03 23:12:51）：自检 seek+20s 报 5023→6039。seek 本身成功
+   * （pos=25023、首帧 201ms），但 tick 的判据只看 `frames > frames0`，而 seek 下发后
+   * ~200ms 内**旧管线仍在出帧**（native 还在 debounce）→ 误判完成 → 下一轮 tick 用
+   * native 的旧位置覆盖落点，进度条往左弹一下。下面这些用例把这个边界钉死。 */
+  test('play_session: seekNoteDone 旧 bug 场景 —— pending 未落回时不论帧数涨没涨都不算完成', () => {
+    /* 真机那一刻的实测快照：frames 180→210（旧管线还在出帧），pos 仍停在 5023。 */
+    const st = { seekPending: true, frames: 210, positionMs: 5023 };
+    assert.strictEqual(
+      seekNoteDone(st, 180, 25023, SEEK_LAND_NEAR_MS, false),
+      false,
+      'seekPending 仍为 true 时绝不能判完成（这正是回弹的根因）'
+    );
+    assert.strictEqual(
+      seekNoteDone(st, 180, 25023, SEEK_LAND_NEAR_MS, true),
+      false,
+      '即使已经见过 pending，只要它还在 true 就不算完成'
+    );
+  });
+
+  test('play_session: seekNoteDone pending 已落回且位置到位 → 完成（即使帧数被 probe_reset 归零）', () => {
+    /* do_seek 收尾会 pb2_probe_reset() 把 frames 归零，重建后的累计帧数可能长期
+     * 小于 seek 前的值 → 光看帧数会等到 4s 超时，必须允许用"位置靠近"判完成。 */
+    const st = { seekPending: false, frames: 3, positionMs: 25023 };
+    assert.strictEqual(
+      seekNoteDone(st, 180, 25023, SEEK_LAND_NEAR_MS, true),
+      true,
+      '帧数远小于基线但位置已在落点附近、且 pending 落回 → 应判完成'
+    );
+  });
+
+  test('play_session: seekNoteDone 没见过 pending 但帧数涨且位置到位 → 完成（轮询可能跳过整个 pending 窗口）', () => {
+    /* 轮询 1s 一次、do_seek 600~1400ms，整段 pending 完全可能落在两次采样之间；
+     * 若死等 sawPending，这种情况会一直等到 4s 超时（用户体验=提示挂 4 秒）。 */
+    const st = { seekPending: false, frames: 240, positionMs: 24980 };
+    assert.strictEqual(seekNoteDone(st, 180, 25023, SEEK_LAND_NEAR_MS, false), true);
+  });
+
+  test('play_session: seekNoteDone 帧数涨了但位置还是旧值 → 绝不判完成（旧 bug 的判定条件）', () => {
+    const st = { seekPending: false, frames: 240, positionMs: 6039 };
+    assert.strictEqual(
+      seekNoteDone(st, 180, 25023, SEEK_LAND_NEAR_MS, false),
+      false,
+      'frames 涨了、pending 也没见过、位置还是旧值 → 必须继续等'
+    );
+  });
+
+  test('play_session: seekNoteDone 落点未知（target=0）时只看 pending + 帧数，不误判', () => {
+    const st = { seekPending: false, frames: 240, positionMs: 6039 };
+    assert.strictEqual(
+      seekNoteDone(st, 180, 0, SEEK_LAND_NEAR_MS, false),
+      false,
+      'target 未知 + 位置在旧值 → 不能判完成'
+    );
+    assert.strictEqual(
+      seekNoteDone(st, 180, 0, SEEK_LAND_NEAR_MS, true),
+      true,
+      '见过 pending 且它落回、帧数也涨了 → 可判完成'
+    );
+  });
+
+  test('play_session: seekNoteDone 容忍脏输入（null / 非对象 / 非数字）', () => {
+    assert.strictEqual(seekNoteDone(null, 0, 0, 0, false), false);
+    assert.strictEqual(seekNoteDone(undefined, 0, 0, 0, true), false);
+    assert.strictEqual(seekNoteDone(42, 0, 0, 0, true), false);
+    assert.strictEqual(seekNoteDone({ seekPending: false, frames: 'x', positionMs: 'y' }, 0, 0, 0, true), false);
+  });
+
   test('play_session: waitLanded 正常落点（等 seekPending 落 0 + 位置靠近目标）', async () => {
     /* 假时钟：now 不自动走，sleep 推进时间 —— 这样不真等 8 秒，也不依赖系统时钟。 */
     function clock() {
