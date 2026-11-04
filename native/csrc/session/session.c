@@ -1312,25 +1312,15 @@ static void apply_bt_avrcp_volume(void) {
     if (!g_w.bt_ctl_name[0]) return;
     if (g_w.bt_vol_applied == g_w.vol_pct) return;
     /*
-     * 【只升不降】绝不主动把耳机音量往下压。
+     * 【双向镜像，不再「只升不降」】
      *
-     * 蓝牙的 AVRCP 绝对音量由系统（hal-audio / 控制中心 / 耳机本体按键）统一管，
-     * 我们只需要在「我们要的值比当前高」时补一下（比如起播瞬间 hal-audio 还没
-     * 把 AVRCP 写到位）。反过来，一旦我们按一个**读错的值**（比如 conf 里滞后
-     * 的 0）往下压，系统不会帮我们纠正 —— 实测 `amixer -D bluealsa sset ... 0%`
-     * 之后等 15s，spk_volume 和 card1 Master 都纹丝不动，耳机就一直没声。
+     * 旧版只升不降是为了防「按读错的值（conf 里滞后的 0）把耳机压成
+     * 静音」。现在源头已经换成 card1 Master（hal-audio -s 立刻写它，
+     * 不存在读到旧值的可能），“读错”的前提消失了；而只升不降会让
+     * **系统滑杆向下调完全失效**（用户拉小了却不变小）。
+     * 所以改回双向：系统滑杆是唯一权威，耳机硬件音量跟随它。
+     * 耳机本体按键调音量会在 1s 内被这里拉回滑杆值。
      */
-    {
-        int cur = pb2_mixer_volume_read(g_w.bt_ctl_name);
-        if (cur >= 0 && g_w.vol_pct <= cur) {
-            g_w.bt_vol_applied = g_w.vol_pct;
-            if (cur != g_w.vol_pct) {
-                pb2_logf("audio: bt avrcp keep %d%% (target %d%% not higher) -> no write",
-                         cur, g_w.vol_pct);
-            }
-            return;
-        }
-    }
     snprintf(vol, sizeof(vol), "%d%%", g_w.vol_pct);
     argv[0] = (char *)"/usr/bin/amixer";
     argv[1] = (char *)"-D";
@@ -1356,6 +1346,24 @@ static void apply_bt_avrcp_volume(void) {
 
 static void apply_volume_now(void) {
     if (!g_w.vvol) return;
+
+    /*
+     * 【蓝牙路由：软件增益固定 1.0，音量全部交给 AVRCP】
+     *
+     * AVRCP 是耳机硬件音量，和软件增益是**串联**的：听感 = gain × AVRCP。
+     * 两边都设 76% 就是 58%，都设 20% 就是 4%（几乎没声音）。
+     * 所以蓝牙下软件增益必须保持 1.0，由 apply_bt_avrcp_volume()
+     * 把系统滑杆值镜像到 AVRCP。扬声器路由没有这个问题（只有一级）。
+     */
+    if (g_w.bt_present && g_w.adev[0]) {
+        if (g_w.vol_applied == 100) return;
+        g_object_set(g_w.vvol, "volume", 1.0, NULL);
+        g_w.vol_applied = 100;
+        pb2_logf("audio: volume slider %d%% -> bt: software gain kept 1.000 (AVRCP handles it)",
+                 g_w.vol_pct);
+        return;
+    }
+
     if (g_w.vol_applied == g_w.vol_pct) return;
     g_object_set(g_w.vvol, "volume", (double)g_w.vol_pct / 100.0, NULL);
     g_w.vol_applied = g_w.vol_pct;
@@ -1406,20 +1414,31 @@ static int read_route_volume(void) {
     int v;
 
     /*
-     * 顺序很重要：**Master 优先，AVRCP 只作兜底**。
+     * 【顺序必须按路由分流（2026-11-04 二次真机纠错）】
      *
-     * hal-audio -s N 会立刻写 card1 Master（numid54），约 4s 写 bluealsa AVRCP，
-     * 约 8~10s 才写 sys_config.conf。也就是说 Master 是「最快且始终跟随用户
-     * 意图」的那个量；而 AVRCP 可能被我们自己历史上的错误写入残留在 0%
-     * （实测抓到时就是 Master=88% / AVRCP=0%，耳机因此没声）。
-     * 先读 Master 就同时解决了「conf 滞后」和「AVRCP 脏值」两个问题。
+     * card1 Master 是**扬声器功放**的音量，card0 Playback Path 切到蓝牙后
+     * 它不再影响耳机输出，但 hal-audio -s N 仍会写它 —— 它就是**系统滑杆的唯一写入点**。
+     * 蓝牙路由下它与耳机硬件音量（AVRCP）可以长期不一致（实测抓到
+     * Master=0% / AVRCP=44%），因此它不能直接当软件增益，而是当「用户意图」
+     * 镜像到 AVRCP（见 apply_bt_avrcp_volume）。
+     *
+     * hal-audio -s N 的写入时机（实测）：Master 立刻、spk_volume 约 10~12s。
+     * **它从头到尾都不写 bluealsa AVRCP**（早前以为它写，其实是播放器自己写的）。
+     */
+    /*
+     * 【三次真机纠错后的结论】**两条路由都读 card1 Master**。
+     *
+     * 第一版：只读 conf 的 spk_volume。conf 最慢（~10s），“拉大音量→立刻点视频”
+     *          读到旧值 0 → 静音。
+     * 第二版：蓝牙路由改读 bluealsa AVRCP。AVRCP 是**耳机硬件音量**，
+     *          它和软件增益是串联的两级：读它当增益会变成
+     *          “0.76 × 0.76 = 58%”、“0.20 × 0.20 = 4%”的双重衰减，不随系统滑杆走。
+     * 第三版（现在）：滑杆意图 = Master（hal-audio -s 立刻写它），蓝牙下把
+     *          它**镜像到 AVRCP**，软件增益固定 1.0（见 apply_volume_now）。
+     *          听感 = AVRCP = Master，线性、无双重衰减。
      */
     v = pb2_mixer_volume_read(NULL); /* NULL = 读 card1 Master */
     if (v >= 0) return v;
-    if (g_w.bt_present && g_w.bt_ctl_name[0]) {
-        v = pb2_mixer_volume_read(g_w.bt_ctl_name);
-        if (v >= 0) return v;
-    }
     return read_sys_config_int("spk_volume", read_sys_config_int("bt_volume", 100));
 }
 
@@ -1443,9 +1462,9 @@ static void refresh_audio_route(void) {
     g_w.vol_check_ms = now;
 
     /*
-     * ① 音量：读**当前真实生效**的值（蓝牙 AVRCP / card1 Master），
-     *    不再读 sys_config.conf —— hal-audio 写 conf 有 8~10s 延迟，
-     *    用它当轮询来源会让「用户调完音量后 8 秒内播放器无反应」。
+     * ① 音量：读**系统滑杆**的当前值（card1 Master，立刻生效），
+     *    不读 sys_config.conf —— hal-audio 写 conf 有 10~12s 延迟。
+     *    蓝牙路由下这个值会被镜像到 AVRCP（音量在耳机硬件里生效）。
      */
     {
         int pct = read_route_volume();

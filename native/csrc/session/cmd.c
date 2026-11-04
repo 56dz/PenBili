@@ -565,11 +565,16 @@ static int mixer_get_pct_bluealsa(const char *ctl) {
  * 会 fork/exec（一次 ~25ms），只在 worker 线程调用。
  */
 int pb2_mixer_volume_read(const char *bt_ctl_name) {
-    int v;
-
     if (bt_ctl_name && bt_ctl_name[0]) {
-        v = mixer_get_pct_bluealsa(bt_ctl_name);
-        if (v >= 0) return v;
+        /*
+         * 蓝牙路由：只读 bluealsa AVRCP，**绝不回退到 Master**。
+         * Master 是 card1 扬声器功放的音量，Playback Path 切到蓝牙后它
+         * 不再影响耳机输出，两边可以长期不一致（实测 Master=0% /
+         * AVRCP=44%）。旧版在这里 fallback 到 Master，导致蓝牙下读到 0
+         * 并把软件增益归零 —— 用户听到的就是「连上耳机没声音」。
+         * 读不到就返回 -1，由调用方自己决定怎么兜底。
+         */
+        return mixer_get_pct_bluealsa(bt_ctl_name);
     }
     return mixer_get_pct(1, "Master");
 }
