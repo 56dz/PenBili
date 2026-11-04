@@ -226,7 +226,7 @@
         </div>
         <div class="mine-row">
           <text class="mine-label">PenBili</text>
-          <text class="mine-value">v3.5.3 · {{ profile ? '已登录' : '匿名' }}</text>
+          <text class="mine-value">v3.5.4 · {{ profile ? '已登录' : '匿名' }}</text>
         </div>
 
         <!-- 关于：项目信息（GitHub / 开源协议 / 免责）。

@@ -4,9 +4,9 @@
 
 这是一款跑在有道词典笔上的 B 站客户端，用有道自家的 Falcon 小程序框架（QuickJS + Vue 2 单文件组件）写成。屏幕只有 960×266 点，指甲盖大小，所以我按 iPad 版 B 站的骨架重做了界面，把推荐、搜索、播放、评论、图文、直播全塞进这一个页面里。
 
-当前版本 `3.5.3`，只支持 **X6 Pro**（RK3562）。X5 分支已停止维护。
+当前版本 `3.5.4`，只支持 **X6 Pro**（RK3562）。X5 分支已停止维护。
 
-![version](https://img.shields.io/badge/version-3.5.3-blue)
+![version](https://img.shields.io/badge/version-3.5.4-blue)
 ![license](https://img.shields.io/badge/license-GPL--3.0-green)
 
 ---
@@ -238,7 +238,7 @@ npm ci
 # 交叉编译 native（产出三个 .so 到 libs/）
 npm run native
 
-# 打 AMR 包（产出 8002026110200001.3_5_3.amr，约 217 KB）
+# 打 AMR 包（产出 8002026110200001.3_5_4.amr，约 217 KB）
 npm run build
 
 # 单测
@@ -258,8 +258,8 @@ npm test
 ## 安装
 
 ```bash
-adb push 8002026110200001.3_5_3.amr /tmp/
-adb shell "miniapp_cli install /tmp/8002026110200001.3_5_3.amr"   # 必须返回 "ret":0
+adb push 8002026110200001.3_5_4.amr /tmp/
+adb shell "miniapp_cli install /tmp/8002026110200001.3_5_4.amr"   # 必须返回 "ret":0
 
 # 冷启动：先切桌面再起目标页，保证重建页面实例
 adb shell "miniapp_cli start 8080222437664451"

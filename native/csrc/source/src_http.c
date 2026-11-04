@@ -240,6 +240,26 @@ static void dump_argv_full(const char *tag, char *const argv[]) {
  * 起播本来就从头开始，K=0 无差值。探测失败（网络抖动/ffprobe 不存在）时
  * 返回 -1，调用方退回「音频也用 T」，即旧行为（有静音但不错位）。
  */
+/*
+ * 给一路 HTTP 输入追加自动重连参数（都是 per-input 选项，调用方须在
+ * 每个 `-i` 之前调用一次）。理由见调用点长注释。
+ *
+ * 注意 **不要** 加 `-reconnect_at_eof 1`：点播 m4s 正常读完就是 EOF，
+ * 重连会把它从头再拉一遍，表现为「播完自动重播」。
+ */
+static void add_reconnect_args(char **argv, int *ip) {
+    int i = *ip;
+    argv[i++] = (char *)"-reconnect";
+    argv[i++] = (char *)"1";
+    argv[i++] = (char *)"-reconnect_streamed";
+    argv[i++] = (char *)"1";
+    argv[i++] = (char *)"-reconnect_delay_max";
+    argv[i++] = (char *)"5";
+    argv[i++] = (char *)"-reconnect_on_http_error";
+    argv[i++] = (char *)"4xx,5xx";
+    *ip = i;
+}
+
 static long long probe_video_keyframe_ms(const char *input, const char *ua, const char *ref,
                                         long long targetMs) {
     char cmd[1024];
@@ -424,6 +444,20 @@ static pid_t spawn_ffmpeg(const char *fifo, const char *input, const char *input
     }
     argv[i++] = (char *)"-ss";
     argv[i++] = ss;
+    /*
+     * 【音频/视频中途断流】B 站的点播音视频来自**两台不同的 CDN 主机**
+     * （实测 2026-11-04：视频 upos-sz-mirrorbd.bilivideo.com、音频
+     * upos-sz-estgcos.bilivideo.com），任意一路的 TCP 连接在中途没了后续
+     * 数据，ffmpeg 默认**不报错也不重连** —— 现场日志里 err-*.fifo 是 0 字节，
+     * 而 gst 侧的 abytes 冻结 45 秒、画面照常，用户听到「播到一半声音没了」。
+     *
+     * 这些都是 per-input 的 HTTP 选项，两路都必须写一遍（同 -ss/-headers）。
+     *   -reconnect          断开后自动重连
+     *   -reconnect_streamed 作用于不可 seek 的流（m4s 就是流式）
+     *   -reconnect_delay_max 退避上限；给 5s，太大会让用户干等
+     *   -reconnect_at_eof 0 点播源正常结束时**不能**重连，否则会从头重播
+     */
+    add_reconnect_args(argv, &i);
     argv[i++] = (char *)"-i";
     argv[i++] = (char *)input;
 
@@ -466,6 +500,8 @@ static pid_t spawn_ffmpeg(const char *fifo, const char *input, const char *input
             argv[i++] = (char *)"-ss";
             argv[i++] = ss;
         }
+        /* 第二路同样要重连参数，理由见第一路前的长注释（per-input 选项） */
+        add_reconnect_args(argv, &i);
         argv[i++] = (char *)"-i";
         argv[i++] = (char *)input2;
     }

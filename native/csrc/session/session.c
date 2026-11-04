@@ -345,6 +345,17 @@ typedef struct {
     long long live_reconnect_at_ms;
     int bt_present;         /* 上次探测时蓝牙是否可用（用于检测插拔） */
     int bt_vol_applied;     /* 已下发给耳机的 AVRCP 音量（-1 = 未下发） */
+    /*
+     * 上一次采样到的 card1 Master（系统滑杆 / 扬声器功放音量）。-1 = 尚未采样。
+     *
+     * 【为什么需要它】蓝牙路由下的音量权威必须是**耳机自己的 AVRCP**：
+     * 用户在耳机上调音量、或者上次用扬声器时把 Master 留成 0，都会让
+     * Master 和 AVRCP 长期不一致（真机抓到 Master=0% / AVRCP=50%）。
+     * 如果起播时拿 Master 去覆盖耳机，就会「点开视频音量突然变 0%」。
+     * 所以只有当 Master **相对上次采样发生了变化**（= 用户真的动了系统
+     * 滑杆）时，才把 Master 推给耳机；否则一律以 AVRCP 为准。
+     */
+    int master_last;
     char bt_ctl_name[64];   /* 耳机的 mixer 控件名，形如 "Redmi Buds 6 - A2DP" */
     /* 蓝牙音画偏移补偿（ns，正值 = 视频提前），见 PB2_BT_VIDEO_TS_OFFSET_MS */
     long long bt_ts_offset_ns;
@@ -479,6 +490,11 @@ typedef struct {
     long long pause_started_ms;
     long long last_pos_ms;
     unsigned long long last_abytes;
+    /* 【音频停摆看门狗】见 check_audio_stall() */
+    unsigned long long audio_stall_ab;      /* 上次看到的 abytes */
+    long long audio_stall_ms;                /* abytes 最后一次变化的时刻 */
+    unsigned long long audio_stall_frames0;  /* abytes 最后一次变化时的视频帧数 */
+    int audio_stall_heals;                   /* 本会话已自愈次数 */
     long long last_plane_ms;
     long long last_marker_ms;
     long long last_fps_ms;
@@ -502,6 +518,17 @@ static pthread_mutex_t g_start_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_done_cv = PTHREAD_COND_INITIALIZER;
 
 /* ============================ 工具 ============================ */
+
+/*
+ * 【音频停摆看门狗】阈值与配额。
+ *
+ * 8 秒：正常播放时 abytes 每秒涨 ~16KB（128kbps AAC），8 秒不动已经远超
+ * 任何正常的调度抖动；而一次误判的代价是「原地 seek」——本身是可接受的
+ * 轻微卡顿，所以宁可早一点救。实测故障时音频停了 45 秒都没人管。
+ */
+#define PB2_AUDIO_STALL_MS     8000
+#define PB2_AUDIO_STALL_FRAMES 30   /* 同期视频至少涨这么多帧才算「只有音频停」 */
+#define PB2_AUDIO_STALL_HEALS  2    /* 每会话最多自愈次数 */
 
 static char *xstrdup(const char *s) {
     size_t n;
@@ -1266,8 +1293,28 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
         g_w.vvol = gst_bin_get_by_name((GstBin *)bin, "vvol");
         g_w.vol_applied = -1;
         if (g_w.vvol) {
+            /*
+             * 【蓝牙路由：采纳耳机自己的 AVRCP，绝不回写】
+             *
+             * 这条路径在「插拔耳机触发重建」「seek 重建」时都会走到，此时
+             * g_w.vol_pct 还停在上一跳的值（可能是扬声器留下的 0）。如果照
+             * 旧代码无条件下发 AVRCP，就会把用户真实的耳机音量抹掉 ——
+             * 用户看到的现象是「点开视频音量自动变 0%，重新拉一下才有声」。
+             * 读回来当权威，并把 bt_vol_applied 对齐成同值，让
+             * apply_bt_avrcp_volume() 自然早退（不下发）。
+             */
+            if (g_w.bt_present && g_w.adev[0]) {
+                int av = g_w.bt_ctl_name[0] ? pb2_mixer_volume_read(g_w.bt_ctl_name) : -1;
+                if (av >= 0) {
+                    g_w.vol_pct = av;
+                    g_w.bt_vol_applied = av;
+                    pb2_logf("audio: bt volume adopted from AVRCP %d%% (not overwriting)", av);
+                } else {
+                    g_w.bt_vol_applied = -1;
+                }
+                g_w.master_last = pb2_mixer_volume_read(NULL); /* 滑杆基线 */
+            }
             apply_volume_now();
-            apply_bt_avrcp_volume();
         } else {
             pb2_logf("audio: no volume element (vvol) in branch, volume control disabled");
         }
@@ -1467,11 +1514,41 @@ static void refresh_audio_route(void) {
      *    蓝牙路由下这个值会被镜像到 AVRCP（音量在耳机硬件里生效）。
      */
     {
-        int pct = read_route_volume();
-        if (pct >= 0 && pct != g_w.vol_pct) {
-            g_w.vol_pct = pct;
-            apply_volume_now();
-            apply_bt_avrcp_volume();
+        int master = pb2_mixer_volume_read(NULL); /* 系统滑杆（card1 Master） */
+
+        if (g_w.bt_present && g_w.adev[0]) {
+            /*
+             * 【蓝牙：滑杆变化才算用户意图】
+             *
+             * Master 在蓝牙路由下不代表耳机音量（它是扬声器功放），只有
+             * 「相对上次采样变了」才能证明用户刚动过系统滑杆。没变时
+             * 一律跟随耳机自己的 AVRCP（耳机按键调音量也能生效）。
+             */
+            int slider_moved = (master >= 0 && master != g_w.master_last);
+            int av = -1;
+            if (master >= 0) g_w.master_last = master;
+            if (g_w.bt_ctl_name[0]) av = pb2_mixer_volume_read(g_w.bt_ctl_name);
+
+            if (slider_moved) {
+                g_w.vol_pct = master;
+                apply_volume_now();
+                apply_bt_avrcp_volume(); /* 唯一会写耳机的路径 */
+            } else if (av >= 0 && av != g_w.vol_pct) {
+                g_w.vol_pct = av;
+                g_w.bt_vol_applied = av;
+                apply_volume_now();
+                pb2_logf("audio: bt volume adopted from AVRCP (headset key) %d%%", av);
+            }
+        } else {
+            int pct = (master >= 0)
+                          ? master
+                          : read_sys_config_int("spk_volume",
+                                                read_sys_config_int("bt_volume", 100));
+            g_w.master_last = master;
+            if (pct >= 0 && pct != g_w.vol_pct) {
+                g_w.vol_pct = pct;
+                apply_volume_now();
+            }
         }
     }
 
@@ -2470,6 +2547,10 @@ static void do_open(pb2_open_req_t *req) {
     g_w.first_frame_retries = 0;
     g_w.seek_frame_retries = 0;
     g_w.seek_retry_issued = 0; /* 每个新会话重新给满自愈配额 */
+    g_w.audio_stall_ab = 0;
+    g_w.audio_stall_ms = 0;
+    g_w.audio_stall_frames0 = 0;
+    g_w.audio_stall_heals = 0; /* 每个新会话重新给满音频自愈配额 */
     /* 【P1-18】帧率上限：0 = 不限制，>0 时在 mppvideodec 之后插 videorate max-rate */
     g_w.fps_cap = req->fpsCap;
 
@@ -2520,20 +2601,39 @@ static void do_open(pb2_open_req_t *req) {
         pb2_logf("audio: open with default pcm (speaker)");
     }
     /*
-     * 音量来源：**读当前真实生效的控件**（蓝牙 = bluealsa AVRCP，喇叭 = card1
-     * Master），读不到才退回 sys_config.conf。
+     * 音量来源见下面那段（已改成按路由分流，蓝牙以 AVRCP 为权威）。
      *
-     * 【为什么不再信 spk_volume（2026-11-04 真机实测纠错）】
-     * 早前这里写的是「永远读 spk_volume」，依据是「hal-audio -s 只写 spk_volume」。
-     * 实测发现那句话只对了一半：hal-audio -s N 会**同时**写
-     *   - card1 Master（立刻）
-     *   - bluealsa AVRCP 绝对音量（约 4s）
-     *   - sys_config.conf 的 spk_volume（约 8~10s，最慢）
-     * 所以 conf 是滞后的那个。用户「拉大音量 → 立刻点视频」时 conf 里还是旧值
-     * （往往是上一次的 0），起播读到 0 → 软件增益 0 + AVRCP 0% → 耳机没声。
+     * 【2026-11-04 真机实测，三次纠错】
+     *   1) 只读 sys_config.conf 的 spk_volume：conf 落盘要 1~12s，读到旧值 0 → 静音。
+     *   2) 蓝牙改读 bluealsa AVRCP：AVRCP 与软件增益串联 → 0.76×0.76 = 58% 双重衰减。
+     *   3) 两条路由都读 card1 Master 并镜像给耳机：**错**。Master 是扬声器功放，
+     *      蓝牙路由下可以和耳机音量长期不一致（实测 Master=0% / AVRCP=50%），
+     *      起播把 AVRCP 覆盖成 0% → 用户「点开视频音量自动变 0%，重拉才有声」。
+     *   现在：扬声器 = Master；蓝牙 = AVRCP 为权威，只有滑杆真的动了才镜像过去。
+     */
+    /*
+     * 音量基线：
+     *   - 扬声器路由：vol_pct = 系统滑杆（card1 Master），软件增益跟随它；
+     *   - 蓝牙路由：vol_pct = **耳机自己的 AVRCP**，软件增益固定 1.0。
+     * 起播时绝不拿 Master 去覆盖 AVRCP —— 见 master_last 的注释。
      */
     g_w.vol_pct = read_route_volume();
     g_w.vol_applied = -1;
+    g_w.master_last = pb2_mixer_volume_read(NULL);
+    if (g_w.bt_present && g_w.adev[0]) {
+        int av = g_w.bt_ctl_name[0] ? pb2_mixer_volume_read(g_w.bt_ctl_name) : -1;
+        if (av >= 0) {
+            g_w.vol_pct = av;
+            g_w.bt_vol_applied = av; /* 与耳机实际值一致 -> 起播不重复下发 */
+            pb2_logf("audio: volume authority = AVRCP %d%% (slider baseline %d%%)",
+                     av, g_w.master_last);
+        } else {
+            g_w.bt_vol_applied = -1;
+            pb2_logf("audio: AVRCP unreadable -> fallback to slider %d%%", g_w.vol_pct);
+        }
+    } else {
+        g_w.bt_vol_applied = -1;
+    }
     g_w.vol_check_ms = pb2_now_ms();
     g_w.bt_check_ms = pb2_now_ms();
     g_w.route_pending = 0;
@@ -2693,12 +2793,48 @@ static void do_open(pb2_open_req_t *req) {
         pb2_logf("get_state -> %d cur=%d pend=%d (+%lldms)", sr, cur, pend,
                  pb2_now_ms() - t0);
         if (sr != GST_STATE_CHANGE_SUCCESS) {
-            pb2_logf("OPEN failed: preroll %s (sr=%d) -> error",
-                     sr == GST_STATE_CHANGE_ASYNC ? "timeout" : "failure", sr);
-            pb2_stats_patch_error(&g_w.stats, PB2_E_TIMEOUT, "open: preroll timeout");
-            pb2_stats_patch_state(&g_w.stats, PB2_STATE_ERROR);
-            teardown_pipeline();
-            return;
+            /*
+             * 【误判「播放错误」的真凶】start gate 已经等到「视频有帧 + 音频
+             * 分支就绪」才会走到这里，preroll 事实上早就完成了。但 desc 是
+             * 没有 sink 的动态管线（分支全靠 pad-added 建），
+             * gst_element_get_state() 对它会**瞬态返回 FAILURE**：
+             *
+             *   真机日志（pid 26953）：
+             *     start gate: both ready in 2888ms (v=1/1 frames=14 a=1/1)
+             *     set_state(PLAYING) -> 2
+             *     get_state -> 0 cur=3 pend=4     ← 1ms，cur=PAUSED/pend=PLAYING
+             *     OPEN failed: preroll failure (sr=0) -> error
+             *
+             * cur/pend 说明状态机正在往 PLAYING 走。这里如果照旧判失败，
+             * teardown 会拆掉刚建好的分支再重建 —— 重建链里有一次丢掉了
+             * 音频分支，表现就是「播到一半声音没了」（ab 冻结、画面继续）。
+             *
+             * 因此：只要「视频分支有帧 + 音频分支就绪（或本来就不要音频）+
+             * 状态机不是往 NULL/READY 退」就认可它，并明确打点。
+             */
+            int want_a = req->audio ? 1 : 0;
+            int v_ok = g_w.vbranch &&
+                       atomic_load_explicit(&g_w.probe.frames, memory_order_relaxed) > 0;
+            int a_ok = g_w.abranch || !want_a;
+            int heading_playing = (cur == GST_STATE_PLAYING) ||
+                                  (pend == GST_STATE_PLAYING) ||
+                                  (cur == GST_STATE_PAUSED && pend == GST_STATE_VOID_PENDING);
+            if (v_ok && a_ok && heading_playing) {
+                pb2_logf("get_state sr=%d cur=%d pend=%d but frames flowing "
+                         "(v=%d a=%d) -> treat as playing",
+                         sr, cur, pend, g_w.vbranch ? 1 : 0, g_w.abranch ? 1 : 0);
+            } else {
+                pb2_logf("OPEN failed: preroll %s (sr=%d cur=%d pend=%d v=%d/%d a=%d/%d) -> error",
+                         sr == GST_STATE_CHANGE_ASYNC ? "timeout" : "failure", sr,
+                         cur, pend,
+                         g_w.vbranch ? 1 : 0,
+                         (long long)atomic_load_explicit(&g_w.probe.frames, memory_order_relaxed),
+                         g_w.abranch ? 1 : 0, want_a);
+                pb2_stats_patch_error(&g_w.stats, PB2_E_TIMEOUT, "open: preroll timeout");
+                pb2_stats_patch_state(&g_w.stats, PB2_STATE_ERROR);
+                teardown_pipeline();
+                return;
+            }
         }
     }
 
@@ -2979,6 +3115,11 @@ static void do_seek(long long target_ms) {
          * （真机实测：21678 → 21808 → 21814 → 21820 每 6s 一次）。
          */
         g_w.vbranch_ready_ms = 0;
+        /* 同一次会话内的 seek 不清 quota，但必须清掉计时基准：
+         * 重建期间 abytes 本来就不动，不清会被看门狗当成又一次停摆。 */
+        g_w.audio_stall_ab = 0;
+        g_w.audio_stall_ms = 0;
+        g_w.audio_stall_frames0 = 0;
         if (!g_w.seek_retry_issued) g_w.seek_frame_retries = 0;
         g_w.seek_retry_issued = 0;
         g_w.vsrc_logged = 0;
@@ -3810,6 +3951,77 @@ static void check_src_after_first_frame(void) {
 }
 
 /*
+ * 【音频停摆看门狗】视频在跑、音频分支却拿不到数据时自动救回来。
+ *
+ * 判据刻意保守：必须「视频帧数同期涨了 >= 30 帧」才算数，这样整体卡死
+ * （网络断了 / 源死了）不会误触发 —— 那种情况由 check_first_frame 的
+ * 源存活探测和 bus 错误路径负责。
+ *
+ * 救法用「原地 seek」而不是重建管线：seek 走的是已经验证可靠的路径
+ * （重开 ffmpeg + 重建管线 + 落点校验），端到端 1~2s，比让用户
+ * 一直没声音好得多。
+ */
+static void check_audio_stall(void) {
+    unsigned long long ab;
+    unsigned long long fr;
+    long long now;
+
+    if (!g_w.pipeline_alive || !g_w.pipe) return;
+    if (!g_w.abranch) return;                 /* 根本没有音频分支（无音轨/建失败） */
+    if (!g_w.req || !g_w.req->audio) return;  /* 本来就要求不要音频 */
+    if (g_w.paused || g_w.eos) return;
+    if (g_w.is_live) return;                  /* 直播自己有 live_reconnect */
+    if (g_w.frame_epoch_ms > 0) return;       /* 还在等首帧，交给 check_first_frame */
+    if (g_w.seek_pending) return;             /* 已经在重建了 */
+    if (g_w.audio_stall_heals >= PB2_AUDIO_STALL_HEALS) return;
+
+    now = pb2_now_ms();
+    ab = atomic_load_explicit(&g_w.probe.abytes, memory_order_relaxed);
+    fr = atomic_load_explicit(&g_w.probe.frames, memory_order_relaxed);
+
+    if (ab == 0) return;                      /* 音频还没开始，正常 */
+    if (ab != g_w.audio_stall_ab) {
+        /* 音频在推进：静默刷新基准。
+         * 只在真的冻结过 >= 1s 时才打日志 —— 本函数每几十毫秒跑一次，
+         * abytes 每个 tick 都在涨，无条件打日志会把日志刷爆
+         * （实测 5000+ 行/分钟，把真正有用的行全淹了）。 */
+        if (g_w.audio_stall_ab != 0 && g_w.audio_stall_ms > 0 &&
+            now - g_w.audio_stall_ms >= 1000) {
+            pb2_logf("audio stall: resumed after %lldms (ab=%llu)",
+                     now - g_w.audio_stall_ms, ab);
+        }
+        g_w.audio_stall_ab = ab;
+        g_w.audio_stall_ms = now;
+        g_w.audio_stall_frames0 = fr;
+        return;
+    }
+
+    if (g_w.audio_stall_ms <= 0) {
+        g_w.audio_stall_ms = now;
+        g_w.audio_stall_frames0 = fr;
+        return;
+    }
+    if (now - g_w.audio_stall_ms < PB2_AUDIO_STALL_MS) return;
+
+    /* 视频同期必须还在动，否则是整体卡死，不归这里管 */
+    if (fr - g_w.audio_stall_frames0 < (unsigned long long)PB2_AUDIO_STALL_FRAMES) return;
+
+    g_w.audio_stall_heals++;
+    pb2_logf("audio stall: abytes frozen %llu for %lldms while video advanced "
+             "%llu frames -> in-place seek to re-sync audio (heal %d/%d, target=%lldms)",
+             ab, now - g_w.audio_stall_ms,
+             fr - g_w.audio_stall_frames0,
+             g_w.audio_stall_heals, PB2_AUDIO_STALL_HEALS, g_w.last_pos_ms);
+
+    g_w.seek_target = g_w.last_pos_ms > 0 ? g_w.last_pos_ms : 0;
+    g_w.seek_pending = 1;
+    g_w.seek_last_ms = pb2_now_ms() - PB2_SEEK_DEBOUNCE_MS - 1;
+    g_w.audio_stall_ms = now;
+    g_w.audio_stall_frames0 = fr;
+    pb2_stats_patch_seek(&g_w.stats, 1, g_w.seek_target);
+}
+
+/*
  * /tmp/mp3playing 保活重写。
  * system_sleep_wakeup 只看文件是否存在，但某些实现会按 mtime 判断，
  * 所以每 20s 重写一次（open+close 更新 mtime），代价可忽略。
@@ -4243,6 +4455,8 @@ static void *worker_main(void *arg) {
             check_first_frame();
             /* 【P1-1】首帧之后源中途死掉 → 放掉 hold_fd 让 demuxer 发 EOS */
             check_src_after_first_frame();
+            /* 【音频停摆看门狗】视频在跑但音频字节冻结 → 原地 seek 救回来 */
+            check_audio_stall();
             /* 【P1-4】直播断流检测 + 到点自动重连（点播路径第一行就 return） */
             check_live_reconnect();
             keep_marker();
