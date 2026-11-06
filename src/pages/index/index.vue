@@ -11,8 +11,11 @@
       <div class="upd-left">
         <div class="upd-head">
           <text class="upd-title">{{ updHead }}</text>
-          <text v-if="upd.release" class="upd-ver">{{ upd.release.tag }}</text>
-          <text v-if="updSizeText" class="upd-size">{{ updSizeText }}</text>
+          <!-- 版本徽标与包大小只在「真的有一个待装的包」时才有意义：
+               已是最新 / 检查失败这两种状态下标题里已经有版本号，再挂一枚
+               同样的 v3.5.5 徽标就是自己跟自己重复，右上也挤。 -->
+          <text v-if="updShowMeta && upd.release" class="upd-ver">{{ upd.release.tag }}</text>
+          <text v-if="updShowMeta && updSizeText" class="upd-size">{{ updSizeText }}</text>
         </div>
         <text class="upd-sub">{{ upd.message }}</text>
         <!-- 更新说明可上下滑动：发布说明经常上千字，266px 屏只放得下十来行。
@@ -901,6 +904,11 @@ export default {
       return this.upd.release ? '发现新版本 ' + this.upd.release.tag : '检查更新';
     },
     // 包大小（下载前告诉用户要下多少，266px 屏没有进度条，这是唯一的量级提示）
+    // 版本徽标 / 包大小只在「有包可装」的阶段显示（见模板注释）
+    updShowMeta() {
+      const st = this.upd.stage;
+      return st === 'ready' || st === 'downloading' || st === 'installing' || st === 'done';
+    },
     updSizeText() {
       const r = this.upd.release;
       if (!r || !(r.assetSize > 0)) return '';
@@ -3013,7 +3021,9 @@ export default {
           stage: 'latest',
           message: '当前 v' + APP_VERSION + ' 已是线上最新的正式版本（' + r.release.tag + '）',
           release: r.release,
-          lines: []
+          // 已是最新时也把**本版本**的发布说明摆出来 —— 用户点「检查更新」多半
+          // 就是想看看这版改了什么，左栏空着一句占位反而像坏了。
+          lines: bodyLines(r.release.body)
         });
         return;
       }

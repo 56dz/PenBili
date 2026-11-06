@@ -199,6 +199,15 @@ export function bodyLines(body, maxLines) {
     out.push(s);
   }
   while (out.length && out[out.length - 1] === '') out.pop();
+
+  /* 发布说明的第一行经常是 `## v3.5.5` 这种版本标题 —— 弹窗标题栏里已经有
+   * 「发现新版本 v3.5.5」了，再在正文顶部挂一行裸版本号纯属重复，
+   * 而且 266px 高屏上白吃一整行。只吃掉**开头**那一行孤零零的版本号，
+   * 后面的 `## 检查更新` 之类小节标题照常保留。 */
+  if (out.length && /^v?\d+(\.\d+){0,3}$/i.test(out[0].trim())) {
+    out.shift();
+    while (out.length && out[0] === '') out.shift();
+  }
   return out;
 }
 

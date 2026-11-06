@@ -423,8 +423,10 @@ async function main() {
       '正文段落'
     ].join('\n');
     const lines = upd.bodyLines(md);
-    assert.strictEqual(lines[0], 'v3.6.0');
-    assert.ok(lines.indexOf('1. 修复') > 0, '## 标题的井号必须去掉');
+    // 开头的 `# v3.6.0` 是裸版本号行，会被 bodyLines 吃掉（弹窗标题栏已有版本号），
+    // 所以第一行是第一个真正的小节标题。
+    assert.strictEqual(lines[0], '1. 修复');
+    assert.ok(lines.indexOf('v3.6.0') === -1, '开头裸版本号行必须被吃掉');
     assert.ok(lines.indexOf('\u00b7 粗体 条目') > 0, '列表符变中点，粗体星号去掉');
     assert.ok(lines.indexOf('\u00b7 代码 条目') > 0, '行内反引号去掉');
     assert.ok(lines.indexOf('引用行') > 0, '引用符去掉');
@@ -440,6 +442,22 @@ async function main() {
     assert.ok(capped.length < lines.length, 'maxLines 必须真的裁短（不能原样返回）');
     assert.deepStrictEqual(upd.bodyLines(''), []);
     assert.deepStrictEqual(upd.bodyLines(null), []);
+  });
+
+  test('updater: bodyLines 吃掉开头那行裸版本号（`## v3.5.5`）', () => {
+    // 真机截图：弹窗标题「已是最新版本 · v3.5.5」，正文第一行又是孤零零的
+    // 「v3.5.5」，纯重复还白占一行（266px 屏只有十来行）。
+    const md = '# v3.5.5\n\n## 检查更新\n\n启动后静默检查。';
+    const lines = upd.bodyLines(md);
+    assert.strictEqual(lines[0], '检查更新', '开头裸版本号必须被吃掉');
+    assert.ok(lines.indexOf('v3.5.5') === -1, '正文里不该再出现裸版本号行');
+    // 不带 v 前缀也要认，且只吃开头那一行
+    const l2 = upd.bodyLines('3.5.4\n正文第一段\nv3.5.3 是之前的版本');
+    assert.strictEqual(l2[0], '正文第一段');
+    assert.ok(l2.some((x) => x.indexOf('v3.5.3') >= 0), '只吃开头，正文中的版本号必须保留');
+    // 开头如果是真正的小节标题，不能误伤
+    const l3 = upd.bodyLines('## 检查更新\n正文');
+    assert.strictEqual(l3[0], '检查更新');
   });
 
   test('updater: dayKey 用本地时区（不是 UTC）', () => {
@@ -490,6 +508,26 @@ async function main() {
     assert.strictEqual(upd.extractFilePath({ result: null }), '');
     assert.strictEqual(upd.extractFilePath(null), '');
     assert.strictEqual(upd.extractFilePath(42), '');
+  });
+
+  test('updater: 已是最新时也要展示本版本说明，且不重复挂版本徽标', () => {
+    // 两个真实的小毛病，都是真机截图看出来的：
+    // 1. 「已是最新版本 · v3.5.5」标题后面又跟一枚 v3.5.5 徽标 + 224 KB 包大小
+    //    —— 标题里已经有版本号，徽标是自说自话，而且 960x266 上很挤。
+    // 2. latest 分支把 lines 置空，左栏只剩「（本版本没有填写更新说明）」，
+    //    但 v3.5.5 明明有说明 —— 用户点检查更新往往就是想看这版改了什么。
+    const src = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'pages', 'index', 'index.vue'), 'utf8');
+    const iLatest = src.indexOf("stage: 'latest'");
+    assert.ok(iLatest > 0, '找不到 latest 分支');
+    const tail = src.slice(iLatest, iLatest + 900);
+    assert.ok(/lines: bodyLines\(r\.release\.body\)/.test(tail), 'latest 分支必须把本版本说明填进 lines');
+    assert.ok(!/lines: \[\]/.test(tail), 'latest 分支不能再把 lines 清空');
+    assert.ok(/updShowMeta && upd\.release/.test(src), '版本徽标必须受 updShowMeta 控制');
+    assert.ok(/updShowMeta\(\) \{/.test(src), 'updShowMeta 必须是一个 computed');
+    const iMeta = src.indexOf('updShowMeta() {');
+    const metaBody = src.slice(iMeta, iMeta + 260);
+    assert.ok(/st === 'ready'/.test(metaBody), 'ready 时显示徽标');
+    assert.ok(!/st === 'latest'/.test(metaBody), 'latest 时不显示徽标');
   });
 
   test('updater: 安装必须走 native installAmr（jsapi 没有 pm 模块）', () => {
