@@ -4,9 +4,9 @@
 
 这是一款跑在有道词典笔上的 B 站客户端，用有道自家的 Falcon 小程序框架（QuickJS + Vue 2 单文件组件）写成。屏幕只有 960×266 点，指甲盖大小，所以我按 iPad 版 B 站的骨架重做了界面，把推荐、搜索、播放、评论、图文、直播全塞进这一个页面里。
 
-当前版本 `3.5.4`，只支持 **X6 Pro**（RK3562）。X5 分支已停止维护。
+当前版本 `3.5.5`，只支持 **X6 Pro**（RK3562）。X5 分支已停止维护。
 
-![version](https://img.shields.io/badge/version-3.5.4-blue)
+![version](https://img.shields.io/badge/version-3.5.5-blue)
 ![license](https://img.shields.io/badge/license-GPL--3.0-green)
 
 ---
@@ -190,6 +190,21 @@ ignore-error=false（丢弃坏帧）             → 40 秒内 0 组 / 0 组闪�
 
 `onHide` 必须停保活——应用在后台每 20 秒唤一次屏等于永不熄屏，既烧屏又费电。
 
+### 检查更新
+
+应用启动后检查 GitHub Release，有新版本就在页面中央弹一张卡片，更新说明可上下滑动。
+
+四条实测结论（都是真机踩出来的，别按常识改）：
+
+1. **检测必须直连 `api.github.com`**。镜像 `v4.gh-proxy.org` 访问 API 会被共享出口 IP 限流，直接返回 `403 API rate limit exceeded`；它只适合**下载资产**。
+2. **只用 `/releases/latest`**。它天然排除 prerelease 与 draft，正好满足「不检测预览版」——不需要拉全量列表再过滤。
+3. **弹窗不是浮层，是整页替换**。Falcon 运行时 `position:absolute` 不可靠、全仓没有可用的 `z-index`，任何「叠在内容上」的做法在真机上直接失效。所以 `upd.visible` 为真时正常视图整块 `v-else` 掉，弹窗自身是 `.upd`（居中容器）+ `.upd-card`（760×232 圆角卡片），视觉上和播放页右栏同一套圆角与底色。
+4. **安装走 native，不走 JSAPI**。设备上的 `$falcon.jsapi` **没有 `pm` 模块**（`libfalcon.so` 的模块名池只有 `http/storage/modal/nvue/updater`），`pm.installPackage` 永远是 `undefined`。所以 `player2` 模块导出了 `installAmr(path)`，内部调 `/bin/miniapp_cli install`——这和 `tools/deploy.ps1` 走的是同一条装机路径，解析输出里的 `"ret": 0` 判成败。
+
+下载落盘目录是 `/userdisk/miniapp/downloaded/`，文件名由 `http.downloadFile` 按 URL 内容的 md5 生成（`saveName` 不生效，但天然去重缓存）。回调参数是 `{"result": "<路径字符串>"}` —— `result` 是**字符串**不是对象，早期按 `result.filePath` 取会一直判「未拿到文件路径」。
+
+直连失败会自动换镜像重试一次（自动弹窗才有两个源按钮，手动弹窗只给「立即更新」，源的选择交给 `onUpdInstall` 内部回退）。
+
 ### 代码结构
 
 ```
@@ -238,7 +253,7 @@ npm ci
 # 交叉编译 native（产出三个 .so 到 libs/）
 npm run native
 
-# 打 AMR 包（产出 8002026110200001.3_5_4.amr，约 217 KB）
+# 打 AMR 包（产出 8002026110200001.3_5_5.amr，约 224 KB）
 npm run build
 
 # 单测
@@ -258,8 +273,8 @@ npm test
 ## 安装
 
 ```bash
-adb push 8002026110200001.3_5_4.amr /tmp/
-adb shell "miniapp_cli install /tmp/8002026110200001.3_5_4.amr"   # 必须返回 "ret":0
+adb push 8002026110200001.3_5_5.amr /tmp/
+adb shell "miniapp_cli install /tmp/8002026110200001.3_5_5.amr"   # 必须返回 "ret":0
 
 # 冷启动：先切桌面再起目标页，保证重建页面实例
 adb shell "miniapp_cli start 8080222437664451"

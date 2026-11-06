@@ -1,7 +1,72 @@
 <template>
   <!-- page-live 只在「视频像素真的在 fb 上」时启用透明背景（见 base.less 注释）；
        未起播/起播失败/已播完时必须用不透明底色，否则会把上一屏的 fb 残留像素透出来。 -->
-  <div :class="holeVisible ? 'page page-live' : 'page'">
+  <div :class="holeVisible && !upd.visible ? 'page page-live' : 'page'">
+    <!-- 检查更新（v3.5.5）：弹窗不是浮层而是**整页替换**。
+         falcon 运行时 position:absolute 不可靠、全仓没有一个 z-index 能用（base.less
+         文件头铁律），所以靠 upd.visible 把正常视图整体不渲染 —— 零定位依赖，
+         也就不会出现「弹窗和列表叠在一起」。 -->
+    <div v-if="upd.visible" class="upd">
+      <div class="upd-card">
+      <div class="upd-left">
+        <div class="upd-head">
+          <text class="upd-title">{{ updHead }}</text>
+          <text v-if="upd.release" class="upd-ver">{{ upd.release.tag }}</text>
+          <text v-if="updSizeText" class="upd-size">{{ updSizeText }}</text>
+        </div>
+        <text class="upd-sub">{{ upd.message }}</text>
+        <!-- 更新说明可上下滑动：发布说明经常上千字，266px 屏只放得下十来行。
+             scroller 内每行必须是独立 <text> —— falcon 的 <text> 内容里出现换行就
+             整块不渲染，所以 bodyLines() 先把 Markdown 切成行数组。 -->
+        <scroller class="upd-scroll">
+          <template v-for="(ln, i) in upd.lines">
+            <text v-if="ln" :key="'ul' + i" class="upd-line">{{ ln }}</text>
+            <div v-else :key="'ug' + i" class="upd-gap"></div>
+          </template>
+          <text v-if="!upd.lines.length" class="upd-line">（本版本没有填写更新说明）</text>
+        </scroller>
+      </div>
+      <div class="upd-right">
+        <!-- 进入软件时自动检测：4 个按钮 -->
+        <template v-if="upd.mode === 'auto' && upd.stage === 'ready'">
+          <div class="upd-btn upd-btn-main" @click="onUpdInstall(false)">
+            <text class="upd-btn-t-main">立即更新（直连 GitHub）</text>
+          </div>
+          <div class="upd-btn upd-btn-main" @click="onUpdInstall(true)">
+            <text class="upd-btn-t-main">立即更新（使用镜像）</text>
+          </div>
+          <div class="upd-btn" @click="onUpdSkip">
+            <text class="upd-btn-t">跳过此版本</text>
+          </div>
+          <div class="upd-btn" @click="onUpdQuiet">
+            <text class="upd-btn-t">今天内不提示</text>
+          </div>
+        </template>
+        <!-- 「我的」页手动检测：2 个按钮（下载源由 onUpdInstall 自动回退，不给用户选） -->
+        <template v-else-if="upd.mode === 'manual' && upd.stage === 'ready'">
+          <div class="upd-btn upd-btn-main" @click="onUpdInstall(false)">
+            <text class="upd-btn-t-main">立即更新</text>
+          </div>
+          <div class="upd-btn" @click="onUpdClose">
+            <text class="upd-btn-t">暂不更新</text>
+          </div>
+        </template>
+        <!-- 其它阶段（检查中 / 已最新 / 下载中 / 安装中 / 已完成 / 失败）只有一个关闭 -->
+        <template v-else>
+          <div class="upd-btn" @click="onUpdClose">
+            <text class="upd-btn-t">{{ updBusy ? '请稍候…' : '关闭' }}</text>
+          </div>
+          <div v-if="upd.release && upd.release.htmlUrl" class="upd-btn" @click="onUpdShowUrl">
+            <text class="upd-btn-t">查看发布页</text>
+          </div>
+        </template>
+        <text class="upd-tip">{{ updTip }}</text>
+      </div>
+      </div>
+    </div>
+    <!-- 正常视图整体包一层：让「整页替换」只改这一处 v-else，
+         不必给下面 10 个顶层子节点各加一个 !upd.visible（漏一个就会和弹窗叠加）。 -->
+    <div v-else class="page-body">
     <!-- 浏览态左栏：只有四个标签，不再有 PenBili 字样（用户要求删掉，把高度还给内容） -->
     <div v-if="mode === 'browse'" class="bar">
       <!-- 软件 logo（用户要求 m07040-1：首页左上角加软件标志） -->
@@ -224,9 +289,14 @@
         <div v-if="!history.length" class="mine-row">
           <text class="mine-label">还没有播放记录</text>
         </div>
+        <!-- 检查更新（用户需求 m14218-2）：「我的」页手动检测，点开弹窗只有 2 个按钮 -->
+        <div class="mine-row" @click="onCheckUpdateTap">
+          <text class="mine-label">检查更新</text>
+          <text class="mine-value">v{{ appVersion }} ›</text>
+        </div>
         <div class="mine-row">
           <text class="mine-label">PenBili</text>
-          <text class="mine-value">v3.5.4 · {{ profile ? '已登录' : '匿名' }}</text>
+          <text class="mine-value">v{{ appVersion }} · {{ profile ? '已登录' : '匿名' }}</text>
         </div>
 
         <!-- 关于：项目信息（GitHub / 开源协议 / 免责）。
@@ -475,6 +545,7 @@
       </scroller>
     </div>
   </div>
+  </div>
 </template>
 
 <script>
@@ -494,6 +565,26 @@ import { isAutotestSeedEnabled, readAutotestSeed } from '../../services/autotest
 /* 直播「下播」判据的引擎级自证（probeLiveEnd）：纯计算，不取流不播放不亮屏。
  * 单独成模块是为了让「假 status → 判据结论」这张用例表能被 Node 单测直接跑。 */
 import { runLiveEndCases } from '../../services/live_end_probe.js';
+/* 检查更新（GitHub Release）：版本比较 / 资产挑选 / 镜像 URL / 提示决策 / 正文切行
+ * 全部是纯函数（可 Node 单测），运行时只有 fetch/download/install 三个薄封装。
+ * 为什么不用 $falcon.jsapi.updater：它是有道自家服务端升级通道（service_upgrade_push），
+ * 需要自家服务器下发 payload，与 GitHub Release 无关 —— strings libfalcon.so 已确认。 */
+import {
+  APP_VERSION,
+  REPO_URL,
+  MIRROR_PREFIX,
+  SAVE_DIR,
+  downloadUrl,
+  fetchLatestRelease,
+  downloadFileToDisk,
+  installAmr,
+  normalizeUpdateState,
+  isNewer,
+  shouldAutoPrompt,
+  bodyLines,
+  dayKey,
+  progressText
+} from '../../services/updater.js';
 // 主页网格列数 + 尾部裁剪（用户要求 m11950-3：加载更多后条目数必须能被列数整除）
 import {
   GRID_COLS,
@@ -756,6 +847,14 @@ export default {
       favFolders: [],
       favStatus: '',
       // 可拖动进度条：拖动中的临时位置（null=未拖动，跟随播放）
+      /* 版本号只有一个来源：services/updater.js 的 APP_VERSION（单测断言它等于
+       * package.json 的 version）。模板里不再写死版本号 —— 以前写死过一次，
+       * 发版时漏改就会在「我的」页显示旧版本号。
+       *
+       * 必须是 data 而不是 methods：falcon 的模板遇到 {{ appVersion }} 不会自动调用
+       * 方法，只会把函数本身渲染成 "function bound appVersion(){...}"（真机实测），
+       * 想吃方法就得写 {{ appVersion() }}。版本号是常量，放 data 最省事也最不容易错。 */
+      appVersion: APP_VERSION,
       seekDragMs: null,
       // 播放页右下输入框里的待发送评论（用户手绘稿 m11950：
       // 点输入框唤起系统输入法回填文本，点右侧「发送」按钮才真正提交）
@@ -764,7 +863,23 @@ export default {
        * 注意 falcon 没有原生 <select>，用「点击轮转下一个选项」交互（nextOptionId）。
        * v3.3.0 起分辨率与帧率合并为单一画质档（如 '1080p 60fps'），
        * 因为 B 站的 qn 编码本身就把两者绑在一起，360p/480p 根本没有 60fps 档。 */
-      videoSettings: DEFAULT_VIDEO_SETTINGS
+      videoSettings: DEFAULT_VIDEO_SETTINGS,
+      /* 检查更新弹窗状态（v3.5.5）。stage 是单向推进的状态机：
+       *   idle → checking → (ready | latest | error)
+       *   ready → downloading → installing → done | error
+       * mode 只影响按钮组：auto（进入软件时自动检测，4 个按钮）
+       *                   manual（「我的」页手动检测，2 个按钮）。
+       * 弹窗本身是「整页替换」（v-if="upd.visible"），不是浮层 —— 见模板注释。 */
+      upd: {
+        visible: false,
+        mode: 'auto',
+        stage: 'idle',
+        message: '',
+        release: null,
+        lines: [],
+        tip: '',
+        busy: false
+      }
     };
   },
   computed: {
@@ -774,6 +889,35 @@ export default {
     },
     currentItems() {
       return this.tab === 'hot' ? this.hotItems : this.rcmdItems;
+    },
+    // ---- 检查更新弹窗的展示文案（全部由 upd.stage 推导，模板里不写分支逻辑）----
+    updHead() {
+      if (this.upd.stage === 'checking') return '正在检查更新…';
+      if (this.upd.stage === 'latest') return '已是最新版本 · v' + APP_VERSION;
+      if (this.upd.stage === 'downloading') return '正在下载新版本…';
+      if (this.upd.stage === 'installing') return '正在安装…';
+      if (this.upd.stage === 'done') return '安装完成';
+      if (this.upd.stage === 'error') return '检查更新失败';
+      return this.upd.release ? '发现新版本 ' + this.upd.release.tag : '检查更新';
+    },
+    // 包大小（下载前告诉用户要下多少，266px 屏没有进度条，这是唯一的量级提示）
+    updSizeText() {
+      const r = this.upd.release;
+      if (!r || !(r.assetSize > 0)) return '';
+      return (r.assetSize / 1024).toFixed(0) + ' KB';
+    },
+    updBusy() {
+      return this.upd.stage === 'checking' || this.upd.stage === 'downloading' ||
+             this.upd.stage === 'installing';
+    },
+    // 右下角小字：把「为什么不能点」讲清楚（镜像 403、资产缺失、来源是直连还是镜像）
+    updTip() {
+      if (this.upd.tip) return this.upd.tip;
+      const r = this.upd.release;
+      if (this.upd.stage === 'ready' && r && !r.assetUrl) return '该版本没有可用安装包';
+      if (this.upd.stage === 'ready') return '当前 v' + APP_VERSION + ' · 检测走直连，镜像仅用于下载加速';
+      if (this.upd.stage === 'done') return '重新打开软件即可使用新版本';
+      return '';
     },
     // 搜索活跃类型的条目视图（三分栏：视频/图文/直播各自缓存，切换零请求）
     searchItems() {
@@ -1063,6 +1207,10 @@ export default {
          * 而判据跑在真机 QuickJS 上（typeof/Number 行为可能与 Node 有差异）。
          * 这个开关用假 status 喂真函数，几毫秒跑完，结论可直接 grep。 */
         const probeLiveEnd = seed.probeLiveEnd;
+        /* probeUpdate：检查更新全链路自证（检测 → 下载 → 安装）。
+         * 与 probeLiveEnd 同类：有副作用（会真的下载 221KB 并装包），
+         * 所以只在显式种子下跑，且不进 hasAutoBody 的优先级链。 */
+        const probeUpdate = seed.probeUpdate;
         /* 只开了 probeLiveEnd 的种子不能顺带跑全链路自检 —— 那会起播/切 tab，
          * 把「纯计算自证」变成有副作用的播放流程。其余种子组合保持原有优先级不变。 */
         const hasAutoBody = liveOnly || wbiStress > 0 || playProbe > 0 || soakSec > 0;
@@ -1074,6 +1222,12 @@ export default {
           : 'run' + (soakSec > 0 ? ' soak=' + soakSec + 's' : '') + (soakBv ? ' bv=' + soakBv : '')));
         // 自证先跑（无副作用、不打乱播放），再按原优先级分发
         if (probeLiveEnd) this.runLiveEndProbe();
+        // 更新探针自带副作用（下载+装包），单独一条路径，不与播放自检混跑
+        if (probeUpdate) {
+          this.runUpdateProbe();
+          await this.selectTab('rcmd');
+          return;
+        }
         if (liveOnly) this.runLiveAutotest(liveRoom, liveHold);
         else if (wbiStress > 0) this.runWbiStress(wbiStress);
         else if (playProbe > 0) this.runPlayProbe(playProbe, soakBv);
@@ -1081,6 +1235,11 @@ export default {
         else this.runAutotest(soakSec, soakBv); // 自检内部自带首屏加载（避免与这里并发双 load 竞态）
       } else {
         await this.selectTab('rcmd'); // 首屏加载：此刻登录 Cookie 已就位 → 个性化推荐
+        /* 自动检查更新放在首屏加载**之后**且不 await：
+         *   - 放前面会拖慢首屏（GitHub API 实测 2.5s，弱网更久）；
+         *   - await 会占住 created()，页面迟迟不渲染。
+         * 失败只打一行日志，绝不弹窗打扰（autoCheckUpdate 内部全 try/catch）。 */
+        this.autoCheckUpdate();
       }
     },
 
@@ -2814,6 +2973,233 @@ export default {
     },
     lqText() {
       return liveQualityLabel(this.videoSettings);
+    },
+
+    /* ---------- 检查更新（GitHub Release，v3.5.5）----------
+     *
+     * 三条硬约束（都是真机实测，别按常识改）：
+     *   1) 检测走**直连** api.github.com。镜像 v4.gh-proxy.org 访问 api.github.com
+     *      会被共享出口 IP 限流（实测 403 rate limit exceeded），所以镜像只用于下载。
+     *   2) 只用 /releases/latest —— 它天然排除 prerelease 与 draft，满足「不检测预览版」。
+     *   3) 弹窗是**整页替换**不是浮层：falcon 的 position:absolute 不可靠，全仓零
+     *      z-index，靠 upd.visible 让正常视图整体不渲染。
+     *
+     * 手动检测永远弹（用户主动点了就得有反馈，包括「已是最新」），
+     * 自动检测要过 shouldAutoPrompt 三关（跳过版本 / 今天内不提示 / 不是更新版本）。
+     */
+    async checkUpdate(mode) {
+      const m = mode === 'manual' ? 'manual' : 'auto';
+      this.upd = {
+        visible: true,
+        mode: m,
+        stage: 'checking',
+        message: '正在连接 GitHub 检查最新正式版本…',
+        release: null,
+        lines: [],
+        tip: ''
+      };
+      const r = await fetchLatestRelease();
+      if (!r.ok) {
+        logWarn('[bili] upd check fail: ' + r.stage + ' ' + (r.message || ''));
+        this.upd = Object.assign({}, this.upd, {
+          stage: 'error',
+          message: (r.message || '网络错误'),
+          tip: '检查失败不影响正常观看；稍后可再试一次'
+        });
+        return;
+      }
+      if (!isNewer(r.release.tag, APP_VERSION)) {
+        this.upd = Object.assign({}, this.upd, {
+          stage: 'latest',
+          message: '当前 v' + APP_VERSION + ' 已是线上最新的正式版本（' + r.release.tag + '）',
+          release: r.release,
+          lines: []
+        });
+        return;
+      }
+      this.updShowReady(m, r.release);
+    },
+
+    // 「发现新版本」：把发布说明切成行（<text> 里不能有换行，见 base.less 铁律）
+    updShowReady(mode, release) {
+      this.upd = {
+        visible: true,
+        mode: mode,
+        stage: 'ready',
+        message: '新版本 ' + release.tag + ' · 当前 v' + APP_VERSION,
+        release: release,
+        lines: bodyLines(release.body),
+        tip: ''
+      };
+      logWarn('[bili] upd ready ' + release.tag + ' asset=' + (release.assetName || '-') +
+              ' size=' + (release.assetSize || 0));
+    },
+
+    // 进入软件时的自动检测（静默失败：检查更新绝不能打断正常观看）
+    async autoCheckUpdate() {
+      try {
+        const st = normalizeUpdateState(await getJson(KEYS.update, null));
+        const r = await fetchLatestRelease();
+        if (!r.ok) {
+          logWarn('[bili] upd auto check fail: ' + r.stage + ' ' + (r.message || ''));
+          return;
+        }
+        if (!shouldAutoPrompt(st, r.release.tag, APP_VERSION, Date.now())) {
+          logWarn('[bili] upd auto suppressed (skip=' + (st.skipVersion || '-') +
+                  ' quiet=' + (st.quietDay || '-') + ' remote=' + r.release.tag + ')');
+          return;
+        }
+        this.updShowReady('auto', r.release);
+      } catch (e) {
+        logWarn('[bili] upd auto check error: ' + ((e && e.message) || e));
+      }
+    },
+
+    updHide() {
+      this.upd = Object.assign({}, this.upd, { visible: false, busy: false });
+    },
+
+    // 「暂不更新」/「关闭」：只关窗，不写任何持久状态（下次进软件还会提醒）
+    onUpdClose() {
+      if (this.updBusy) return;
+      logWarn('[bili] upd close (mode=' + this.upd.mode + ' stage=' + this.upd.stage + ')');
+      this.updHide();
+    },
+
+    // 「跳过此版本」：持久化到 storage，只有出现**更高**版本时才会再提醒
+    async onUpdSkip() {
+      const r = this.upd.release;
+      if (!r) return;
+      const st = normalizeUpdateState(await getJson(KEYS.update, null));
+      const next = Object.assign({}, st, { skipVersion: r.tag });
+      await setJson(KEYS.update, next);
+      logWarn('[bili] upd skip ' + r.tag);
+      this.updHide();
+    },
+
+    // 「今天内不提示」：按**本地日期**记一天（用户理解的「今天」是设备时区的今天）
+    async onUpdQuiet() {
+      const st = normalizeUpdateState(await getJson(KEYS.update, null));
+      const next = Object.assign({}, st, { quietDay: dayKey(Date.now()) });
+      await setJson(KEYS.update, next);
+      logWarn('[bili] upd quiet until tomorrow (' + next.quietDay + ')');
+      this.updHide();
+    },
+
+    // 「查看发布页」：词典笔上没有能唤起浏览器的 JSAPI（全仓 grep 确认），
+    // 所以只能把地址显示出来让用户自己抄/扫码，不能假装能跳转。
+    onUpdShowUrl() {
+      const r = this.upd.release;
+      const url = (r && r.htmlUrl) || REPO_URL;
+      this.upd = Object.assign({}, this.upd, { tip: url });
+      logWarn('[bili] upd release page: ' + url);
+    },
+
+    // 下载：先试用户选定的源；失败且没指定镜像时自动改用镜像再试一次。
+    // 为什么自动回退：「我的」页手动检测只有 2 个按钮（用户在需求里明确不要选源），
+    // 直连被墙时必须有兜底，否则「立即更新」在国内基本等于不可用。
+    async onUpdInstall(useMirror) {
+      const r = this.upd.release;
+      if (!r || !r.assetUrl) {
+        this.upd = Object.assign({}, this.upd, { tip: '该版本没有可用安装包，请到发布页手动下载' });
+        return;
+      }
+      const order = useMirror ? [true, false] : [false, true];
+      for (let i = 0; i < order.length; i++) {
+        const mirror = order[i];
+        const url = downloadUrl(r.assetUrl, mirror);
+        if (!url) continue;
+        const label = mirror ? '镜像' : '直连';
+        this.upd = Object.assign({}, this.upd, {
+          stage: 'downloading',
+          message: '正在下载 ' + (r.assetName || '安装包') + '（' + label + '加速）…',
+          tip: progressText(0, r.assetSize)
+        });
+        logWarn('[bili] upd download via ' + label + ': ' + url);
+        const d = await downloadFileToDisk(url);
+        if (!d.ok) {
+          logWarn('[bili] upd download fail via ' + label + ': ' + (d.message || ''));
+          if (i === order.length - 1) {
+            this.upd = Object.assign({}, this.upd, {
+              stage: 'error',
+              message: '下载失败：' + (d.message || '未知错误'),
+              tip: '两个下载源都失败了，可稍后重试或到发布页手动下载'
+            });
+            return;
+          }
+          continue;
+        }
+        logWarn('[bili] upd downloaded via ' + label + ' -> ' + d.filePath);
+        this.upd = Object.assign({}, this.upd, {
+          stage: 'installing',
+          message: '下载完成，正在安装…',
+          tip: d.filePath || ''
+        });
+        const ins = await installAmr(d.filePath);
+        if (!ins.ok) {
+          logWarn('[bili] upd install fail: ' + (ins.message || '') + ' rc=' + (ins.rc == null ? '?' : ins.rc));
+          this.upd = Object.assign({}, this.upd, {
+            stage: 'error',
+            message: '安装失败：' + (ins.message || '未知错误'),
+            tip: '安装包已下载到 ' + (d.filePath || SAVE_DIR)
+          });
+          return;
+        }
+        logWarn('[bili] upd install done ' + r.tag);
+        this.upd = Object.assign({}, this.upd, {
+          stage: 'done',
+          message: '已安装 ' + r.tag,
+          tip: '重新打开软件即可使用新版本'
+        });
+        return;
+      }
+      this.upd = Object.assign({}, this.upd, {
+        stage: 'error',
+        message: '没有可用的下载地址',
+        tip: '请到发布页手动下载'
+      });
+    },
+
+    /* ---------- 「我的」页手动检测更新 ---------- */
+    onCheckUpdateTap() {
+      this.checkUpdate('manual');
+    },
+
+    /* probeUpdate：检查更新全链路自证（种子 {"enabled":true,"autotest":true,"probeUpdate":true}）。
+     * 为什么需要：http.downloadFile 与 pm.installPackage 的参数形态**没有文档**
+     * （libfalcon.so 里只有 `[PMS]empty filepath.` 一条线索），只能靠真机日志确认；
+     * 这条探针把检测/下载/安装三次调用的结论逐行打出来，一条 grep 就能判定。 */
+    async runUpdateProbe() {
+      logWarn('[bili] UPD-PROBE start local=' + APP_VERSION + ' repo=' + REPO_URL);
+      const r = await fetchLatestRelease();
+      logWarn('[bili] UPD-PROBE check ok=' + (r.ok ? 1 : 0) + ' stage=' + (r.stage || '-') +
+              ' msg=' + (r.message || '-') + ' tag=' + (r.ok ? r.release.tag : '-') +
+              ' asset=' + (r.ok ? (r.release.assetName || '-') : '-') +
+              ' size=' + (r.ok ? r.release.assetSize : 0));
+      if (!r.ok) {
+        logWarn('[bili] UPD-PROBE FAIL at check');
+        return;
+      }
+      const newer = isNewer(r.release.tag, APP_VERSION);
+      logWarn('[bili] UPD-PROBE newer=' + (newer ? 1 : 0) + ' prompt=' +
+              (shouldAutoPrompt(normalizeUpdateState(null), r.release.tag, APP_VERSION, Date.now()) ? 1 : 0));
+      const link = downloadUrl(r.release.assetUrl, true);
+      logWarn('[bili] UPD-PROBE mirror url=' + (link || '(none)'));
+      if (!link) {
+        logWarn('[bili] UPD-PROBE FAIL at url');
+        return;
+      }
+      const d = await downloadFileToDisk(link);
+      logWarn('[bili] UPD-PROBE download ok=' + (d.ok ? 1 : 0) +
+              ' path=' + (d.filePath || '-') + ' msg=' + (d.message || '-'));
+      if (!d.ok) {
+        logWarn('[bili] UPD-PROBE FAIL at download');
+        return;
+      }
+      const ins = await installAmr(d.filePath);
+      logWarn('[bili] UPD-PROBE install ok=' + (ins.ok ? 1 : 0) +
+              ' shape=' + (ins.shape || '-') + ' msg=' + (ins.message || '-'));
+      logWarn('[bili] UPD-PROBE done ' + (ins.ok ? 'PASS' : 'FAIL'));
     },
 
     /* ---------- 生命周期：前后台 / 离开播放页 / 卸载 ----------

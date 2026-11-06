@@ -312,6 +312,10 @@ async function main() {
   const { isAutotestSeedEnabled, readAutotestSeed } = await import('../src/services/autotest_seed.js');
   /* 直播下播判据的真机自证用例表（与真机 probeLiveEnd 同源） */
   const { runLiveEndCases, LIVE_END_CASES } = await import('../src/services/live_end_probe.js');
+  /* 检查更新的纯逻辑（版本比较 / 资产挑选 / 镜像 URL / 提示决策 / 正文切行）。
+   * 这一层是整条更新链路的判断核心，全部无副作用，必须被单测钉住：
+   * 判错版本会让用户「重复更新」或「永远收不到更新」，判错提示决策会变成弹窗骚扰。 */
+  const upd = await import('../src/services/updater.js');
   const {
     opusToBlocks,
     opsToBlocks,
@@ -322,7 +326,251 @@ async function main() {
   } = await import('../src/services/bili/article.js');
   const fsx = require('fs');
   const pathx = require('path');
+  const pkgJson = JSON.parse(fsx.readFileSync(pathx.join(__dirname, '..', 'package.json'), 'utf8'));
   const fixture = (n) => JSON.parse(fsx.readFileSync(pathx.join(__dirname, '..', 'api-mock', 'fixtures', n), 'utf8'));
+
+  // ---------------- 检查更新（updater.js，v3.5.5）----------------
+  test('updater: APP_VERSION 必须等于 package.json 的 version', () => {
+    assert.strictEqual(
+      upd.APP_VERSION,
+      pkgJson.version,
+      'updater.js 的 APP_VERSION 与 package.json 漂了（发版时只改了一个）'
+    );
+    assert.ok(/^\d+\.\d+\.\d+$/.test(upd.APP_VERSION), 'APP_VERSION 必须是 x.y.z');
+  });
+
+  test('updater: parseVersion 认 v 前缀/预发布/构建号，脏值一律 null', () => {
+    assert.deepStrictEqual(upd.parseVersion('v3.5.4'), { nums: [3, 5, 4], pre: '' });
+    assert.deepStrictEqual(upd.parseVersion('3.5.4'), { nums: [3, 5, 4], pre: '' });
+    assert.deepStrictEqual(upd.parseVersion('v3.6.0-beta.1'), { nums: [3, 6, 0], pre: 'beta.1' });
+    assert.deepStrictEqual(upd.parseVersion(' v3.5.4+build7 '), { nums: [3, 5, 4], pre: 'build7' });
+    assert.strictEqual(upd.parseVersion(''), null);
+    assert.strictEqual(upd.parseVersion(null), null);
+    assert.strictEqual(upd.parseVersion('latest'), null);
+    assert.strictEqual(upd.parseVersion('v'), null);
+  });
+
+  test('updater: compareVersion 逐段比较，缺位补 0，预发布更小', () => {
+    assert.strictEqual(upd.compareVersion('v3.5.4', '3.5.4'), 0);
+    assert.strictEqual(upd.compareVersion('v3.5.5', '3.5.4'), 1);
+    assert.strictEqual(upd.compareVersion('v3.5.4', '3.6.0'), -1);
+    assert.strictEqual(upd.compareVersion('3.10.0', '3.9.9'), 1);
+    assert.strictEqual(upd.compareVersion('3.5', '3.5.0'), 0);
+    assert.strictEqual(upd.compareVersion('v3.6.0-beta.1', '3.6.0'), -1);
+    assert.strictEqual(upd.compareVersion('', '3.5.4'), 0);
+    assert.strictEqual(upd.compareVersion('v3.5.4', 'garbage'), 0);
+  });
+
+  test('updater: isNewer 只认严格更高的版本', () => {
+    assert.strictEqual(upd.isNewer('v3.5.5', '3.5.4'), true);
+    assert.strictEqual(upd.isNewer('v3.5.4', '3.5.4'), false);
+    assert.strictEqual(upd.isNewer('v3.5.3', '3.5.4'), false);
+    assert.strictEqual(upd.isNewer('v3.6.0-beta.1', '3.5.4'), true);
+    assert.strictEqual(upd.isNewer('v3.5.1-beta.1', '3.5.4'), false);
+    assert.strictEqual(upd.isNewer('', '3.5.4'), false);
+  });
+
+  test('updater: normalizeRelease 拒 draft/prerelease/无 tag，资产优先取 PenBili.amr', () => {
+    const base = {
+      tag_name: 'v3.6.0',
+      name: 'v3.6.0',
+      body: '# test',
+      html_url: 'https://github.com/x/y/releases/tag/v3.6.0',
+      draft: false,
+      prerelease: false,
+      assets: [
+        { name: 'other.apk', size: 1, browser_download_url: 'https://e/other.apk' },
+        { name: 'PenBili.amr', size: 221331, browser_download_url: 'https://e/PenBili.amr' }
+      ]
+    };
+    const r = upd.normalizeRelease(base);
+    assert.strictEqual(r.tag, 'v3.6.0');
+    assert.strictEqual(r.version, '3.6.0');
+    assert.strictEqual(r.assetName, 'PenBili.amr');
+    assert.strictEqual(r.assetSize, 221331);
+    assert.strictEqual(r.assetUrl, 'https://e/PenBili.amr');
+    assert.strictEqual(upd.normalizeRelease(JSON.stringify(base)).tag, 'v3.6.0');
+    assert.strictEqual(upd.normalizeRelease(Object.assign({}, base, { draft: true })), null);
+    assert.strictEqual(upd.normalizeRelease(Object.assign({}, base, { prerelease: true })), null);
+    assert.strictEqual(upd.normalizeRelease(Object.assign({}, base, { tag_name: '' })), null);
+    assert.strictEqual(upd.normalizeRelease('{bad json'), null);
+    assert.strictEqual(upd.normalizeRelease(null), null);
+    const r2 = upd.normalizeRelease(Object.assign({}, base, { assets: [base.assets[0]] }));
+    assert.strictEqual(r2.assetName, 'other.apk');
+    assert.strictEqual(upd.normalizeRelease(Object.assign({}, base, { assets: [] })).assetUrl, '');
+  });
+
+  test('updater: downloadUrl 镜像前缀拼接，非 http 返回空串', () => {
+    const u = 'https://github.com/o/r/releases/download/v3.6.0/PenBili.amr';
+    assert.strictEqual(upd.downloadUrl(u, false), u);
+    assert.strictEqual(upd.downloadUrl(u, true), upd.MIRROR_PREFIX + u);
+    assert.strictEqual(upd.downloadUrl('', true), '');
+    assert.strictEqual(upd.downloadUrl('ftp://x/y', true), '');
+    assert.strictEqual(upd.downloadUrl(null, false), '');
+  });
+
+  test('updater: bodyLines 去 Markdown 且切成单行（<text> 里不能有换行）', () => {
+    const md = [
+      '# v3.6.0',
+      '',
+      '## 1. 修复',
+      '- **粗体** 条目',
+      '- `代码` 条目',
+      '> 引用行',
+      '[链接文字](https://example.com)',
+      '',
+      '',
+      '正文段落'
+    ].join('\n');
+    const lines = upd.bodyLines(md);
+    assert.strictEqual(lines[0], 'v3.6.0');
+    assert.ok(lines.indexOf('1. 修复') > 0, '## 标题的井号必须去掉');
+    assert.ok(lines.indexOf('\u00b7 粗体 条目') > 0, '列表符变中点，粗体星号去掉');
+    assert.ok(lines.indexOf('\u00b7 代码 条目') > 0, '行内反引号去掉');
+    assert.ok(lines.indexOf('引用行') > 0, '引用符去掉');
+    assert.ok(lines.indexOf('链接文字') > 0, '链接只留文字');
+    assert.strictEqual(lines[lines.length - 1], '正文段落');
+    for (let i = 0; i < lines.length; i++) {
+      assert.ok(!/ $/.test(lines[i]), '行尾不允许有空白');
+      assert.ok(!/\n/.test(lines[i]), '必须切成单行（<text> 遇换行不渲染）');
+    }
+    // maxLines 生效：尾部空行会被吃掉，所以上限是 <= cap 且必须真的裁短
+    const capped = upd.bodyLines(md, 2);
+    assert.ok(capped.length <= 2, 'maxLines 必须真的限制行数');
+    assert.ok(capped.length < lines.length, 'maxLines 必须真的裁短（不能原样返回）');
+    assert.deepStrictEqual(upd.bodyLines(''), []);
+    assert.deepStrictEqual(upd.bodyLines(null), []);
+  });
+
+  test('updater: dayKey 用本地时区（不是 UTC）', () => {
+    assert.strictEqual(upd.dayKey(new Date(2026, 0, 2, 3, 4, 5).getTime()), '2026-01-02');
+    assert.strictEqual(upd.dayKey(new Date(2026, 8, 9, 23, 0, 0).getTime()), '2026-09-09');
+    assert.strictEqual(upd.dayKey(new Date(2026, 11, 31, 23, 59, 0).getTime()), '2026-12-31');
+  });
+
+  test('updater: normalizeUpdateState 容忍脏输入', () => {
+    assert.deepStrictEqual(upd.normalizeUpdateState(null), { skipVersion: '', quietDay: '' });
+    assert.deepStrictEqual(upd.normalizeUpdateState({}), { skipVersion: '', quietDay: '' });
+    assert.deepStrictEqual(
+      upd.normalizeUpdateState('{"skipVersion":"v3.6.0","quietDay":"2026-01-02"}'),
+      { skipVersion: 'v3.6.0', quietDay: '2026-01-02' }
+    );
+    assert.deepStrictEqual(upd.normalizeUpdateState('{bad'), { skipVersion: '', quietDay: '' });
+    assert.deepStrictEqual(upd.normalizeUpdateState({ skipVersion: 5 }), { skipVersion: '', quietDay: '' });
+  });
+
+  test('updater: shouldAutoPrompt 三关（跳过版本 / 今天内不提示 / 不是更新）', () => {
+    const now = new Date(2026, 0, 2, 10, 0, 0).getTime();
+    const today = '2026-01-02';
+    assert.strictEqual(upd.shouldAutoPrompt({}, 'v3.6.0', '3.5.4', now), true);
+    assert.strictEqual(upd.shouldAutoPrompt({}, 'v3.5.4', '3.5.4', now), false);
+    assert.strictEqual(upd.shouldAutoPrompt({}, 'v3.5.3', '3.5.4', now), false);
+    assert.strictEqual(upd.shouldAutoPrompt({ skipVersion: 'v3.6.0' }, 'v3.6.0', '3.5.4', now), false);
+    assert.strictEqual(upd.shouldAutoPrompt({ skipVersion: '3.6.0' }, 'v3.6.0', '3.5.4', now), false);
+    assert.strictEqual(upd.shouldAutoPrompt({ skipVersion: 'v3.6.0' }, 'v3.7.0', '3.5.4', now), true);
+    assert.strictEqual(upd.shouldAutoPrompt({ quietDay: today }, 'v3.6.0', '3.5.4', now), false);
+    const tomorrow = new Date(2026, 0, 3, 10, 0, 0).getTime();
+    assert.strictEqual(upd.shouldAutoPrompt({ quietDay: today }, 'v3.6.0', '3.5.4', tomorrow), true);
+    assert.strictEqual(upd.shouldAutoPrompt(null, 'v3.6.0', '3.5.4', now), true);
+    assert.strictEqual(upd.shouldAutoPrompt({}, '', '3.5.4', now), false);
+  });
+
+  test('updater: extractFilePath 认三种形态（真机实测是 result 字符串）', () => {
+    // 真机实测形态：{"result": "/userdisk/miniapp/downloaded/<md5>"}
+    assert.strictEqual(
+      upd.extractFilePath({ result: '/userdisk/miniapp/downloaded/abc' }),
+      '/userdisk/miniapp/downloaded/abc'
+    );
+    assert.strictEqual(upd.extractFilePath({ result: { filePath: '/x/y.amr' } }), '/x/y.amr');
+    assert.strictEqual(upd.extractFilePath({ result: { path: '/x/z.amr' } }), '/x/z.amr');
+    assert.strictEqual(upd.extractFilePath({ filePath: '/x/w.amr' }), '/x/w.amr');
+    assert.strictEqual(upd.extractFilePath({ path: '/x/v.amr' }), '/x/v.amr');
+    assert.strictEqual(upd.extractFilePath('/plain/path.amr'), '/plain/path.amr');
+    assert.strictEqual(upd.extractFilePath({ result: '' }), '');
+    assert.strictEqual(upd.extractFilePath({ result: null }), '');
+    assert.strictEqual(upd.extractFilePath(null), '');
+    assert.strictEqual(upd.extractFilePath(42), '');
+  });
+
+  test('updater: 安装必须走 native installAmr（jsapi 没有 pm 模块）', () => {
+    const raw = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'services', 'updater.js'), 'utf8');
+    // 注释里会解释「为什么不用 pm.installPackage」，检查代码前必须先剥注释，
+    // 否则这条用例会被自己的说明文字绊倒（跟样式那条同一个坑）。
+    const src = raw
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .split('\n')
+      .filter((l) => !/^\s*\/\//.test(l))
+      .join('\n');
+    assert.ok(/mod\.installAmr\(filePath\)/.test(src), '安装必须调 native player2.installAmr');
+    assert.ok(!/installPackage/.test(src), 'jsapi 上没有 pm 模块，installPackage 这条路必须删干净');
+    assert.ok(!/pmJsapi/.test(src), 'pmJsapi 取不到模块，必须删掉');
+  });
+
+  test('updater: progressText 百分比/字节/未知三态', () => {
+    assert.strictEqual(upd.progressText(0, 221331), '0%');
+    assert.strictEqual(upd.progressText(110665, 221331), '50%');
+    assert.strictEqual(upd.progressText(221331, 221331), '100%');
+    assert.strictEqual(upd.progressText(999999, 221331), '100%');
+    assert.strictEqual(upd.progressText(1048576, 0), '1.0MB');
+    assert.strictEqual(upd.progressText(0, 0), '下载中\u2026');
+  });
+
+  test('updater: 自动检测（进软件时）与手动检测（我的页）文案必须分家', () => {
+    const v = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'pages', 'index', 'index.vue'), 'utf8');
+    const src = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'services', 'updater.js'), 'utf8');
+    // 自动：4 个按钮（直连 / 镜像 / 跳过此版本 / 今天内不提示）
+    ['立即更新（直连 GitHub）', '立即更新（使用镜像）', '跳过此版本', '今天内不提示'].forEach((t) => {
+      assert.ok(v.indexOf(t) > 0, '自动弹窗缺按钮文案：' + t);
+    });
+    // 手动：2 个按钮，且不得混入自动态语义
+    const mi = v.indexOf("upd.mode === 'manual'");
+    assert.ok(mi > 0, '必须有手动检测分支');
+    const seg = v.slice(mi, mi + 1200);
+    assert.ok(seg.indexOf('立即更新') > 0, '手动弹窗缺「立即更新」');
+    assert.ok(seg.indexOf('暂不更新') > 0, '手动弹窗缺「暂不更新」');
+    assert.ok(seg.indexOf('跳过此版本') < 0, '手动弹窗不该有「跳过此版本」');
+    assert.ok(seg.indexOf('今天内不提示') < 0, '手动弹窗不该有「今天内不提示」');
+    // 检测走直连 api.github.com，镜像前缀只能用于下载
+    assert.ok(/API_LATEST = 'https:\/\/api\.github\.com\//.test(src), '检测接口必须是直连 api.github.com');
+    assert.ok(/MIRROR_PREFIX = 'https:\/\/v4\.gh-proxy\.org\/'/.test(src), '镜像前缀必须是 v4.gh-proxy.org');
+  });
+
+  test('首页：检查更新弹窗是整页替换（不得依赖 position:absolute / z-index）', () => {
+    const v = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'pages', 'index', 'index.vue'), 'utf8');
+    const l = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'styles', 'base.less'), 'utf8');
+    assert.ok(/v-if="upd\.visible"/.test(v), '弹窗必须由 upd.visible 控制');
+    assert.ok(/v-else class="page-body"/.test(v), '正常视图必须整块 v-else（否则弹窗会和内容叠加）');
+    // 从注释块开头切（含 /*），否则 slice 起点落在注释内部，剥注释的正则失效
+    const at = l.indexOf('/* ---------- 检查更新弹窗');
+    assert.ok(at > 0, '必须存在检查更新样式块');
+    // 注释里会解释「为什么不能用 absolute/z-index」，检查前必须先剥掉注释，
+    // 否则这条用例会被自己的说明文字绊倒。
+    const updCss = l.slice(at).replace(/\/\*[\s\S]*?\*\//g, '');
+    assert.ok(updCss.length > 200, '检查更新样式块不能是空的');
+    assert.ok(!/position:\s*absolute/.test(updCss), 'falcon 上 position:absolute 不可靠，弹窗不能用');
+    assert.ok(!/z-index/.test(updCss), '全仓没有可用的 z-index，弹窗不能用');
+    assert.ok(/\.upd-scroll\s*\{[^}]*height:\s*150px/.test(l), '更新说明 scroller 必须有固定高度');
+    assert.ok(/\.upd-scroll\s*\{[^}]*width:\s*432px/.test(l), '更新说明 scroller 必须有固定宽度');
+    // 弹窗是居中卡片而不是铺满全屏（用户明确要求「弹在中间就行」）
+    assert.ok(/\.upd\s*\{[^}]*justify-content:\s*center/.test(l), '弹窗容器必须居中');
+    assert.ok(/\.upd-card\s*\{[^}]*width:\s*760px/.test(l), '卡片必须有固定宽度（不能铺满 960）');
+    assert.ok(/\.upd-card\s*\{[^}]*border-radius/.test(l), '卡片必须有圆角（与软件风格一致）');
+  });
+
+  test('首页：自动检测更新不得阻塞首屏（在 selectTab 之后且不 await）', () => {
+    const v = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'pages', 'index', 'index.vue'), 'utf8');
+    const i = v.indexOf("await this.selectTab('rcmd'); // 首屏加载");
+    assert.ok(i > 0, '必须有首屏加载分支');
+    const after = v.slice(i, i + 700);
+    assert.ok(/this\.autoCheckUpdate\(\);/.test(after), '自动检查更新必须紧随首屏加载');
+    assert.ok(!/await this\.autoCheckUpdate/.test(v), '自动检查更新绝不能 await（会占住 created）');
+  });
+
+  test('首页：模板里不再写死版本号，统一用 appVersion', () => {
+    const src = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'pages', 'index', 'index.vue'), 'utf8');
+    assert.ok(/v\{\{\s*appVersion\s*\}\}/.test(src), '「我的」页版本号必须绑定 appVersion');
+  });
+
 
   const nodeMd5 = (s) => crypto.createHash('md5').update(s, 'utf8').digest('hex');
 

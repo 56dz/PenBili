@@ -71,6 +71,10 @@ export function readAutotestSeed(at) {
     // probeLiveEnd：直播「下播」判据的引擎级自证（纯计算，不取流不播放不亮屏）。
     // 为什么单独一个开关：真实下播没法随时复现，而判据跑在真机 QuickJS 上，
     // 需要一条能在真机上一秒跑完、结论可 grep 的自证路径。
-    probeLiveEnd: o.probeLiveEnd === true
+    probeLiveEnd: o.probeLiveEnd === true,
+    /* probeUpdate：检查更新全链路自证（检测 → 下载 → 安装）。
+     * 为什么需要：http.downloadFile 与 pm.installPackage 的参数形态没有文档，
+     * 只能靠真机日志确认；这条探针把三次调用的结论逐行打出来，一条 grep 就能判定。 */
+    probeUpdate: o.probeUpdate === true
   };
 }

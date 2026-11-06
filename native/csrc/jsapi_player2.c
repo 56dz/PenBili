@@ -30,6 +30,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>   /* access() —— installAmr 先查文件是否真存在 */
 
 #include "core/clock.h"
 #include "core/log.h"
@@ -443,6 +444,61 @@ static JSValue js_recover(JSContext *ctx, JSValueConst this_val, int argc, JSVal
 }
 
 /*
+ * installAmr(path)：用系统 miniapp_cli 安装本地 .amr。
+ *
+ * 为什么绕到 native：设备上的 $falcon.jsapi 里**没有 pm 模块**
+ * （`strings /usr/lib/libfalcon.so` 的模块名池只有 http/storage/modal/nvue/updater，
+ * 虽然有 register_pm_jsapi 符号，但运行时取不到），所以 JS 侧调
+ * pm.installPackage 一律拿到 undefined。
+ *
+ * 已验证可行的替代路径（真机实测 ret=0）：
+ *   /bin/miniapp_cli install <amr>
+ * 它会把包装到 a/b 槽位并返回 `{"appid": "...", "ret": 0}` —— 解析 ret 即可判定成败。
+ *
+ * 参数：filePath 必须是**已存在的本地绝对路径**（先做 access 检查，
+ * 免得把「下载没成功」伪装成「安装失败」，两者的用户提示完全不同）。
+ * 超时 60s：解包 + md5 校验 + 落盘，大包可能十几秒。
+ */
+static JSValue js_install_amr(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    const char *path = arg_str(ctx, argc, argv, 0);
+    if (!path || !path[0]) {
+        if (path) JS_FreeCString(ctx, path);
+        return mk_fail(ctx, "BAD_ARGS", "filePath required");
+    }
+    if (access(path, R_OK) != 0) {
+        pb2_logf("install: file not readable: %s", path);
+        JS_FreeCString(ctx, path);
+        return mk_fail(ctx, "FILE_NOT_FOUND", "amr not found");
+    }
+
+    char *argv2[4];
+    char out[512];
+    argv2[0] = (char *)"/bin/miniapp_cli";
+    argv2[1] = (char *)"install";
+    argv2[2] = (char *)path;
+    argv2[3] = NULL;
+    out[0] = '\0';
+    int rc = pb2_run(argv2, out, (int)sizeof(out), 60000);
+    pb2_logf("install: miniapp_cli install %s rc=%d out=%s", path, rc, out);
+
+    /* 判据用输出里的 "ret": 0 —— miniapp_cli 即使失败也常常返回 rc=0，
+     * 只有 ret 字段才代表装包结果。 */
+    int ok = (strstr(out, "\"ret\": 0") != NULL) || (strstr(out, "\"ret\":0") != NULL);
+    JS_FreeCString(ctx, path);
+
+    JSValue res = JS_NewObject(ctx);
+    mk_bool(ctx, "ok", ok ? 1 : 0, res);
+    mk_int(ctx, "rc", rc, res);
+    mk_str(ctx, "out", out, res);
+    if (!ok) {
+        mk_str(ctx, "code", "INSTALL_FAILED", res);
+        mk_str(ctx, "error", "miniapp_cli install failed", res);
+    }
+    return res;
+}
+
+/*
  * release()：让 worker 收尾，但**有上界**地等。
  *
  * pb2_session_shutdown 内部不是无上界的 pthread_join —— 它先置 quit 标志，
@@ -659,6 +715,7 @@ static JSValue js_info(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
     X("stop", js_stop, 0) \
     X("setRect", js_set_rect, 4) \
     X("recover", js_recover, 0) \
+    X("installAmr", js_install_amr, 1) \
     X("release", js_release, 0) \
     X("info", js_info, 0)
 

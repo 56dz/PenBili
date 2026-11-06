@@ -13,7 +13,9 @@ export const KEYS = {
   // 播放历史（给「我的」页；schema 见 history.js）
   history: 'bili_history',
   // 自检开关（tools/seed_settings.js 预置，真机自动化用）
-  autotest: 'bili_autotest'
+  autotest: 'bili_autotest',
+  // 检查更新：跳过版本 / 今天内不提示（schema 见 updater.js normalizeUpdateState）
+  update: 'bili_update'
 };
 
 export const SESSION_SCHEMA_VERSION = 2;
