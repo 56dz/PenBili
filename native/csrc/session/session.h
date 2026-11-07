@@ -64,6 +64,25 @@ typedef struct {
      * 现在 JS 显式传意图，native 只信它；-1 才回落到启发式并打 WARN。
      */
     int isLive;
+
+    /*
+     * 【X7 Pro 适配】设备相关的显示参数，由 JS 侧 device_profile.js 下发。
+     *
+     * X5/X6 Pro 时代这两个值写死在 native 里（面板列偏移 107、DRM plane 76），
+     * 换到 X7 Pro（视口 936x280 / 面板带 280 宽）后这两个值都变了：
+     *   - 列偏移 = (480 - 逻辑带高) / 2，X7 Pro 是 100 而不是 107；
+     *   - kmssink 申请 plane 76 可能直接失败（该 id 在别的固件上属于 UI 平面
+     *     或根本不存在），视频分支静默建不起来 → 黑屏。
+     *
+     * 语义（保证老版本 JS 不传时行为完全不变）：
+     *   panelOffset < 0  → 用 X6 Pro 默认 107
+     *   panelOffset >= 0 → 显式面板列偏移
+     *   planeId == 0     → 用 X6 Pro 默认 76
+     *   planeId < 0      → 不写 plane-id，交给 kmssink 自动挑空闲 overlay 平面
+     *   planeId > 0      → 显式 plane id（真机取证后可用 storage 覆盖）
+     */
+    int panelOffset;
+    int planeId;
 } pb2_open_req_t;
 
 void pb2_open_req_free(pb2_open_req_t *req);
@@ -98,6 +117,10 @@ int pb2_session_shutdown(void);
 
 /* gst 是否初始化成功 / registry 是否就绪 */
 int pb2_session_gst_ready(void);
+
+/* 【X7 Pro 适配】当前会话生效的面板列偏移 / kmssink plane-id（-1 = 自动） */
+int pb2_session_panel_offset(void);
+int pb2_session_plane_id(void);
 
 /*
  * gst 版本字符串（如 "GStreamer 1.22.0"）。gst_init 之前调用返回 NULL。

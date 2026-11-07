@@ -552,6 +552,8 @@
 </template>
 
 <script>
+/* 【X7 Pro 适配】设备显示 profile 的预热入口（幂等，内部缓存 Promise）。 */
+import { ensureProfile } from '../../services/device_profile.js';
 import {
   fetchRecommended,
   fetchPopular,
@@ -1051,6 +1053,10 @@ export default {
      * 之后每次 open/status 都走内存值，热路径不碰 storage（storage 是同步 FS 调用，
      * 每秒一次轮询里读盘会拖慢 QuickJS 主线程）。 */
     this._playerImpl = await player.loadPlayerImpl();
+    /* 【X7 Pro 适配】预热设备显示参数（视口尺寸 / 面板列偏移 / DRM plane-id）。
+     * 不 await：首屏渲染不能被 storage 读盘挡住；openVideo 里会 await 同一个
+     * Promise，保证播放前一定拿到 profile。 */
+    ensureProfile();
     /* 屏幕保活状态（任务 A）：_keepOn=当前是否在保活；_bgPaused=这次暂停是退后台
      * 触发的（回前台要自动恢复），用户手动暂停的不动。 */
     this._keepOn = false;

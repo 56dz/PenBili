@@ -3787,6 +3787,81 @@ async function main() {
       'spawn_ffmpeg 必须清零落点补偿状态'
     );
   });
+
+  /* ==================== X7 Pro 适配回归 ==================== */
+  const dp = await import('../src/services/device_profile.js');
+
+  test('device: X6 Pro 默认 profile 与旧硬编码完全一致（960x266 / 107 / plane 76）', () => {
+    const p = dp.buildProfile({ env: { width: 960, height: 266, model: '' } });
+    assert.strictEqual(p.name, 'x6p');
+    assert.strictEqual(p.cfg.width, 960);
+    assert.strictEqual(p.cfg.height, 266);
+    assert.strictEqual(p.panelXOffset, 107);
+    assert.strictEqual(p.planeId, 76);
+    assert.strictEqual(p.scale, 1);
+    assert.strictEqual(p.physical.height, 960);
+    assert.strictEqual(p.transpose, 2);
+  });
+
+  test('device: 拿不到 env 时回落 X6 Pro，绝不给 X7P 参数', () => {
+    const p = dp.buildProfile({});
+    assert.strictEqual(p.name, 'x6p');
+    assert.strictEqual(p.source, 'default');
+    assert.strictEqual(p.planeId, 76);
+  });
+
+  test('device: X7 Pro 936x280 → 偏移 100 / plane 自动 / 面板行 936', () => {
+    const p = dp.buildProfile({ env: { width: 936, height: 280, model: 'X7 Pro' } });
+    assert.strictEqual(p.name, 'x7p');
+    assert.strictEqual(p.cfg.width, 936);
+    assert.strictEqual(p.cfg.height, 280);
+    assert.strictEqual(p.panelXOffset, 100);
+    assert.strictEqual(p.planeId, -1);
+    assert.ok(Math.abs(p.scale - 0.975) < 1e-9);
+    assert.strictEqual(p.physical.height, 936);
+  });
+
+  test('device: X6 Pro 新几何函数与旧 playVideoRects 逐字段相同', () => {
+    const p = dp.buildProfile({ env: { width: 960, height: 266, model: '' } });
+    for (const c of [[640, 360], [1920, 1080], [360, 640], [1280, 720]]) {
+      assert.deepStrictEqual(dp.playVideoRectsFor(c[0], c[1], p, false), playVideoRects(c[0], c[1]));
+      assert.deepStrictEqual(
+        dp.playVideoRectsFor(c[0], c[1], p, true),
+        playVideoRects(c[0], c[1], LIVE_VIDEO_AREA)
+      );
+    }
+  });
+
+  test('device: X7 Pro 各种画幅的矩形不越出 280 列 / 936 行', () => {
+    const p = dp.buildProfile({ env: { width: 936, height: 280, model: '' } });
+    for (const c of [[640, 360], [1920, 1080], [360, 640], [2560, 1080], [720, 1280]]) {
+      for (const live of [false, true]) {
+        const r = dp.playVideoRectsFor(c[0], c[1], p, live).physical;
+        assert.ok(r.x >= 0 && r.x + r.width <= p.cfg.height,
+          'x 越界 ' + c + ' live=' + live + ' -> ' + JSON.stringify(r));
+        assert.ok(r.y >= 0 && r.y + r.height <= p.physical.height,
+          'y 越界 ' + c + ' live=' + live + ' -> ' + JSON.stringify(r));
+        assert.ok(r.width > 0 && r.height > 0);
+      }
+    }
+  });
+
+  test('device: storage 覆盖能锁定真机实测的偏移与 plane-id', () => {
+    const p = dp.buildProfile({
+      env: { width: 936, height: 280, model: '' },
+      override: { name: 'x7p', planeId: 90, panelXOffset: 98, width: 960, height: 280 }
+    });
+    assert.strictEqual(p.planeId, 90);
+    assert.strictEqual(p.panelXOffset, 98);
+    assert.strictEqual(p.cfg.width, 960);
+    assert.strictEqual(p.scale, 1);
+    assert.strictEqual(p.source, 'override');
+  });
+
+  test('device: describeProfile 含机型/偏移/平面诊断字段', () => {
+    const s = dp.describeProfile(dp.buildProfile({ env: { width: 936, height: 280, model: '' } }));
+    assert.ok(/x7p/.test(s) && /panelOffset=100/.test(s) && /planeId=auto/.test(s));
+  });
 }
 
 main().then(

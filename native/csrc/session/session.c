@@ -23,7 +23,13 @@
 #include "third_party/gst_min.h"
 #include "video/kms_plane.h"
 
-/* ---------------- 面板几何（与 player.c 保持一致） ---------------- */
+/* ---------------- 面板几何（X6 Pro 默认值） ----------------
+ * 【X7 Pro 适配】这两个宏只是"老版本 JS 不传设备参数时"的兜底默认值。
+ * 实际值在 do_open() 里由 req->panelOffset / req->planeId 覆盖，并写进
+ * g_w.panel_x_offset / g_w.kms_plane_id；所有建链与 SET_RECT 都读 g_w。
+ * X7 Pro 的面板带是 280 宽（列偏移 100），且 plane 76 不一定可用，
+ * device_profile.js 会下发 panelOffset=100 / planeId=-1（kmssink 自动选平面）。
+ */
 #define PB2_PANEL_X_OFFSET 107
 #define PB2_KMS_PLANE_ID 76
 #define PB2_PANEL_RATE "1497/25"
@@ -395,6 +401,9 @@ typedef struct {
     pb2_open_req_t *req;
     int rotate;
     char rect[64];
+    /* 设备自适应：面板列偏移与 kmssink plane-id（见 session.h 的字段注释） */
+    int panel_x_offset;
+    int kms_plane_id;
 
     /* seek debounce */
     long long seek_target;
@@ -559,6 +568,26 @@ static int rotation_for_transpose(int t) {
     if (t == 1) return 90;
     if (t == 3) return 180;
     return 270; /* t == 2，JS 恒传 */
+}
+
+/*
+ * 【X7 Pro 适配】kmssink 的 plane-id 片段。
+ *
+ * X6 Pro 传 "plane-id=76 "，X7 Pro 传空串（planeId=-1）：不写这个属性时
+ * kmssink 会自己从 CRTC 的空闲 overlay plane 里挑一个，不会因为写死的 id
+ * 在该机型上不存在而让整条视频分支 parse_bin 失败 / 抢不到平面 → 黑屏。
+ *
+ * 返回值指向 worker 独占的静态缓冲（g_w 只在 worker 线程访问），调用方
+ * 必须在同一次 desc 拼接里用完，不要跨 tick 保存。
+ */
+static const char *kms_plane_arg(void) {
+    static char arg[48];
+    if (g_w.kms_plane_id < 0) {
+        arg[0] = '\0';
+    } else {
+        snprintf(arg, sizeof(arg), "plane-id=%d ", g_w.kms_plane_id);
+    }
+    return arg;
 }
 
 /*
@@ -1054,7 +1083,7 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
                      "h264parse ! mppvideodec rotation=%d%s ! "
                      "%s"
                      "%s"
-                     "kmssink name=vsink plane-id=%d driver-name=rockchip sync=true "
+                     "kmssink name=vsink %sdriver-name=rockchip sync=true "
                      /*
                       * 默认严格（PB2_MAX_LATENESS / qos=true）。起播时的
                       * 迟到宽限由 arm_late_grace() 在 set_state(PLAYING) 之后
@@ -1069,7 +1098,7 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
                      "max-lateness=%d qos=%s force-aspect-ratio=false %s %s %s "
                      "render-rectangle=%s",
                      qbufs, qbytes, qns,
-                     g_w.rotate, mpperr, fpscap, vrate, PB2_KMS_PLANE_ID,
+                     g_w.rotate, mpperr, fpscap, vrate, kms_plane_arg(),
                      late_ms, qos_s, tsoff, skip_s, syncmode, g_w.rect);
         } else if (strstr(cn, "h265") || strstr(cn, "hevc")) {
             snprintf(desc, sizeof(desc),
@@ -1078,7 +1107,7 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
                      "h265parse ! mppvideodec rotation=%d%s ! "
                      "%s"
                      "%s"
-                     "kmssink name=vsink plane-id=%d driver-name=rockchip sync=true "
+                     "kmssink name=vsink %sdriver-name=rockchip sync=true "
                      /*
                       * 默认严格（PB2_MAX_LATENESS / qos=true）。起播时的
                       * 迟到宽限由 arm_late_grace() 在 set_state(PLAYING) 之后
@@ -1093,7 +1122,7 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
                      "max-lateness=%d qos=%s force-aspect-ratio=false %s %s %s "
                      "render-rectangle=%s",
                      qbufs, qbytes, qns,
-                     g_w.rotate, mpperr, fpscap, vrate, PB2_KMS_PLANE_ID,
+                     g_w.rotate, mpperr, fpscap, vrate, kms_plane_arg(),
                      late_ms, qos_s, tsoff, skip_s, syncmode, g_w.rect);
         } else {
             pb2_logf("pad-added: unsupported video caps %s", cn);
@@ -2335,10 +2364,10 @@ static int build_pipeline(pb2_open_req_t *req, int src_already_open) {
             n = snprintf(desc, sizeof(desc),
                          "filesrc location=\"%s\" ! %s ! mppvideodec rotation=%d ! "
                          "videorate ! video/x-raw,framerate=%s ! "
-                         "kmssink name=vsink plane-id=%d driver-name=rockchip sync=true "
+                         "kmssink name=vsink %sdriver-name=rockchip sync=true "
                          "max-lateness=%d qos=true force-aspect-ratio=false "
                          "skip-vsync=true render-rectangle=%s",
-                         loc1, parser, g_w.rotate, PB2_PANEL_RATE, PB2_KMS_PLANE_ID,
+                         loc1, parser, g_w.rotate, PB2_PANEL_RATE, kms_plane_arg(),
                          PB2_MAX_LATENESS, g_w.rect);
             g_w.vbranch = 1; /* 固定分支，不走 pad-added */
             raw_fixed = 1;
@@ -2509,8 +2538,17 @@ static void do_open(pb2_open_req_t *req) {
     /* 参数落库 */
     g_w.req = req;
     g_w.rotate = rotation_for_transpose(req->transpose);
+    /*
+     * 【X7 Pro 适配】设备显示参数在每次 OPEN 时重新取，确保 seek 重建、
+     * 直播重连都用同一套值。老版本 JS 不传（panelOffset=-1/planeId=0）时
+     * 与 X6 Pro 行为逐字节一致。
+     */
+    g_w.panel_x_offset = (req->panelOffset >= 0) ? req->panelOffset : PB2_PANEL_X_OFFSET;
+    g_w.kms_plane_id = (req->planeId == 0) ? PB2_KMS_PLANE_ID : req->planeId;
+    pb2_logf("OPEN device profile: panelXOffset=%d planeId=%s",
+             g_w.panel_x_offset, g_w.kms_plane_id < 0 ? "auto" : "fixed");
     snprintf(g_w.rect, sizeof(g_w.rect), "<%d,%d,%d,%d>",
-             PB2_PANEL_X_OFFSET + req->x, req->y, req->w, req->h);
+             g_w.panel_x_offset + req->x, req->y, req->w, req->h);
     g_w.seek_target = req->startMs;
     g_w.seek_pending = 0;
     g_w.eos = 0;
@@ -4201,7 +4239,7 @@ static void process_cmd(pb2_cmd_t *c) {
             if (rw < 1) rw = 1;
             if (rh < 1) rh = 1;
             /* 隐藏时不加面板偏移，免得 1x1 被推到非零坐标 */
-            if (rw > 1 || rh > 1) rx += PB2_PANEL_X_OFFSET;
+            if (rw > 1 || rh > 1) rx += (g_w.panel_x_offset > 0 ? g_w.panel_x_offset : PB2_PANEL_X_OFFSET);
             want_hide = (rw <= 1 && rh <= 1) ? 1 : 0;
             snprintf(rect, sizeof(rect), "<%d,%d,%d,%d>", rx, ry, rw, rh);
 
@@ -4680,6 +4718,13 @@ int pb2_session_shutdown(void) {
 int pb2_session_gst_ready(void) { return g_w.gst_ready; }
 
 const char *pb2_session_gst_version(void) { return g_w.gst_version; }
+
+/* 【X7 Pro 适配】info()/diag 读当前会话实际生效的设备参数（不是宏默认值） */
+int pb2_session_panel_offset(void) {
+    return g_w.panel_x_offset > 0 ? g_w.panel_x_offset : PB2_PANEL_X_OFFSET;
+}
+
+int pb2_session_plane_id(void) { return g_w.kms_plane_id; }
 
 unsigned long long pb2_session_frames(void) {
     return atomic_load_explicit(&g_w.probe.frames, memory_order_relaxed);

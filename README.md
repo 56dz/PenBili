@@ -4,9 +4,10 @@
 
 这是一款跑在有道词典笔上的 B 站客户端，用有道自家的 Falcon 小程序框架（QuickJS + Vue 2 单文件组件）写成。屏幕只有 960×266 点，指甲盖大小，所以我按 iPad 版 B 站的骨架重做了界面，把推荐、搜索、播放、评论、图文、直播全塞进这一个页面里。
 
-当前版本 `3.5.5`，只支持 **X6 Pro**（RK3562）。X5 分支已停止维护。
+当前版本 `3.6.0`，支持 **X6 Pro / X7 Pro**（RK3562，aarch64）。X5 分支已停止维护。
+X7 Pro 的播放器适配（黑屏修复、设备参数运行时自适应）见 [`docs/x7pro-adaptation.md`](docs/x7pro-adaptation.md)。
 
-![version](https://img.shields.io/badge/version-3.5.5-blue)
+![version](https://img.shields.io/badge/version-3.6.0-blue)
 ![license](https://img.shields.io/badge/license-GPL--3.0-green)
 
 ---
@@ -238,11 +239,11 @@ native 侧三个模块：
 
 | 项 | 要求 |
 | --- | --- |
-| Node.js | 实测 v24.21.0 |
+| Node.js | 打包器需 **Node 18**（22+ 会报 `No such module: http_parser`）；单测可用任意新版 |
 | aiot-vue-cli | 有道小程序打包器，1.0.32 验证 |
 | Zig | 交叉编译 native 库，0.16.0 验证 |
 | adb | 部署与调试 |
-| Python | 仅部分工具脚本用；依赖 PIL 的脚本要指定带 PIL 的解释器 |
+| Python | 打包字节码与 ELF 校验用 |
 
 ### 命令
 
@@ -253,12 +254,23 @@ npm ci
 # 交叉编译 native（产出三个 .so 到 libs/）
 npm run native
 
-# 打 AMR 包（产出 8002026110200001.3_5_5.amr，约 224 KB）
+# 打 AMR 包（产出 8002026110200001.3_6_0.amr）
 npm run build
 
 # 单测
 npm test
 ```
+
+**WSL 一键构建（推荐，含 X7 Pro 的 SKU 目录与字节码打包）：**
+
+```bash
+NODE_BIN=$PWD/node_modules/node/bin/node.exe bash tools/build-wsl.sh
+```
+
+它等价于 `native/build.ps1` + 打包，但全部在 WSL 里跑：zig 编译 → ELF 校验 →
+把三个 `.so` 铺进 `libs/` 与 SKU 目录（`arm64/`、`arm64-y02_1/`，保证 X7 Pro
+的 PMS 能装载）→ rollup → Linux 版 qjsc 编 `.js.bin` → 重算 cert 组包。
+细节与踩坑见 [`docs/x7pro-adaptation.md`](docs/x7pro-adaptation.md) §5。
 
 `npm run native` 内部是 `powershell -File native/build.ps1`，默认 target 是 `aarch64`。X6 Pro 是 **aarch64 64 位**，装 32 位库会在 `dynamic_load_jsapi` 处直接报 `wrong ELF class: ELFCLASS32`。
 
@@ -310,7 +322,9 @@ adb shell "grep -a 'Esmart1-win0' -A9 /sys/kernel/debug/dri/0/summary"
 
 ## 已知限制
 
-- **只支持 X6 Pro**。X5 的 32 位 arm 分支已停止维护并转移到[PenBili-CVI](https://github.com/56dz/PenBili-CVI)
+- **支持 X6 Pro / X7 Pro**（均为 aarch64）。X7 Pro 的视口、面板列偏移与 DRM
+  plane 由 `src/services/device_profile.js` 运行时探测，必要时用 storage 键
+  `bili_device_profile` 覆盖。X5 的 32 位 arm 分支已停止维护并转移到[PenBili-CVI](https://github.com/56dz/PenBili-CVI)
 - **无弹幕**。v2.7.0 移除，因为弱设备上逐帧文字渲染会拖垮解码
 - **无倍速播放**
 - **未登录时服务端最高只给 480P**

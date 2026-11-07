@@ -18,6 +18,10 @@
           <text :class="'detail d-' + s.state">{{ s.detail }}</text>
         </div>
       </div>
+      <!-- 【X7 Pro 适配】黑屏排障：显示出本机生效的 profile 与真实 DRM 平面摘要 -->
+      <div class="row">
+        <text class="detail">{{ deviceText }}</text>
+      </div>
       <div class="foot">
         <text class="summary">{{ summary }}</text>
         <div :class="running ? 'btn btn-dim' : 'btn'" @click="onPrimaryTap">
@@ -37,6 +41,7 @@ import { createClient, cookieFromSession, DEFAULT_UA, REFERER } from '../../serv
 import { netAvailable } from '../../services/net.js';
 import { loadSession, loadSettings, saveSession, logWarn } from '../../services/storage.js';
 import * as player from '../../services/player.js';
+import { ensureProfile, describeProfile } from '../../services/device_profile.js';
 
 const GLYPHS = {
   pending: '·',
@@ -54,6 +59,7 @@ export default {
       running: false,
       playing: false,
       summary: '准备就绪',
+      deviceText: '设备信息读取中…',
       bvidText: '',
       idleText: '视频区 · 起播后显示 640x360'
     };
@@ -63,9 +69,31 @@ export default {
     this._timers = new Set();
     this.client = createClient({});
     this.target = { bvid: '' };
+    this.loadDeviceInfo();
     this.run();
   },
   methods: {
+    /* 【X7 Pro 适配】把「这次播放到底用了哪套设备参数」摆到自检页上。
+     * 黑屏时先读这一行：profile 判错机型 / plane=auto 却找不到 ACTIVE 平面 /
+     * native 没装载（info 不可用）——三种原因一眼分开。全程只读，不改设备。 */
+    async loadDeviceInfo() {
+      try {
+        const p = await ensureProfile();
+        const info = await player.info();
+        const kms = await player.kmsProbe();
+        let win = 'KMS 摘要不可用';
+        if (kms && kms.ok && typeof kms.summary === 'string' && kms.summary.length) {
+          const m = /((?:Esmart|Cluster)\d+-win\d+): ACTIVE/.exec(kms.summary);
+          win = m ? m[1] + ' ACTIVE' : 'overlay 无 ACTIVE';
+        }
+        const pid = info && info.planeId !== undefined ? info.planeId : '?';
+        this.deviceText = describeProfile(p) + ' | native plane=' + pid + ' | ' + win;
+        logWarn('[diag] ' + this.deviceText);
+      } catch (e) {
+        this.deviceText = '设备探测失败: ' + ((e && e.message) || 'unknown');
+        logWarn('[diag] ' + this.deviceText);
+      }
+    },
     glyphOf(state) {
       return GLYPHS[state] || '·';
     },

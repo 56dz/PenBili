@@ -285,7 +285,21 @@ export function buildOpenArgs(opts) {
   ];
 }
 
-// opts: { input, input2, startMs, durationMs, fps, audio, transpose, rect, audioDevice, userAgent, referer, fpsCap }
+// 【X7 Pro 适配】open 的第 17/18 个位置参数：面板列偏移 / kmssink plane-id。
+// 只在真正调 native 时追加，buildOpenArgs 的 16 参契约保持不变（单测逐项断言）。
+// 缺省 -1 / 0 = 让 native 回落 X6 Pro 的 107 / 76，老设备行为不变。
+function intOr(v, dflt) {
+  if (v === undefined || v === null || v === '') return dflt;
+  const n = Math.round(Number(v));
+  return isFinite(n) ? n : dflt;
+}
+
+function deviceArgs(opts) {
+  const o = opts || {};
+  return [intOr(o.panelOffset, -1), intOr(o.planeId, 0)];
+}
+
+// opts: { input, input2, startMs, durationMs, fps, audio, transpose, rect, audioDevice, userAgent, referer, fpsCap, isLive, panelOffset, planeId }
 export async function openSession(opts) {
   const m = await getPlayerModule();
   if (!m) return fail('PLAYER_NATIVE_MISSING', '播放器模块不可用（未随包安装 libjsapi_player2.so / libjsapi_player.so）');
@@ -296,7 +310,8 @@ export async function openSession(opts) {
   if (!isSafeReferer(o.referer)) return fail('PLAYER_BAD_HEADERS', 'Referer 参数不合法');
   const rect = o.rect || null;
   if (!rect || !(rect.width > 0) || !(rect.height > 0)) return fail('PLAYER_BAD_RECT', '视频矩形未计算');
-  const res = call('open', buildOpenArgs(o));
+  // v1(player.c) 只按 argv[0..14] 取参，多出来的两个参数会被忽略，不影响回退路径。
+  const res = call('open', buildOpenArgs(o).concat(deviceArgs(o)));
   if (res && res.ok === false && !res.code) res.code = 'PLAYER_OPEN_FAILED';
   return res;
 }
@@ -374,6 +389,13 @@ export async function redraw() {
 export async function info() {
   await getPlayerModule();
   return callOptional('info', []);
+}
+
+/* 【X7 Pro 适配】只读 DRM/KMS 平面摘要（player2 才有；v1 返回
+ * PLAYER_UNSUPPORTED，诊断页据此显示"不可用"而不是抛异常）。 */
+export async function kmsProbe() {
+  await getPlayerModule();
+  return callOptional('kmsProbe', []);
 }
 
 export function warnUnsupportedOnce(what) {

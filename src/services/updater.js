@@ -18,7 +18,7 @@ import { httpGet } from './net.js';
 import { logWarn } from './storage.js';
 import { getPlayerModule } from './player.js';
 
-export const APP_VERSION = '3.5.5';
+export const APP_VERSION = '3.6.0';
 
 /** GitHub 仓库（检测/下载的唯一来源） */
 export const REPO = '56dz/PenBili';

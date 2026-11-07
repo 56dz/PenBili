@@ -37,8 +37,11 @@
 #include "core/queue.h"
 #include "session/cmd.h"
 #include "session/session.h"
+#include "video/kms_plane.h"
 
-#define PB2_VERSION "3.0.0"
+/* 3.6.0：X7 Pro 适配 —— 面板列偏移 / kmssink plane-id 由 open 参数下发，
+ *        kmsProbe() 导出 DRM 平面摘要；X6 Pro 缺省行为不变。 */
+#define PB2_VERSION "3.6.0"
 #define PB2_MODULE_NAME "player2"
 
 /* 与 src/services/player.js 的 JS 侧规则保持一致 */
@@ -153,9 +156,14 @@ static char *dup_or_null(const char *s) {
 
 /*
  * open(input, startMs, durationMs, fps, audio, transpose,
- *      x, y, w, h, audioDevice, userAgent, referer, input2, fpsCap)
+ *      x, y, w, h, audioDevice, userAgent, referer, input2, fpsCap,
+ *      isLive, panelOffset, planeId)
  *
- * 15 个位置参数，顺序与 src/services/player.js 的 buildOpenArgs 严格一致。
+ * 18 个位置参数，顺序与 src/services/player.js 的 buildOpenArgs 严格一致。
+ * 前 16 个是既有契约；最后两个是【X7 Pro 适配】新增的可选设备参数：
+ *   panelOffset  <0 用 X6 Pro 默认 107，>=0 显式面板列偏移；
+ *   planeId      0  用 X6 Pro 默认 76，-1 交给 kmssink 自动选平面，>0 显式指定。
+ * 老版本 JS 只传 15/16 个参数时行为完全不变（X6 Pro 原样）。
  * 立即返回：只做参数校验 + strdup + 入队，不做任何耗时操作。
  */
 static JSValue js_open(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
@@ -282,6 +290,14 @@ static JSValue js_open(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
      */
     req->isLive = (argc >= 16) ? (int)arg_int(ctx, argc, argv, 15, -1) : -1;
     if (req->isLive != 0 && req->isLive != 1) req->isLive = -1;
+
+    /*
+     * 【X7 Pro 适配】设备显示参数（可选）。缺省值让 X6 Pro 走原来的硬编码：
+     * panelOffset=-1 → native 用 107；planeId=0 → native 用 76。
+     * device_profile.js 在 X7 Pro 上会传 panelOffset=100 / planeId=-1。
+     */
+    req->panelOffset = (argc >= 17) ? (int)arg_int(ctx, argc, argv, 16, -1) : -1;
+    req->planeId = (argc >= 18) ? (int)arg_int(ctx, argc, argv, 17, 0) : 0;
 
     JS_FreeCString(ctx, input);
     if (audio_dev) JS_FreeCString(ctx, audio_dev);
@@ -687,10 +703,37 @@ static JSValue js_info(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
     mk_str(ctx, "version", PB2_VERSION, res);
     mk_str(ctx, "gstVersion", pb2_session_gst_version(), res);
     mk_bool(ctx, "registryReady", pb2_session_gst_ready(), res);
-    mk_int(ctx, "planeId", 76, res);
-    mk_int(ctx, "panelXOffset", 107, res);
+    /* 【X7 Pro 适配】返回本次会话真正生效的值，不再是写死的 76/107 */
+    mk_int(ctx, "planeId", pb2_session_plane_id(), res);
+    mk_int(ctx, "panelXOffset", pb2_session_panel_offset(), res);
     mk_bool(ctx, "logOn", pb2_log_on(), res);
     mk_int(ctx, "rssKb", (long long)pb2_rss_kb(), res);
+    return res;
+}
+
+/*
+ * kmsProbe() —— 【X7 Pro 适配】黑屏现场取证。
+ *
+ * 只读 /sys/kernel/debug/dri/0/summary 并原样返回给 JS（diag 页显示），
+ * 用于回答「这台笔上到底有没有 /dev/dri、UI 平面叫什么、视频平面有没有
+ * ACTIVE、dst 几何是多少」。X6 Pro 上写死 plane 76 没问题，换机型后必须
+ * 先看这份摘要再决定 planeId / panelOffset，不能靠猜。
+ *
+ * 必须是非阻塞的：只做一次 open/read/close（debugfs 约 200~600us）。
+ * 用调用方静态缓冲，不碰 worker 的巡检缓冲。
+ */
+static JSValue js_kms_probe(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    static char summary[16384];
+    int n;
+    JSValue res = JS_NewObject(ctx);
+    (void)this_val;
+    (void)argc;
+    (void)argv;
+    n = pb2_kms_summary(summary, sizeof(summary));
+    mk_bool(ctx, "ok", n >= 0, res);
+    mk_int(ctx, "bytes", n, res);
+    mk_str(ctx, "path", "/sys/kernel/debug/dri/0/summary", res);
+    mk_str(ctx, "summary", n > 0 ? summary : "", res);
     return res;
 }
 
@@ -717,7 +760,8 @@ static JSValue js_info(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
     X("recover", js_recover, 0) \
     X("installAmr", js_install_amr, 1) \
     X("release", js_release, 0) \
-    X("info", js_info, 0)
+    X("info", js_info, 0) \
+    X("kmsProbe", js_kms_probe, 0)
 
 static int player2_module_init(JSContext *ctx, JSModuleDef *m) {
     JSValue def = JS_NewObject(ctx);
