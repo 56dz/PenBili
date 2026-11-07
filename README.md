@@ -4,10 +4,10 @@
 
 这是一款跑在有道词典笔上的 B 站客户端，用有道自家的 Falcon 小程序框架（QuickJS + Vue 2 单文件组件）写成。屏幕只有 960×266 点，指甲盖大小，所以我按 iPad 版 B 站的骨架重做了界面，把推荐、搜索、播放、评论、图文、直播全塞进这一个页面里。
 
-当前版本 `3.6.0`，支持 **X6 Pro / X7 Pro**（RK3562，aarch64）。X5 分支已停止维护。
+当前版本 `3.5.6`，支持 **X6 Pro / X7 Pro**（RK3562，aarch64）。X5 分支已停止维护。
 X7 Pro 的播放器适配（黑屏修复、设备参数运行时自适应）见 [`docs/x7pro-adaptation.md`](docs/x7pro-adaptation.md)。
 
-![version](https://img.shields.io/badge/version-3.6.0-blue)
+![version](https://img.shields.io/badge/version-3.5.6-blue)
 ![license](https://img.shields.io/badge/license-GPL--3.0-green)
 
 ---

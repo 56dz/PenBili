@@ -17,7 +17,7 @@
 
 import { buildPlayurlQuery, parseHtml5Response, validateStreamUrl, dimsForQn, QN_LADDER, HTML5_FPS } from './playurl.js';
 import { deriveMixinKey } from './wbi.js';
-import { probeVideoRects } from '../screen.js';
+import { playVideoRectsFor } from '../device_profile.js';
 
 export const STEPS = [
   { id: 'net', label: '网络通道' },
@@ -204,15 +204,30 @@ export async function runProbe(ctx) {
   // 7) 起播（真正 open）
   if (guard()) return { cancelled: true };
   const dims = dimsForQn(stream.qn);
-  const rects = probeVideoRects(dims.width, dims.height);
+  /*
+   * 【3.6.2】矩形与平面参数必须和首页播放走同一套 profile。
+   *
+   * 之前这里用的是 screen.js 的 probeVideoRects（X6 Pro 常量 LOGICAL 960x266 /
+   * VIDEO_AREA 469x240），在 X7 Pro 上算出来是 240x427、面板偏移回落到 107 ——
+   * 真机自检页那行 `playing out=240x427` 就是它。后果有两个：
+   *   ① 自检页的画面位置与首页不一致，看不出首页的真实表现；
+   *   ② 偏移 107 在 280 宽的逻辑带上会顶出 7px，平面被裁。
+   * 现在统一用 ensureProfile() + playVideoRectsFor()，并把 panelOffset / planeId
+   * 一并下发（不传时 native 会回落到 X6 的 107/76）。
+   */
+  const profile = c.profile || (c.ensureProfile ? await c.ensureProfile() : null);
+  const rects = playVideoRectsFor(dims.width, dims.height, profile, false);
   const openRes = await c.player.openSession({
     input: stream.url,
     startMs: 0,
     durationMs: durationMs,
     fps: HTML5_FPS,
     audio: true,
-    transpose: 2,
+    transpose: profile ? profile.transpose : 2,
     rect: rects.physical,
+    panelOffset: profile ? profile.panelXOffset : undefined,
+    planeId: profile ? profile.planeId : undefined,
+    swScale: profile ? profile.swScale : undefined,
     audioDevice: '',
     userAgent: c.mediaUa,
     referer: c.mediaReferer
@@ -239,6 +254,8 @@ export async function runProbe(ctx) {
   let lastPos = 0;
   let playState = 'playing';
   let playErr = '';
+  let audioBytes = 0;
+  let hasAudio = false;
   for (let r = 0; r < WATCH_ROUNDS; r++) {
     await (c.sleep ? c.sleep(WATCH_INTERVAL_MS) : Promise.resolve());
     if (guard()) {
@@ -250,8 +267,15 @@ export async function runProbe(ctx) {
     if (st && st.ok !== false) {
       if (typeof st.frames === 'number' && st.frames > maxFrames) maxFrames = st.frames;
       if (typeof st.positionMs === 'number') lastPos = st.positionMs;
+      /* 音频字节是「有没有真声音」的唯一硬证据：画面正常但 ab 恒 0 就是丢音轨。
+       * 自检页把它显示出来，不用再靠用户描述「有没有声音」。 */
+      if (typeof st.audioBytes === 'number') audioBytes = st.audioBytes;
+      if (st.hasAudio !== undefined) hasAudio = !!st.hasAudio;
       if (st.state) playState = st.state;
-      if (st.error) playErr = String(st.error).slice(0, 80);
+      /* native 的字段名是 lastError（码）/ lastErrorMsg（文本）。
+       * 以前读的是 st.error —— 永远 undefined，所以自检页只显示「播放错误：」。 */
+      if (st.lastErrorMsg) playErr = String(st.lastErrorMsg).slice(0, 120);
+      else if (st.lastError) playErr = 'code=' + st.lastError;
     } else if (st && st.ok === false) {
       playState = 'error';
       playErr = st.error || st.code || 'status 失败';
@@ -268,9 +292,13 @@ export async function runProbe(ctx) {
     await c.player.stop();
     await c.player.release();
   }
-  if (playState === 'error') return stepFail('watch', '播放错误: ' + playErr);
+  if (playState === 'error') {
+    return stepFail('watch', '播放错误: ' + (playErr || '(native 未给消息)') +
+      ' · 帧=' + maxFrames + ' 音=' + audioBytes + (hasAudio ? '/有' : '/无'));
+  }
   if (!(maxFrames > 0)) return stepFail('watch', '5s 无帧输出（state=' + playState + '）');
-  ok('watch', '帧=' + maxFrames + ' 位=' + (lastPos / 1000).toFixed(1) + 's ✓ 播放保持');
+  ok('watch', '帧=' + maxFrames + ' 位=' + (lastPos / 1000).toFixed(1) + 's 音=' +
+    audioBytes + (hasAudio ? '/有' : '/无') + ' ✓');
 
   return {
     ok: true,

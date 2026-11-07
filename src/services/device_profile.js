@@ -22,21 +22,49 @@
 
 import { getString, logWarn } from './storage.js';
 import { fitLogicalRect, logicalRectToPhysicalRect } from './screen.js';
+import { buildLayout } from './layout.js';
 
 export const PROFILE_KEY = 'bili_device_profile';
 
-// CSS 设计画布（base.less / app.js 的 setViewPort 值）。改动它等于重排全站 UI。
+// CSS 设计画布**基准**（960x266，X6 Pro 的原生画布）。
+// 3.6.1 起画布不再写死：app.js 用 profile.cfg.width 调 setViewPort，页面按
+// layout.js 算出的弹性尺寸布局。这个常量只剩两个用途：
+//   ① 拿不到任何设备信息时的兜底画布；
+//   ② 单测/文档里对照「X6 基线」。
 export const DESIGN = { width: 960, height: 266 };
-// 播放态视频区（设计坐标，与 screen.js VIDEO_AREA / LIVE_VIDEO_AREA 一致）
-export const VIDEO_DESIGN = { x: 213, y: 0, width: 469, height: 240 };
-export const LIVE_VIDEO_DESIGN = { x: 213, y: 0, width: 469, height: 266 };
 // DRM 面板物理尺寸（GPU 分支文档：RK3562 单模式 480x960@59.88）
 export const PANEL = { width: 480, height: 960 };
 
-// 两个已知机型的兜底档。注意 X7 Pro 的 planeId=-1 是刻意的：
-// 不写 plane-id 时 kmssink 会自己挑空闲 overlay 平面，比猜一个 id 稳。
-export const X6P_DEFAULTS = { width: 960, height: 266, planeId: 76 };
-export const X7P_DEFAULTS = { width: 936, height: 280, planeId: -1 };
+// 两个已知机型的兜底档。
+//
+// 【planeId / swScale 的三次真机回归，别再改回去】
+//   3.6.0  X7P 用 planeId=-1（kmssink 自选）：画面出来了，但被压成一条
+//          贴在底部 —— 挑到了没有缩放能力的 Smart 平面（1:1 出图，
+//          720p 的 buffer 塞不进 253x450 的窗口，driver 裁一块贴上去）。
+//   3.6.1  改成 X6 验证过的 76（Esmart1-win0，带缩放器）：**整片不动了**。
+//          真机日志：start gate 4s 内 vbranch 有、frames 一直是 0，
+//          set_state(PLAYING) 返回 0（FAILURE），管线停在 PAUSED。
+//          => 76 这个 DRM plane 对象号在 X7 Pro 的固件上不可用。
+//   3.6.3  结论：**不要再赌平面号**。planeId=-1 让 kmssink 自选，同时
+//          swScale=1 在解码后插一级 videoscale，把 buffer 缩到窗口大小。
+//          sink 拿到的画面与 render-rectangle 等大，挑到没有缩放能力的
+//          平面也能 1:1 正确上屏，几何完全由矩形决定。
+//          native 侧还有一道兜底：显式 plane-id 起不来时自动切
+//          auto+videoscale 重试一次（每会话一次）。
+//
+// X6 Pro 保持原样：76 + 硬件缩放（0 拷贝，且早已验证）。
+// 真机要覆盖时用 storage：
+//   bili_device_profile = {"planeId": 90, "swScale": 0}   // 换显式 id
+//   bili_device_profile = {"planeId": -1}                  // 交给 kmssink 自选
+//   bili_device_profile = {"swScale": 2}                   // 固件真旋转了 buffer
+//
+// 【3.5.6 比例修复】swScale=1 时 native 会把 videoscale 的目标宽高按 rotate
+// 互换。原因：mppvideodec rotation=270 只是旋转意图，videoscale 看到的仍是
+// 横向帧；直接缩到物理竖矩形会把 16:9 拉成 9:16（真机「视频被压扁，不同
+// 比例压扁程度不一样」）。若某固件真的把输出 buffer 转成了竖帧，设 2 关掉
+// 互换即可，不用重新打包。
+export const X6P_DEFAULTS = { width: 960, height: 266, planeId: 76, swScale: 0 };
+export const X7P_DEFAULTS = { width: 936, height: 280, planeId: -1, swScale: 1 };
 
 function num(v, fallback) {
   const n = typeof v === 'number' ? v : parseFloat(v);
@@ -79,12 +107,36 @@ export function buildProfile(input) {
   const env = o.env || null;
   const ov = o.override || {};
 
-  // 视口：override > env > 按机型兜底（拿不到 env 时保守按 X6 Pro）
-  const height = clampInt(ov.height, env && env.height ? env.height : X6P_DEFAULTS.height, 120, 1200);
-  const isX7 = height >= 272 || /x7/i.test(String((env && env.model) || '')) ||
+  /*
+   * 【env 可信度闸门】3.6.1 起画布宽 = env 宽，所以 env 一旦报的是「面板尺寸」
+   * 而不是「Falcon 视口」，整页画布就会按 480 宽去排（真机上等于满屏错位）。
+   *
+   * SDK 文档只说 deviceWidth/deviceHeight 是「设备分辨率」，没有说明它是旋转前
+   * 还是旋转后。已知真机事实：
+   *   X6 Pro 视口 960x266（宽高比 3.61），X7 Pro 936x280（3.34），
+   *   物理面板都是 480x960（横向 480x960 / 纵向 960x480，宽高比 ≤2）。
+   * 所以判据取「宽高比 ≥ 2.2 且宽 ≥ 600」才认为是可用视口；
+   * 否则**尺寸整体丢弃**（不能只丢宽：480x960 会把高度当成 960），
+   * 退回按机型预设。此时机型只能靠 deviceModel 认（X6/X7 的物理面板同为
+   * 480x960，面板尺寸本身不含信息），认不出就按 X6 基线走。
+   */
+  const envW = env && env.width ? env.width : 0;
+  const envH = env && env.height ? env.height : 0;
+  const envUsable = envW >= 600 && envH > 0 && envW / envH >= 2.2;
+  const modelText = String((env && env.model) || '');
+  const modelX7 = /x7/i.test(modelText);
+
+  // 视口：override > env（可信时） > 机型预设（认不出机型时按 X6 Pro）
+  const height = clampInt(
+    ov.height,
+    envUsable ? envH : (modelX7 ? X7P_DEFAULTS.height : X6P_DEFAULTS.height),
+    120,
+    1200
+  );
+  const isX7 = envUsable ? height >= 272 : modelX7 ||
     String(ov.name || '').toLowerCase() === 'x7p';
   const preset = isX7 ? X7P_DEFAULTS : X6P_DEFAULTS;
-  const width = clampInt(ov.width, env && env.width ? env.width : preset.width, 320, 1920);
+  const width = clampInt(ov.width, envUsable ? envW : preset.width, 320, 1920);
 
   const panelWidth = clampInt(ov.panelWidth, PANEL.width, 240, 4096);
   // 面板行数：逻辑宽度映射过去（X6P 960 行、X7P 936 行），不是固定的 960。
@@ -92,52 +144,79 @@ export function buildProfile(input) {
   // 逻辑带在 480 宽面板里居中；X6P=107、X7P=100。
   const panelXOffset = clampInt(ov.panelXOffset, Math.round((panelWidth - height) / 2), 0, panelWidth - 1);
   const panelYOffset = clampInt(ov.panelYOffset, 0, 0, panelHeight - 1);
+  /*
+   * rowOffset：UI 合成带在「面板行方向」的起始行。
+   *
+   * 为什么会有这个量：面板固定 480x960，而视口只有 936 行（X6 是 960 行，
+   * 正好占满）。多出来的 24 行怎么分，取决于合成器是「把 936 行居中放进
+   * 960 行」还是「从第 0 行开始贴」。视频平面走的是面板绝对坐标，一旦
+   * 猜错，画面相对 UI 挖洞就会整体偏移（真机表现：画面贴边/上下被裁）。
+   *
+   * X6 Pro 上 936→960 差值为 0，默认 0 与原行为逐像素一致；
+   * X7 Pro 若取证发现 UI 平面 dst 的 y 是 12，就把 rowOffset 设成 12
+   * （storage: bili_device_profile = {"rowOffset":12}），不用重新打包。
+   */
+  const rowOffset = clampInt(ov.rowOffset, 0, -64, 256);
   const direction = clampInt(ov.direction, 270, 0, 270);
   const transpose = clampInt(ov.transpose, 2, 1, 3);
   const planeId = Math.round(num(ov.planeId, preset.planeId));
+  /*
+   * swScale：解码后是否插 videoscale（见上面 X6P/X7P 的注释）。
+   * 显式 plane-id 时默认不开（走硬件缩放）；planeId<0（自选平面）默认开，
+   * 因为自选很可能挑到没有缩放器的 Smart 平面。override 可显式关掉。
+   */
+  const swScale = clampInt(ov.swScale, planeId < 0 ? 1 : preset.swScale, 0, 2);
 
-  // setViewPort(960) 把 960 个设计像素铺满 width 个物理像素。
-  const scale = width / DESIGN.width;
+  // setViewPort(cfg.width) 让 1 个设计像素 = 1 个物理像素。
+  // 【3.6.1 改动】以前 setViewPort(960) + scale = width/960，X7 Pro 上整页被
+  // 缩到 0.975，底部留 21px 黑边、网格第 5 列被挤掉（右侧 184px 黑边）。
+  // 现在画布 = 视口，scale 恒 1；所有尺寸由 layout.js 按视口重算。
+  const scale = 1;
+  const layout = buildLayout(width, height);
 
   return {
     name: String(ov.name || (isX7 ? 'x7p' : 'x6p')),
-    source: ov.width || ov.height ? 'override' : env && env.width ? 'env' : 'default',
+    source: ov.width || ov.height ? 'override' : envUsable ? 'env' : 'default',
     env: env ? { width: env.width, height: env.height, model: env.model } : null,
     design: { width: DESIGN.width, height: DESIGN.height },
     // cfg.json screen 语义：width = 视口宽（面板行方向），height = 视口高（面板列方向）
     cfg: { width: width, height: height, xoffset: panelYOffset, yoffset: panelXOffset, direction: direction },
     scale: scale,
+    // 页面布局（物理像素）—— .vue 里所有容器宽高都从这里来
+    layout: layout,
     logical: { width: width, height: height },
     // logicalRectToPhysicalRect 用的 physical：height 必须是「面板行数」
     physical: { width: height, height: panelHeight },
     panelXOffset: panelXOffset,
     panelYOffset: panelYOffset,
+    rowOffset: rowOffset,
     panelWidth: panelWidth,
     panelHeight: panelHeight,
     direction: direction,
     transpose: transpose,
     planeId: planeId,
-    videoArea: { x: VIDEO_DESIGN.x, y: VIDEO_DESIGN.y, width: VIDEO_DESIGN.width, height: VIDEO_DESIGN.height },
-    liveVideoArea: { x: LIVE_VIDEO_DESIGN.x, y: LIVE_VIDEO_DESIGN.y, width: LIVE_VIDEO_DESIGN.width, height: LIVE_VIDEO_DESIGN.height }
+    swScale: swScale,
+    videoArea: { x: layout.play.left, y: 0, width: layout.play.videoW, height: layout.play.videoH },
+    liveVideoArea: { x: layout.play.left, y: 0, width: layout.play.videoW, height: height }
   };
 }
 
 /*
  * 按 profile 算 native 需要的物理矩形。
- * 与 screen.js:playVideoRects 的差别只有两点：
- *   ① 设计坐标乘 scale（X7 Pro 上 UI 被 setViewPort 缩放，hole 也跟着缩小）；
- *   ② physical.height 用视口宽（X7P 936 而不是 960）。
- * X6 Pro 上 scale=1、physical.height=960，结果与旧函数完全相同。
+ *
+ * 视频区（p.videoArea / p.liveVideoArea）已经是 layout.js 按视口算出的
+ * **物理像素**，所以这里不再乘 scale —— 3.6.1 起画布就是视口，1:1 不缩放。
+ * X6 Pro 上 layout.play = 213/469/278 + 240/266，与旧常量逐像素相同，
+ * 因此本函数在 X6 上的输出与 screen.js:playVideoRects 完全一致（单测守护）。
  */
 export function playVideoRectsFor(videoWidth, videoHeight, profile, live) {
   const p = profile || buildProfile({});
   const area = live ? p.liveVideoArea : p.videoArea;
-  const s = p.scale;
   const box = {
-    x: Math.round(area.x * s),
-    y: Math.round(area.y * s),
-    width: Math.round(area.width * s),
-    height: Math.round(area.height * s)
+    x: Math.round(area.x),
+    y: Math.round(area.y),
+    width: Math.round(area.width),
+    height: Math.round(area.height)
   };
   const fit = fitLogicalRect(videoWidth, videoHeight, { width: box.width, height: box.height });
   const logical = {
@@ -147,17 +226,23 @@ export function playVideoRectsFor(videoWidth, videoHeight, profile, live) {
     height: fit.height
   };
   const physical = logicalRectToPhysicalRect(logical, p.logical, p.physical);
+  /* 行方向原点补偿（见 buildProfile 里 rowOffset 的注释）。默认 0。 */
+  physical.y += Math.round(p.rowOffset || 0);
   return { logical: logical, physical: physical };
 }
 
 // 只读摘要，日志/诊断页用（不泄露无关字段）
 export function describeProfile(p) {
   if (!p) return 'profile=(none)';
+  const L = p.layout || {};
   return 'profile=' + p.name + '/' + p.source +
     ' viewport=' + p.cfg.width + 'x' + p.cfg.height +
-    ' scale=' + p.scale.toFixed(3) +
+    ' canvas=' + (L.width || '?') + 'x' + (L.height || '?') +
+    ' cols=' + (L.grid ? L.grid.cols + 'x' + L.grid.card : '?') +
     ' panelOffset=' + p.panelXOffset +
+    ' rowOffset=' + (p.rowOffset || 0) +
     ' planeId=' + (p.planeId < 0 ? 'auto' : p.planeId) +
+    ' swScale=' + (p.swScale ? 1 : 0) +
     ' transpose=' + p.transpose;
 }
 

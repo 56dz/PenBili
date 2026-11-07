@@ -1,8 +1,14 @@
 # X7 Pro 播放器适配记录（黑屏修复）
 
-> 版本：PenBili 3.6.0（基于上游 3.5.5，只支持 X6 Pro）
-> 目标：让视频在**有道词典笔 X7 Pro** 上正常出画，不再黑屏；X6 Pro 行为保持不变。
-> 状态：代码/构建/单测已完成，**真机验收待做**（本次设备未连 adb，见 §7）。
+> 版本：PenBili **3.5.6**（基于上游 3.5.5）
+> 说明：文中出现的 3.6.0 / 3.6.1 / 3.6.2 / 3.6.3 是**开发期的内部构建号**，
+> 只用于区分「哪一轮改了什么」；对外发布的包统一用 3.5.6（安装器按这个版本号校验）。
+> 目标：让视频在**有道词典笔 X7 Pro** 上正常出画、UI 不留黑边、音频设备被占时也不整体失败；
+> X6 Pro 行为保持不变（960×266 上所有几何值逐像素一致，单测守护）。
+> 状态：黑屏、首页黑边、画面贴底、自检页几何、错误消息为空均已修复；
+> 3.5.6 内又修了「音频设备被占导致整条管线判死」（§3.7）与
+> 「视频被压扁、不同比例压扁程度不一样」（§3.8，videoscale 目标旋转方向用反）。
+> **真机验收待做**（开发机无 adb 设备，见 §7）。
 
 ---
 
@@ -16,7 +22,24 @@ X7 Pro 的视口是 `936x280`（`/etc/miniapp/resources/cfg.json`），逻辑带
 视频分支静默失败 → **播放页黑屏（音频往往还在响）**。
 
 修法不是把 76/107 换成另一组魔法数字，而是把设备参数变成**运行时可探测、
-可覆盖**的值，并让 `kmssink` 在未知机型上自己挑空闲平面。
+可覆盖**的值。
+
+3.6.1 又补了三件事（真机截图反馈）：
+
+1. **UI 右侧/底部黑边**：根因是 `setViewPort(960)` + CSS 写死 960×266。X7 Pro 的
+   视口只有 936×280，整页先被压到 0.975，底部剩 21px；首页 5 张 166 宽的卡片
+   在缩放后正好卡在临界值，第 5 列整列换行 → 右侧空出 180px。现在**画布 = 视口**
+   （1:1 不缩放），各栏尺寸由 `src/services/layout.js` 按视口算，网格留 4~12px
+   防换行余量。
+2. **画面贴底/被压扁**：3.6.0 让 `kmssink` 自选平面（`planeId=-1`），结果挑到
+   **没有缩放能力的 Smart 平面** —— 720p/1080p 的 buffer 塞不进 253×457 的窗口，
+   driver 只能裁一块贴上去。RK3562 上带缩放器的是 **Esmart**，改回 X6 Pro 验证过的
+   `76`；并新增 `rowOffset`（面板行原点）描述「936 行 UI 带在 960 行面板里的起点」。
+3. **概率性无声**：DASH 的第二路音频 URL 偶发失效时，ffmpeg 的可选映射会静默
+   丢掉音轨，画面完全正常、就是没声；而 `status().audioDead` 以前是写死的 0，
+   页面那条「无声」提示永远进不去。现在 native 会在「有音轨却 0 字节」时按当前
+   位置**原地重建管线自愈（每会话 2 次）**，`audioDead` 报真值，`audioHeals` 给
+   自愈次数。
 
 ---
 
@@ -80,7 +103,7 @@ X6 Pro 缺省参数完全不变（107 / 76），老版本 JS 不传新参数时�
 | `src/services/device_profile.js`（新增） | 从 `$falcon.env.deviceWidth/Height` 判机型并算 profile：视口、面板行列、列偏移、`setViewPort(960)` 缩放系数、planeId、transpose；支持 storage 覆盖；`playVideoRectsFor()` 按 profile 算信箱矩形 + 旋转变换 |
 | `src/services/play_session.js` | `openVideo()` 用 profile 算矩形并把 `panelOffset` / `planeId` 下发给 native |
 | `src/services/player.js` | `openSession()` 追加第 17/18 个位置参数（`buildOpenArgs` 的 16 参契约保持不变，单测不破）；新增 `kmsProbe()` 透出 |
-| `src/app.js` | 注释说明**为何保持 `setViewPort(960)` 不变**（改成 936 会裁掉右侧 24px），缩放交给 profile |
+| `src/app.js` | 3.6.1：`setViewPort(profile.cfg.width)` —— X6=960、X7=936，**1:1 不缩放** |
 | `src/pages/index/index.vue` | `created()` 幂等预热 profile（不阻塞首屏） |
 | `src/pages/diag/diag.vue` | 自检页新增一行：生效的 profile、native planeId、KMS 里 ACTIVE 的窗口 |
 | `test/run.js` | 7 条新回归：X6 Pro 逐字段等价、X7 Pro 几何、越界、覆盖、诊断串 |
@@ -93,6 +116,176 @@ X6 Pro 缺省参数完全不变（107 / 76），老版本 JS 不传新参数时�
 | `tools/probe-x7p.sh` + `.py`（新增） | adb **只读取证**：cfg.json、DRM summary、modetest、GStreamer 插件、日志，生成 `suggested-profile.json` 与 `REPORT.md` |
 | `libs/arm64/`、`libs/arm64-y02_1/` | 构建时铺满三个 `.so`；PMS 无论选根目录还是 SKU 目录都能装载 player2 |
 
+### 3.4 3.6.1：UI 重排 + 语音自愈（真机截图反馈的三条）
+
+| 文件 | 改动 |
+| --- | --- |
+| `src/services/layout.js`（新增） | 弹性布局纯函数：按视口算导航栏、网格列数/卡宽、播放态三列、进度条轨道、图文正文宽。960×266 上**逐字段等于 3.5.5 的硬编码**（单测守护），936×280 上把多出的 24 列/14 行分给各栏 |
+| `src/app.js` | 画布宽改为 `profile.cfg.width`（X6 960 / X7 936），1:1 不再缩放 |
+| `src/services/device_profile.js` | `videoArea/liveVideoArea` 改由 layout 推导（挖洞与平面天然一致）；新增 `rowOffset`；新增 **env 可信度闸门**（宽高比 <2.2 视为报的是面板尺寸，整组丢弃） |
+| `src/pages/index/index.vue` | 所有容器改用 `:style="L.*"`（页面/导航/内容/网格/卡片/封面/信息块/三列/视频/进度条/正文/整行块），列数改 `L.num.cols`，进度条轨道改 `L.seekTrackW`，图文图片宽改 `articleImgW()` |
+| `native/csrc/session/session.c` | ①音频自愈：`check_audio_stall()` 在「有音轨却 0 字节/分支没建起来」时按当前位置重建（每会话 2 次）；②OPEN 时重置 `audio_heals`/`first_frame_ms`/`plane_fallback_done`（以前只在 STOP 清，连播第二支就没配额、平面兜底也不再生效） |
+| `native/csrc/jsapi_player2.c` | `audioDead` 接真值 + `audioHeals`；`info()` 增加 `rect`（本次真正下发的 `<x,y,w,h>`） |
+| `src/pages/diag/diag.vue` | 自检页那行再补 `rect=<...>`，播放中直接看到平面摆在哪 |
+| `tools/probe-x7p.py` | 从 DRM 摘要里解析每个窗口的 `dst pos/rect`，据此给出 `rowOffset`；`planeId` 建议改回 76 |
+
+**为什么「网格余量」要单独留 4~12px**：falcon 的 `scroller` 是拿自己测到的
+视口宽（视口 − 导航栏）决定内容宽的，不照抄 CSS 的 884。5 张卡刚好等于容器宽时，
+flex 会把第 5 张整列换行 —— 这就是截图里「只有 4 列 + 右侧 180px 空白」的成因。
+960 上留 7px（与 3.5.5 完全一致），936 上留 8px。
+
+### 3.5 3.6.2：真机自检页暴露的四个问题
+
+2026-11-07 23:59 在 X7 Pro 上跑自检页，截图为证（`bugs/_diag1_right.png`）：
+
+| 现象 | 根因 | 改动 |
+| --- | --- | --- |
+| `起播 playing out=240x427` | `probe.js` 用的是 `screen.js::probeVideoRects`（X6 常量 469x240），而且没下发 `panelOffset`/`planeId` → 平面按 107 偏移、按 X6 矩形摆放 | 改用 `ensureProfile() + playVideoRectsFor()`，并把 `panelOffset`/`planeId` 一起传给 `openSession` |
+| `回读5s 播放错误：`（后面空白） | ① 页面读的是 `st.error`，native 的字段叫 `lastErrorMsg`；② 部分错误只 patch 了码没给文本 | ① 改读 `lastErrorMsg`/`lastError`；② native 在文本为空时用码名兜底（`plane-lost` / `pipeline` / `no-first-frame` …） |
+| `profile=...` 那行被屏幕右缘裁掉、返回按钮切角 | 自检页 `.page` 写死 960x266，X7 只有 936x280 | `data()` 里按 profile 算 `page/videoCol/panel/logHead/logScroll`；文字压到 10px 并缩短字段 |
+| 5s 内状态变 error | **我的音频自愈在单文件会话上误触发**：`abytes==0` 就重建，而单流（自检页/durl）可能本来就没音轨，重建瞬间的暂态被页面读到 | 自愈条件收窄为 `input2` 非空（只救 DASH 双输入，也是用户真实遇到的场景） |
+
+同时补了排障基建（真机没有 adb 时唯一可用的一条路）：
+
+- `/tmp/pb2.log` **默认开启**（`PENBILI_PB2_LOG=0` 可关），>256KB 自动截断；
+- native 新增 `logTail(maxBytes)`，把日志尾部（≤8KB）返回给 JS；
+- 自检页底部新增「日志」按钮 → 全屏日志页（9px 单行、可滚动），
+  bus error 原文、`plane missing`、`OPEN rect: logical=... -> panel <x,y,w,h>`、
+  音频自愈记录都在里面；
+- `回读5s` 的详情里新增 `音=<bytes>/有|无`：画面正常而 `音=0` 就是丢音轨，
+  不用再靠用户描述有没有声音；
+- 日志里新增 `OPEN rect: logical=... -> panel <...>` 一行，画面位置不对时可直接对账。
+
+**为什么 `rowOffset` 是独立参数而不是塞进 `panelHeight`**：面板固定 480×960，
+视口 936 行时多出 24 行，合成器可能居中（UI 从第 12 行开始）也可能贴第 0 行。
+视频平面走面板绝对坐标，猜错就是整体偏移；用独立参数便于真机取证后一行 JSON 覆盖。
+
+---
+
+### 3.6 3.6.3：plane-id 76 在 X7 Pro 上根本不可用
+
+2026-11-08 00:10 的真机自检页 + 机内日志（`bugs/_log_p2.png`）给出了完整现场：
+
+```
+(6399.792) start gate: timeout in 4021ms (v=1/1 frames=0 a=1/1 want_audio=1)
+(6399.794) set_state(PLAYING) -> 0 (+4186ms)        ← 0 = GST_STATE_CHANGE_FAILURE
+(6399.795) teardown: state->NULL qr=0 cur=3 pend=1   ← cur=3 说明管线一直停在 PAUSED
+```
+
+读法：视频分支建起来了（`v=1`），但 **4 秒内一个 buffer 都没有**（`frames=0`），
+`set_state(PLAYING)` 直接返回 FAILURE。这不是解码慢、也不是网络慢 ——
+是 sink 在 PAUSED 的异步启动阶段就失败了（`set_state(PAUSED)` 返回 ASYNC，
+错误经 bus 报出，而 worker 正卡在 4s 的缓冲门里，**没人读 bus**，于是真实
+原因被后来的 `set_state(PLAYING) failed` 覆盖）。
+
+结论：**DRM plane 对象号不能跨固件赌。** 76 在 X6 Pro 上是 Esmart1-win0，
+在 X7 Pro 的固件上不存在/不可用；`planeId=-1` 能出画但可能挑到没有缩放能力
+的 Smart 平面（3.6.0 的「画面贴底被压扁」）。
+
+#### 改法：不再要求平面具备缩放能力
+
+| 层 | 改动 |
+| --- | --- |
+| `session.h` | `pb2_open_req_t` 新增 `swScale`（第 19 个位置参数） |
+| `session.c` | 新增 `video_post_rate_desc()`：`swScale=1` 时在 `videorate` 之后插 `videoscale ! video/x-raw,width=W,height=H,framerate=…`，**两条建链路径都用它**（pad-added 动态分支 + 裸流固定分支） |
+| `session.c` | 新增 `peek_bus_error()`：缓冲门内每 20ms 非阻塞读一次 bus ERROR，一旦出错立刻中止并把原文带进日志/错误 |
+| `session.c` | 新增 `open_fail_or_retry()` + `want_plane_retry` + `open_req_dup()`：**显式 plane-id 起不来时自动切 auto+videoscale 重试一次**（每会话一次）。不能递归 `do_open` —— 它开头会 `free(g_w.req)`，那正是要复用的对象 |
+| `session.c` | 视频 desc 缓冲 1024 → 1280，并加截断检查（被截断的 desc 会 parse 失败 → 整片黑，日志却看不出来） |
+| `device_profile.js` | X7P：`planeId=-1` + `swScale=1`；X6P 保持 `76` + `swScale=0`。`planeId<0` 时 `swScale` 默认 1（覆盖时也一致） |
+| `player.js` | `deviceArgs()` 追加第 19 位 `swScale` |
+| `diag.vue` | 设备行改为显示 **native 的生效值**（`info().planeId/swScale`），并带 `vs0/1` |
+
+为什么这样一定不会裁画面：buffer 尺寸 = `render-rectangle` 尺寸，sink 侧
+**不需要任何缩放**，1:1 上屏即可。几何完全由 JS 算出的矩形决定，跟在哪个
+平面、那个平面有没有缩放器都无关。
+
+X6 Pro 不受影响：`swScale=0`，desc 与 3.5.5 逐字节相同。
+
+#### 自检页现在该显示什么
+
+```
+x7p 936x280 5x161 off100 row0 | plane=auto vs1 · Esmart1-win0 ACTIVE
+```
+
+`plane=auto` + `vs1` 是期望值。若想换回硬件缩放（确认自选到了 Esmart），
+storage 覆盖 `{"swScale":0}` 即可。
+
+### 3.7 3.5.6：音频设备被占时，不要连画面一起判死
+
+2026-11-08 00:25 的真实日志（`bugs/_log_*`）：
+
+```
+start gate: bus error in 705ms (v=1/1 frames=4 a=1/1 want_audio=1)
+start gate: bus error -> Could not open audio device for playback.
+                          Device is being used by another application.
+first frame on screen +855ms (budget 1500ms) OK
+audio: alsasink device=(default,speaker) vol=11%
+```
+
+也就是说：**画面 855ms 就正常上屏了（frames=4）**，挂的是 `alsasink` ——
+音频设备被别的进程占着（系统提示音 / 上一个会话还没释放 PCM）。
+而 3.6.3 把所有 bus 错误都当致命错误，于是把一条好管线拆了，
+用户看到「播放错误」。这正是「有概率没声音」的真身：它是**概率性的设备占用**，
+不是音轨解析问题。
+
+改法（`session.c`）：
+
+| 机制 | 作用 |
+| --- | --- |
+| `is_audio_bus_error()` | 按关键字（`audio device` / `alsasink` / `alsa` / `pcm`）把音频类错误摘出来 |
+| `open_audio_retry()` | 第一次：等 **400ms** 原样重建（设备通常已释放）；第二次：仍失败就 `audio=0` **只播视频** |
+| `process_cmd` 的兜底循环 | 把「平面兜底」与「音频兜底」统一成最多 3 轮重建，每轮 `open_req_dup()` 深拷贝 |
+| `status().audioOff` | 上报「主动降级为无声」，页面提示「无声：音频设备被占用，已静音播放」 |
+| `reset_session_fields()` | 会话结束清掉 audioOff/重试计数，避免下一支视频直接无声启动 |
+
+**为什么不是简单重试一次就完**：ALSA 的 busy 有两种 —— 几十毫秒内释放（提示音），
+和被别的进程长期占用。前者靠 400ms 重试救回来（用户能听到声音），
+后者重试再多次也没用，必须降级，否则用户连画面都没有。
+
+**为什么错误分类放在缓冲门里**：`poll_bus()` 只在 worker 主循环跑，而缓冲门是
+阻塞轮询（最长 4s），这期间没人读 bus —— 3.6.2 之前连错误原文都拿不到。
+现在门内每 20ms 取一条，既能立刻分流，也能把原文写进日志页。
+
+### 3.8 3.5.6：视频被压扁，且不同比例压扁程度不一样
+
+**现象**：3.5.6 已经能正常出画（真机日志 `first frame on screen +855ms`），
+但画面比例不对；换不同宽高比的稿件，变形程度还不一样。
+
+**根因**：3.6.3 为了绕开「X7 Pro 上 plane-id 76 不可用」，在解码后插了
+
+```
+... ! mppvideodec rotation=270 ! videorate ! videoscale !
+     video/x-raw,width=<rect.w>,height=<rect.h> ! kmssink render-rectangle=<rect>
+```
+
+`mppvideodec rotation=270` 给的是**旋转意图**（最终由 kmssink 在面板坐标系里
+转 90 度上屏），`videoscale` 看到的仍然是解码出来的**横向帧**（1920×1080）。
+而 `<rect>` 是 JS 按 `logicalRectToPhysicalRect()` 算出的**旋转后物理竖矩形**
+（X7 Pro 16:9 → `<100,274,253,450>`）。把横帧直接缩到 253×450，等于把 16:9
+硬拉成 9:16 竖条；源比例越偏离 16:9，拉伸量越不同 —— 这就是「不同比例
+压扁程度不一样」的来源。
+
+顺带还有第二个放大因素：这些矩形含奇数（253、337、193…）。NV12 的 UV 平面
+按半宽采样，`video/x-raw,width=253` 是非法 caps，videoscale 可能协商成别的尺寸，
+kmssink 再按 `render-rectangle` 拉一次，形成二次变形。
+
+**改法（`session.c`）**：
+
+| 改动 | 作用 |
+| --- | --- |
+| `video_post_rate_desc()` | 从 `g_w.rect`（真正下发的 render-rectangle，SET_RECT 会改它）解析宽高；`swScale=1` 且 `rotate` 为 90/270 时**互换目标宽高**；宽高向下取偶数 |
+| `normalize_video_rect()`（新增） | OPEN / SET_RECT / SET_RECT restore 三处都把 `render-rectangle` 的宽高对齐到偶数，保证 buffer 与窗口严格等大、1:1 上屏 |
+| `pad-added` 日志 | 增加 `rotate` / `rect` / `videoscale -> WxH`，日志页一行就能对账 |
+
+以 16:9 为例：`rect` 对齐成 `<100,274,252,450>`，videoscale 目标互换成
+**450×252**（横，与 1920×1080 等比）；kmssink 转 90 度后正好 252×450，
+与 `render-rectangle` 1:1 对齐，平面不需要任何缩放能力。
+
+`swScale=2` 是**免打包回退开关**：若某固件的 `mppvideodec` 真的把输出 buffer
+转成竖帧（此时不该互换），在 DevTools 写 `{"swScale":2}` 即可，不用重打包。
+
+X6 Pro 不受影响：`swScale=0`，整条 desc 与 3.5.5 逐字节相同。
+
 ---
 
 ## 4. 参数契约（给后续维护者）
@@ -100,34 +293,42 @@ X6 Pro 缺省参数完全不变（107 / 76），老版本 JS 不传新参数时�
 `open()` 位置参数（前 16 个与 3.5.5 完全一致）：
 
 ```
-... fpsCap(15), isLive(16), panelOffset(17), planeId(18)
+... fpsCap(15), isLive(16), panelOffset(17), planeId(18), swScale(19)
 ```
 
 | 参数 | 值 | 语义 |
 | --- | --- | --- |
 | `panelOffset` | `-1` | 用 X6 Pro 默认 107（老 JS 不传时） |
 | | `>=0` | 显式面板列偏移，X7 Pro 默认算得 100 |
-| `planeId` | `0` | 用 X6 Pro 默认 76 |
-| | `-1` | **不写 plane-id**，kmssink 自动挑空闲 overlay（X7 Pro 默认） |
-| | `>0` | 显式 plane id（真机取证锁定后可用） |
+| `planeId` | `0` | 用 X6 Pro 默认 76（老 JS 不传时） |
+| | `-1` | 不写 plane-id，kmssink 自选。**X7 Pro 默认**，配合 `swScale` 生效 |
+| | `>0` | 显式 plane id（X6 Pro 默认 76；X7 Pro 上 76 不可用，勿照抄） |
+| `swScale` | `0` | 不插 `videoscale`，硬件缩放（**X6 Pro 默认**，与 3.5.5 逐字节相同） |
+| | `1` | 插 `videoscale`，且**按 `rotate` 互换目标宽高**（**X7 Pro 默认**，见 §3.8） |
+| | `2` | 插 `videoscale` 但**不互换**，给「解码器真的把 buffer 转成竖帧」的固件留的免打包回退开关 |
 
 storage 覆盖键 `bili_device_profile`（JSON，可覆盖任意字段）：
 
 ```json
 {
   "name": "x7p", "width": 936, "height": 280,
-  "panelXOffset": 100, "panelYOffset": 0, "direction": 270,
-  "planeId": -1, "transpose": 2
+  "panelXOffset": 100, "panelYOffset": 0, "rowOffset": 0,
+  "planeId": -1, "swScale": 1, "transpose": 2
 }
 ```
+
+`rowOffset`：UI 带在面板行方向的起点（面板 960 行里视口只占 936 行）。
+真机取证看 UI 平面 `dst pos:(x,y)` 的 y；若为 12 就写 12。默认 0（X6 实测值）。
 
 写入方式（DevTools 9307）：
 
 ```js
 $falcon.jsapi.storage.setStorage({
   key: 'bili_device_profile',
-  data: JSON.stringify({ name: 'x7p', width: 936, height: 280, planeId: -1 })
+  data: JSON.stringify({ name: 'x7p', width: 936, height: 280, planeId: -1, swScale: 1 })
 })
+// 若换成 swScale=1 后画面反而横向变形（说明该固件真的旋转了解码 buffer）：
+//   data: JSON.stringify({ name: 'x7p', swScale: 2 })
 ```
 
 **默认值已经能覆盖主流 X7 Pro 固件，大多数情况不需要手工写。**
@@ -143,7 +344,7 @@ NODE_BIN=$PWD/node_modules/node/bin/node.exe bash tools/build-wsl.sh
 # 只编译 native：SKIP_PACK=1 bash tools/build-wsl.sh
 ```
 
-产物：`8002026110200001.3_6_0.amr`（`.js.bin` 字节码形态，与官方发布包一致）。
+产物：`8002026110200001.3_5_6.amr`（`.js.bin` 字节码形态，与官方发布包一致）。
 
 脚本分四步：zig 编译三个 `.so` → ELF 校验 → 铺 SKU 目录 → 两阶段打包：
 
@@ -157,29 +358,27 @@ NODE_BIN=$PWD/node_modules/node/bin/node.exe bash tools/build-wsl.sh
 > 在 WSL 里能正常跑，所以改用它。`pack_falcon.py` 复现了 CLI 的两个关键行为：
 > `-M <外部模块>` 声明（否则 `diag.js` 会找不到 `./client-xxxx.js`）与
 > 「先全部编译、最后统一删 `.js`」；cert 重算规则与
-> `direct/tools/mk_amr.py` 的 audit/derive 一致。
+> SDK 工具包 `mk_amr.py` 的 audit/derive 一致。
 
 工具链位置（本次环境实测）：
 
 - zig 0.16.0：官网 tarball 直连很慢，改用 PyPI 的 Linux wheel
   （`pip download ziglang==0.16.0 --platform manylinux_2_12_x86_64 ...`，
   解压后 `~/tools/zig016/ziglang/zig`，`ZIG_EXE` 可覆盖）。
-- 打包器：`aiot-vue-cli@1.0.32`（本机在
-  `C:\Users\lenovo\Desktop\direct\undertale-pen\node_modules\aiot-vue-cli`），
-  `AIOT_CLI` 可覆盖。
+- 打包器：`aiot-vue-cli@1.0.32`。默认从 `node_modules/.bin/aiot-vue-cli`
+  找；找不到时用环境变量 `AIOT_CLI` 指向 `<aiot-vue-cli>/src/cli.js`。
 - **打包器必须用 Node 18**：Node 22+ 会因 `spdy/http-deceiver` 触发
   `Error: No such module: http_parser`（YouDaoPen-SDK README 里也记录了这条坑）。
   用 `NODE_BIN=<node18>` 指定，例如项目内 `node_modules/node/bin/node.exe`
   （`npm i --no-save node@18.20.8` 即可获得）。
 - WSL 里的 `node` 常是 Windows node.exe（interop），脚本会自动把 CLI 路径
-  用 `wslpath -w` 转成 `C:\...` 形式。
+  用 `wslpath -w` 转成 Windows 路径形式。
 - 项目需要 `tsconfig.json` + `src/typecheck.ts` 占位：CLI 无条件挂
   `@rollup/plugin-typescript`，一个 `.ts` 输入都没有会抛 TS18003 中断构建。
-- 交叉审计（用 `direct/tools` 里现成的脚本）：
+- 交叉审计（用 SDK 工具包里现成的 `mk_amr.py`，路径由 `MK_AMR` 指定）：
 
 ```bash
-python3 /mnt/c/Users/lenovo/Desktop/direct/tools/mk_amr.py \
-  --src 8002026110200001.3_6_0.amr --audit-only
+python3 "$MK_AMR" --src 8002026110200001.3_5_6.amr --audit-only
 # ✓ cert 与包内实体逐条一致（含 size/md5）
 ```
 
@@ -201,18 +400,27 @@ ADB=/path/to/adb.exe bash tools/probe-x7p.sh
 #    看 REPORT.md：视口/列偏移/ACTIVE 窗口/缺失插件/suggested-profile.json
 
 # 2) 安装（与其它 AMR 相同）
-adb push 8002026110200001.3_6_0.amr /tmp/
-adb shell "miniapp_cli install /tmp/8002026110200001.3_6_0.amr"   # 必须 "ret":0
+adb push 8002026110200001.3_5_6.amr /tmp/
+adb shell "miniapp_cli install /tmp/8002026110200001.3_5_6.amr"   # 必须 "ret":0
 adb shell "miniapp_cli start 8080222437664451"                      # 先回桌面
 adb shell "miniapp_cli start 8002026110200001 diag"                   # 自检页
 
 # 3) 自检页第一行应显示
-#    profile=x7p/env viewport=936x280 scale=0.975 panelOffset=100 planeId=auto
-#    | native plane=-1 | Esmart1-win0 ACTIVE（或本机实际的窗口名）
+#    x7p 936x280 5x161 off100 row0 | plane=auto vs1 · Esmart1-win0 ACTIVE
+#    首页再确认：5 列铺满、右侧无大块空白、底部无黑条
+#    日志里还应有比例对账行（16:9 稿件）：
+#      video: videoscale -> 450x252 (panel rect 252x450, rotate=270, mode=1)
+#      OPEN rect: logical=.. -> panel <100,274,252,450>
+#    两者宽高互为转置才对；若同向说明互换没生效（swScale 应为 1）。
+#    任何一步失败 → 点底部「日志」按钮，把全屏日志截图发出来：
+#      里面有 bus error 原文、plane missing、OPEN rect: logical=.. -> panel <..>
 
 # 4) 播一个视频，另开一个 shell 抓平面
 adb shell "grep -a 'Esmart' -A9 /sys/kernel/debug/dri/0/summary"
 #    dst pos/rect 必须落在 100..380 列内，且 buf[0] addr != 0
+#    同时对照自检页的 rect=<x,y,w,h>：两者应当一致。
+#    若画面整体上下偏移：看 UI 平面 dst 的 y（0 或 12），
+#    把它写进 bili_device_profile.rowOffset，再重进播放页。
 
 # 5) 画布截图看不到硬件平面（这是正常的），像素取证要用
 adb shell "gst-launch-1.0 -q kmssrc plane-id=<id> num-buffers=1 ! videoconvert ! pngenc ! filesink location=/tmp/v.png"
@@ -231,28 +439,46 @@ adb shell "gst-launch-1.0 -q kmssrc plane-id=<id> num-buffers=1 ! videoconvert !
 2. **视口宽度有分歧**：`真机安装与排障.md` 的 cfg.json 是 936×280，
    `总体技术方案.md` 写 960×280。代码以 `$falcon.env` 为准，两者都能算对；
    若真机报第三个值，用 `bili_device_profile` 覆盖即可，无需改代码。
-3. **plane 自动选择**：`planeId=-1` 让 kmssink 自选，绝大多数情况最稳；
-   若真机上自动选到了 zpos 低于 UI 的平面导致画面仍被盖住，用取证脚本的
-   modetest 候选 id 逐个试并显式写 `planeId`。
-4. **UI 底部留白**：保持 `setViewPort(960)` 时，X7 Pro 的 280 高视口里
-   CSS 960×266 等比缩放到 936×259，底部约 21px 不画内容（黑底）。视频矩形
-   已按同一缩放系数计算，与 `<hole>` 对齐；若要铺满需要重排 CSS，未在本次范围。
+3. **plane 号不可跨固件复用（3.6.3 已实测证伪）**：76 是 X6 Pro 上 Esmart1-win0
+   的对象号，X7 Pro 上不可用（sink 起不来 → `set_state(PLAYING)` FAILURE）。
+   现在 X7P 默认 `planeId=-1`（自选）+ `swScale=1`（软件缩放），不依赖任何
+   plane 对象号；native 还留了一道兜底：显式 plane-id 起不来时自动切
+   auto+videoscale 重试一次（日志 `OPEN fail (...) with plane-id=... -> retry`）。
+   代价是 X7P 多一次软件缩放（640×360 → 450×252 量级，RK3562 可忽略）。
+   `swScale=2` 是给「解码器真旋转了 buffer」的固件留的免打包回退（见 §3.8）。
+4. **面板行原点（rowOffset）待真机确认**：X6 的 960 行正好占满面板，X7 的 936 行
+   还差 24 行，合成器可能居中（12）也可能贴 0。默认 0；真机若整体偏 12px，
+   用 `{"rowOffset":12}` 覆盖。取证脚本会直接从 UI 平面的 dst y 读出来。
 5. **v1 回退仍带 X6 Pro 硬编码**：`player.c`（v1）只在 X5/回退路径使用，
    未改。X7 Pro 必须走 v2（默认），若自检页显示 `PLAYER_UNSUPPORTED` 说明
    `.so` 没装载，先查 SKU 目录。
 6. **GStreamer 插件**：若取证报告显示 `mppvideodec`/`kmssink` 缺失，则本机
    不能用 player2 的硬解链路，需要另接该机型的播放后端（GPU 教程包描述的
    WPE 视频协议 v3 / hole 方案可作参考），这属于下一阶段工作。
+7. **无声自愈的上限**：每会话最多重建 2 次（`PB2_AUDIO_HEALS`）。若是音频 URL
+   整体失效（B 站 m4s 直链带 deadline，约 2 小时过期），重建也救不回来，此时
+   `status().audioDead=1`、页面提示「无声：音轨未加载，已自动重试」。真正的修法
+   是重新取 playurl —— 属于下一版的前端重取逻辑，本次未做。
+8. **音频设备被占是概率性的，只能兜底不能根治**：`audioOff=1` 时说明本机
+   的 PCM 被别的进程长期占用（不是片源问题）。可以先退出后台的其它音频应用；
+   重进这一集（新 OPEN）会自动再试一次带音频的完整链路。
 
 ---
 
 ## 8. 资料来源
 
-- `C:\Users\lenovo\Desktop\direct\docs\总体技术方案.md`（X7 Pro 平台事实、黑屏形态、aarch64/glibc）
-- `C:\Users\lenovo\Desktop\direct\docs\真机安装与排障.md`（cfg.json 936×280、PMS SKU 目录、无 fb0、capture 全白）
-- `C:\Users\lenovo\Desktop\direct\YouDaoPen-SDK\docs\wiki\system_env_compile\sys_conf.md`（screen 字段语义）
-- `C:\Users\lenovo\Desktop\direct\YouDaoPen-SDK\docs\wiki\jsapi\bashi\mplayer.md` + `docs\词典笔小程序开发API文档.md`（mplayer 不可用）
-- `C:\Users\lenovo\Desktop\direct\YouDaoPen-SDK\scripts\setup-toolchain.sh`、`README.md`（x7 工具链、Node 18 坑）
-- `C:\Users\lenovo\Desktop\66777\GPU引擎使用教程+分支文档包\...\GPU引擎使用教程.md`（RK3562/G52、DRM、混合档）
-- 同包 `tools_GPU_RENDER_CLEANUP_STATUS.md`、`tools_MIGRATION_STATUS.md`、`tools_GITHUB_GPU_TWITCH_20261006.md`（480x960、H.264 MPP、alpha-zero hole）
-- 仓库内 `docs/x6pro-adaptation.md`、`docs/x6pro-video-playback.md`、`README.md`（X6 Pro 基线与所有真机踩坑）
+以下资料由项目外部提供（X7 Pro 平台资料包 / SDK / GPU 分支教程），
+只写文件名，不记录本机路径：
+
+- `总体技术方案.md`（X7 Pro 平台事实、黑屏形态、aarch64/glibc）
+- `真机安装与排障.md`（cfg.json 936×280、PMS SKU 目录、无 fb0、capture 全白）
+- `YouDaoPen-SDK/docs/wiki/system_env_compile/sys_conf.md`（screen 字段语义）
+- `YouDaoPen-SDK/docs/wiki/jsapi/bashi/mplayer.md`、
+  `YouDaoPen-SDK/docs/词典笔小程序开发API文档.md`（mplayer 不可用）
+- `YouDaoPen-SDK/scripts/setup-toolchain.sh`、`YouDaoPen-SDK/README.md`
+  （x7 工具链、Node 18 坑）
+- `GPU引擎使用教程.md`（RK3562/G52、DRM、混合档）
+- 同包 `tools_GPU_RENDER_CLEANUP_STATUS.md`、`tools_MIGRATION_STATUS.md`、
+  `tools_GITHUB_GPU_TWITCH_20261006.md`（480x960、H.264 MPP、alpha-zero hole）
+- 仓库内 `docs/x6pro-adaptation.md`、`docs/x6pro-video-playback.md`、`README.md`
+  （X6 Pro 基线与所有真机踩坑）

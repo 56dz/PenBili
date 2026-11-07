@@ -173,3 +173,60 @@
 .btn:active {
   opacity: 0.6;
 }
+
+/* ---------- 3.6.2：窄按钮 + 日志页 ---------- */
+/* 底部要塞三个按钮（日志/重跑/返回）+ 两行摘要，72 宽放不下 */
+.btn-sm {
+  width: 56px;
+  margin-left: 6px;
+}
+
+.btn-text-sm {
+  width: 56px;
+  font-size: 12px;
+  color: #ffffff;
+  text-align: center;
+}
+
+/* 设备信息行：10px 才能在 352px 面板里放下 60 个字符 */
+.dev {
+  font-size: 10px;
+}
+
+.logpage {
+  flex-direction: column;
+  background-color: @background-color;
+}
+
+.log-head {
+  flex-direction: row;
+  align-items: center;
+  padding-left: 8px;
+  padding-right: 8px;
+}
+
+.log-title {
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0px;
+  font-size: 11px;
+  color: @text-color-dim;
+  lines: 1;
+  text-overflow: ellipsis;
+}
+
+.log-scroll {
+  flex-direction: column;
+}
+
+.log-row {
+  height: 11px;
+  flex-direction: row;
+}
+
+/* 9px + 单行：一行日志最长约 200 字符（bus error 原文），936 宽刚好放得下 */
+.log-line {
+  font-size: 9px;
+  color: #9fb0c0;
+  lines: 1;
+}

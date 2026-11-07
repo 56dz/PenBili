@@ -52,8 +52,40 @@ def main():
     ui = [n for n in active if re.match(r'(Esmart0|Cluster0|Smart0)-win', n)]
     overlay = [n for n in active if n not in ui]
 
+    # 面板行方向的原点偏移：多出来的行（960-936=24）怎么分由合成器决定。
+    # cfg.json 的 xoffset 就是「UI 带在面板行方向的起点」，是最可靠的来源；
+    # 拿不到字段时退回 0（X6 Pro 实测就是 0，960 行正好占满）。
+    row_offset = 0
+    if 0 <= xoffset <= 100:
+        row_offset = xoffset
+
+    # DRM 摘要里各窗口的 dst 几何（Rockchip 会打 `dst: pos:(x,y) rect:(w,h)`
+    # 或 `dst x y w h` 两种格式）。把 UI 合成层的 dst 抽出来，用来交叉验证
+    # row_offset —— UI 带的起始行必须等于它，否则视频平面会整体偏移。
+    ui_dst = {}
+    cur = None
+    for line in summary.splitlines():
+        m = re.match(r'^\s*((?:Esmart|Cluster|Smart)\d+-win\d+)\s*:', line)
+        if m:
+            cur = m.group(1)
+            continue
+        if cur is None:
+            continue
+        if 'dst' in line:
+            nums = re.findall(r'-?\d+', line.split('dst', 1)[1])
+            if len(nums) >= 4:
+                ui_dst[cur] = [int(x) for x in nums[:4]]
+
+    # UI 层 dst 的第二个数字就是「UI 带在面板行方向的起点」，比 cfg.json 的
+    # xoffset 更直接（cfg 里那个字段部分固件写 0 但实际居中）。有就用它。
+    for name in (ui or []):
+        d = ui_dst.get(name)
+        if d and 0 <= d[1] <= 100:
+            row_offset = d[1]
+            break
+
     # modetest 的 plane id（第一列纯数字）。只作候选，不自动指定：
-    # 不同固件的编号含义不同，默认让 kmssink 自动挑空闲平面最安全。
+    # 不同固件的编号含义不同；X6 Pro 已经验证过 76 是带缩放器的 Esmart1-win0。
     plane_ids = []
     for line in modetest.splitlines():
         m = re.match(r'^\s*(\d{2,4})\s+\d+\s+\d+\s', line)
@@ -75,9 +107,15 @@ def main():
         'panelXOffset': yoffset,
         'panelYOffset': xoffset,
         'direction': direction,
-        # -1 = 不写 plane-id，kmssink 自动选空闲 overlay 平面。
-        # 真机确认某个 id 稳定可用后，把它改成正数即可锁定。
-        'planeId': -1,
+        # 【2026-11-07 真机回归】不要再建议 -1：
+        # 不写 plane-id 时 kmssink 会挑到没有缩放能力的 Smart 平面，1080p/720p
+        # 的 buffer 塞不进 234x416 的窗口，driver 只能裁一块贴上去 —— 真机表现
+        # 就是「画面贴在底部、被压扁」。RK3562 上带缩放器的是 Esmart，
+        # X6 Pro 验证过的 id 是 76（Esmart1-win0），同 SoC 同 DT 沿用。
+        # 若下面 modetest 的候选里根本没有 76，或播放时该窗口不 ACTIVE，
+        # 再从候选里换一个 Esmart 的 id 试。
+        'planeId': 76,
+        'rowOffset': row_offset,
         'transpose': 2
     }
     with open(os.path.join(out, 'suggested-profile.json'), 'w', encoding='utf-8') as f:
@@ -109,9 +147,19 @@ def main():
         '- 判为可叠视频层：%s' % (', '.join(overlay) if overlay else '（无）'),
         '- modetest 报出的 plane id 候选：%s' % (', '.join(plane_ids[:20]) if plane_ids else '（不可用）'),
         '',
-        '建议先保持 `planeId: -1`（不写 plane-id 让 kmssink 自动挑）。若播放时',
-        '`drm-summary.txt` 里仍没有任何 NV12/overlay 窗口 ACTIVE，再用 modetest',
-        '的候选 id 逐个试，写进 suggested-profile.json 的 planeId。',
+        '- 各窗口 dst 几何：%s' % (json.dumps(ui_dst, ensure_ascii=False) if ui_dst else '（摘要里没有 dst 行）'),
+        '- 建议 rowOffset：%d' % row_offset,
+        '',
+        '**planeId 建议用 76，不要用 -1。** 2026-11-07 真机回归：-1 会让 kmssink',
+        '自选，挑到没有缩放能力的 Smart 平面后，视频 buffer 只能被裁一块贴上去，',
+        '表现是「画面贴在底部、被压扁」。RK3562 上带缩放器的是 Esmart，X6 Pro',
+        '验证过 76（Esmart1-win0）；X7 Pro 同 SoC 同 DT，沿用。若 modetest 候选里',
+        '没有 76，或播放时该窗口始终不 ACTIVE，再换一个 Esmart 的 id 试。',
+        '',
+        'rowOffset 是「UI 带在面板行方向的起点」：面板 480x960，视口只有 936 行时，',
+        '多出的 24 行若被合成器居中分配，UI 就从第 12 行开始 —— 视频平面是面板',
+        '绝对坐标，不补这 12 行画面就会整体偏移。上面 `各窗口 dst 几何` 里 UI 层',
+        '的 y 就是权威值。',
         '',
         '## 3. GStreamer 插件',
         '',
@@ -129,8 +177,8 @@ def main():
         '',
         '## 5. 把参数写进应用',
         '',
-        '默认构建已经内置 X7 Pro 档（936x280 / offset 100 / plane auto），大多数情况',
-        '不需要手工写。真机数值与上表不同时，在 DevTools（9307）里执行：',
+        '默认构建已经内置 X7 Pro 档（936x280 / offset 100 / plane 76 / row 0），',
+        '大多数情况不需要手工写。真机数值与上表不同时，在 DevTools（9307）里执行：',
         '',
         '```js',
         "$falcon.jsapi.storage.setStorage({ key: 'bili_device_profile',",

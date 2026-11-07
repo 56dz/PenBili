@@ -83,6 +83,24 @@ typedef struct {
      */
     int panelOffset;
     int planeId;
+
+    /*
+     * 【X7 Pro 3.6.3】软件缩放开关（0/1）。
+     *
+     * 背景：kmssink 的 plane-id 是 DRM 的 plane **对象号**，由内核按 DT 分配，
+     * 换固件就可能变。X6 Pro 上 76 = Esmart1-win0（带缩放器），显式指定它
+     * 能让 1080p buffer 直接缩到 253x450；但 X7 Pro 真机上 76 对应的平面
+     * 不可用 —— 视频分支建起来后 sink 抢不到平面，一帧 buffer 都不来，
+     * 最终 set_state(PLAYING) 返回 FAILURE（真机日志见 docs/x7pro-adaptation.md §3.6）。
+     *
+     * 不猜平面号的稳妥做法：让 kmssink 自选（planeId=-1），并在解码后插
+     * videoscale 把 buffer 直接缩到窗口大小。这样 sink 侧不需要任何缩放能力，
+     * 挑到 Smart 平面也能 1:1 上屏，几何完全由 render-rectangle 决定。
+     *
+     * 代价是一次软件缩放（640x360 → 253x450 量级，RK3562 上可忽略）。
+     * 语义：0/缺省 = 硬件缩放（保持 X6 Pro 现状）；1 = 软件缩放。
+     */
+    int swScale;
 } pb2_open_req_t;
 
 void pb2_open_req_free(pb2_open_req_t *req);
@@ -121,12 +139,18 @@ int pb2_session_gst_ready(void);
 /* 【X7 Pro 适配】当前会话生效的面板列偏移 / kmssink plane-id（-1 = 自动） */
 int pb2_session_panel_offset(void);
 int pb2_session_plane_id(void);
+/* 本次会话是否在用软件缩放（1 = 解码后 videoscale 到窗口大小） */
+int pb2_session_sw_scale(void);
+/* 1 = 本次会话因音频设备被占而主动降级为无声（画面正常） */
+int pb2_session_audio_off(void);
 
 /*
  * gst 版本字符串（如 "GStreamer 1.22.0"）。gst_init 之前调用返回 NULL。
  * 返回的指针指向 GStreamer 内部常量，**不要 free**。
  */
 const char *pb2_session_gst_version(void);
+/* 最后一次下发的 render-rectangle（"<x,y,w,h>"），排障用 */
+const char *pb2_session_rect(void);
 
 /* 已渲染帧数（原子读，status 用） */
 unsigned long long pb2_session_frames(void);
@@ -141,5 +165,15 @@ unsigned long long pb2_session_frames(void);
  * (frame_epoch_ms) 的毫秒数」，起播卡住也会随时间增长并最终触发超时。
  */
 long long pb2_session_stall_ms(void);
+
+/*
+ * 音频健康（status().audioDead / audioHeals 的来源）。
+ *
+ * audio_dead = 「期望有声，但首帧后 4.5s 仍一个音频字节都没到，且已自愈过一次」。
+ * 覆盖两类真机静默故障：DASH 音频 URL 偶发失效（ffmpeg 可选映射直接丢掉音轨）、
+ * alsasink 打开失败。check_audio_stall() 会先做最多 2 次原地重建自愈。
+ */
+int pb2_session_audio_dead(void);
+int pb2_session_audio_heals(void);
 
 #endif /* PENBILI_PB2_SESSION_H */

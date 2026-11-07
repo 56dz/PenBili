@@ -459,9 +459,12 @@ export async function openVideo(ctx, item) {
     rect: rects.physical,
     /* 【X7 Pro 适配】native 不再写死 107 / 76：
      * panelOffset = 逻辑带在 480 宽面板里的起始列；
-     * planeId = -1 时 kmssink 自动挑空闲 overlay 平面（X7 Pro 默认）。 */
+     * planeId = -1 时 kmssink 自动挑空闲 overlay 平面（X7 Pro 默认）；
+     * swScale = 1 时 native 在解码后插 videoscale，把 buffer 缩到窗口大小 ——
+     * 自选平面可能没有缩放器，靠它保证画面比例正确（X7 Pro 默认开）。 */
     panelOffset: profile.panelXOffset,
     planeId: profile.planeId,
+    swScale: profile.swScale,
     /* '' = 自动：已连蓝牙耳机走 bluealsa，否则内置扬声器（player.c 的 detect_bt_pcm） */
     audioDevice: '',
     userAgent: ctx.mediaUa,

@@ -1,7 +1,7 @@
 <template>
   <!-- page-live 只在「视频像素真的在 fb 上」时启用透明背景（见 base.less 注释）；
        未起播/起播失败/已播完时必须用不透明底色，否则会把上一屏的 fb 残留像素透出来。 -->
-  <div :class="holeVisible && !upd.visible ? 'page page-live' : 'page'">
+  <div :class="holeVisible && !upd.visible ? 'page page-live' : 'page'" :style="L.page">
     <!-- 检查更新（v3.5.5）：弹窗不是浮层而是**整页替换**。
          falcon 运行时 position:absolute 不可靠、全仓没有一个 z-index 能用（base.less
          文件头铁律），所以靠 upd.visible 把正常视图整体不渲染 —— 零定位依赖，
@@ -69,9 +69,9 @@
     </div>
     <!-- 正常视图整体包一层：让「整页替换」只改这一处 v-else，
          不必给下面 10 个顶层子节点各加一个 !upd.visible（漏一个就会和弹窗叠加）。 -->
-    <div v-else class="page-body">
+    <div v-else class="page-body" :style="L.body">
     <!-- 浏览态左栏：只有四个标签，不再有 PenBili 字样（用户要求删掉，把高度还给内容） -->
-    <div v-if="mode === 'browse'" class="bar">
+    <div v-if="mode === 'browse'" class="bar" :style="L.nav">
       <!-- 软件 logo（用户要求 m07040-1：首页左上角加软件标志） -->
       <image class="bar-logo" :src="ic.logo" :width="30" :height="30"></image>
       <div
@@ -86,8 +86,8 @@
     </div>
 
     <!-- 播放态左列（用户手绘稿 m11950）：上=视频标题/简介(192)，下=点赞/投币/收藏(74) -->
-    <div v-if="mode === 'play'" class="pleft">
-      <div class="pleft-info">
+    <div v-if="mode === 'play'" class="pleft" :style="L.playLeft">
+      <div class="pleft-info" :style="L.playInfo">
         <div class="pback" @click="onIbarBack">
           <image class="pback-icon" :src="ic.back" :width="22" :height="22"></image>
         </div>
@@ -113,7 +113,7 @@
       <!-- 三个按钮（点赞/投币/收藏）直播态隐藏（用户反馈 m07570-3）。
            直播没有「收藏夹」语义，点赞/投币对房间也不适用，留着只会占掉 74px
            且点了没反馈。留空 div 保持 pleft 的 192+74 高度预算不变。 -->
-      <div v-if="!isLivePlay" class="pleft-btns">
+      <div v-if="!isLivePlay" class="pleft-btns" :style="L.playBtns">
         <div class="pbtn" @click="onToggleLike">
           <image class="pbtn-icon" :src="act.like ? ic.likeOn : ic.like" :width="26" :height="26"></image>
           <text :class="act.like ? 'pbtn-count-on' : 'pbtn-count'">{{ formatCount(act.likeCount) }}</text>
@@ -133,7 +133,7 @@
          注意这里必须写 v-else-if="mode === 'article'"，**不能写 v-else**：
          上面的兄弟节点条件是 v-if="mode === 'play'"，v-else 会接住所有非 play 的
          情况（包括 mode === 'browse'），于是首页也会渲染出返回箭头和评论图标。 -->
-    <div v-else-if="mode === 'article'" class="ibar">
+    <div v-else-if="mode === 'article'" class="ibar" :style="L.iconBar">
       <div class="ibtn" @click="onIbarBack">
         <image class="ibtn-icon" :src="ic.back" :width="26" :height="26"></image>
       </div>
@@ -146,19 +146,19 @@
     </div>
 
     <!-- 浏览内容 -->
-    <div v-if="mode === 'browse'" class="content">
+    <div v-if="mode === 'browse'" class="content" :style="L.content">
       <!-- 推荐 / 热门：封面卡片网格 + 底部（刷新 | 加载更多） -->
-      <scroller v-if="tab === 'rcmd' || tab === 'hot'" class="list">
-        <div class="grid">
-          <div v-for="it in currentItems" :key="it.bvid" class="vrow" @click="onPlayItem(it)">
-            <image class="thumb" :src="it.cover" :width="166" :height="93"></image>
-            <div class="vinfo">
+      <scroller v-if="tab === 'rcmd' || tab === 'hot'" class="list" :style="L.content">
+        <div class="grid" :style="L.grid">
+          <div v-for="it in currentItems" :key="it.bvid" class="vrow" :style="L.card" @click="onPlayItem(it)">
+            <image class="thumb" :src="it.cover" :width="L.num.card" :height="L.num.thumbH" :style="L.thumb"></image>
+            <div class="vinfo" :style="L.vinfo">
               <text class="vtitle">{{ it.title }}</text>
               <text class="vmeta">{{ vmeta(it) }}</text>
             </div>
           </div>
         </div>
-        <div v-if="currentItems.length" class="more-row">
+        <div v-if="currentItems.length" class="more-row" :style="L.wide">
           <div class="more-half" @click="onRefreshTab">
             <text class="more-text">刷新</text>
           </div>
@@ -166,21 +166,21 @@
             <text class="more-text">{{ moreBtnText }}</text>
           </div>
         </div>
-        <div v-if="!currentItems.length && !loading" class="empty">
+        <div v-if="!currentItems.length && !loading" class="empty" :style="L.wide">
           <text class="empty-text">{{ statusText || '暂无内容 · 点左侧标签可重试' }}</text>
         </div>
       </scroller>
 
       <!-- 搜索：关键词行 + 三分栏（视频/图文/直播）+ 结果 -->
-      <scroller v-else-if="tab === 'search'" class="list">
-        <div class="searchbar" @click="onOpenInput">
+      <scroller v-else-if="tab === 'search'" class="list" :style="L.content">
+        <div class="searchbar" :style="L.wide" @click="onOpenInput">
           <text class="search-kw">{{ keyword || '点此输入关键词搜索 B 站' }}</text>
           <div class="search-btn">
             <text class="search-btn-text">搜索</text>
           </div>
         </div>
         <!-- 类型三分栏：切换零请求（各类型独立缓存），有关键词且该类型无结果时自动补拉 -->
-        <div class="stype-row">
+        <div class="stype-row" :style="L.wide">
           <div
             v-for="st in searchTypes"
             :key="'st' + st.id"
@@ -191,30 +191,30 @@
           </div>
         </div>
         <!-- 视频/图文/直播：同款封面卡片网格 -->
-        <div class="grid">
+        <div class="grid" :style="L.grid">
         <template v-for="it in searchItems">
-          <div v-if="it.kind === 'video'" :key="it.key" class="vrow" @click="onPlayItem(it)">
-            <image class="thumb" :src="it.cover" :width="166" :height="93"></image>
-            <div class="vinfo">
+          <div v-if="it.kind === 'video'" :key="it.key" class="vrow" :style="L.card" @click="onPlayItem(it)">
+            <image class="thumb" :src="it.cover" :width="L.num.card" :height="L.num.thumbH" :style="L.thumb"></image>
+            <div class="vinfo" :style="L.vinfo">
               <text class="vtitle">{{ it.title }}</text>
               <text class="vmeta">{{ vmeta(it) }}</text>
             </div>
           </div>
           <!-- 图文：同款卡片，进入图文详情（评论区与视频同族，专栏实测 type=12） -->
-          <div v-else-if="it.kind === 'article'" :key="it.key" class="vrow" @click="openArticle(it)">
-            <image class="thumb" :src="it.cover" :width="166" :height="93"></image>
-            <div class="vinfo">
+          <div v-else-if="it.kind === 'article'" :key="it.key" class="vrow" :style="L.card" @click="openArticle(it)">
+            <image class="thumb" :src="it.cover" :width="L.num.card" :height="L.num.thumbH" :style="L.thumb"></image>
+            <div class="vinfo" :style="L.vinfo">
               <text class="vtitle">{{ it.title }}</text>
               <text class="vmeta">{{ it.up }}{{ it.view ? ' · 阅读 ' + formatCount(it.view) : '' }}{{ it.reply ? ' · 评论 ' + it.reply : '' }}</text>
             </div>
           </div>
           <!-- 直播：点击开播（本机 MPP 硬解，直连 B 站 FLV 源） -->
-          <div v-else-if="it.kind === 'live'" :key="it.key" class="vrow" @click="onPlayItem(it)">
+          <div v-else-if="it.kind === 'live'" :key="it.key" class="vrow" :style="L.card" @click="onPlayItem(it)">
             <!-- 封面必须是 16:9 长方形（用户反馈：「搜索直播时，每个直播的封面图片是正方形，
                  而不是长方形」）。此前这里用 .thumb-sq 强制 93x93，与视频/图文/历史三栏的
                  166x93 不一致，视觉上突然出现一个方块。统一走 .thumb。 -->
-            <image class="thumb" :src="it.cover" :width="166" :height="93"></image>
-            <div class="vinfo">
+            <image class="thumb" :src="it.cover" :width="L.num.card" :height="L.num.thumbH" :style="L.thumb"></image>
+            <div class="vinfo" :style="L.vinfo">
               <text class="vtitle">{{ it.title }}</text>
               <text class="vmeta">{{ it.up }}{{ it.online ? ' · 人气 ' + formatCount(it.online) : '' }}{{ it.cate ? ' · ' + it.cate : '' }}</text>
             </div>
@@ -222,7 +222,7 @@
           </template>
         </div>
           <!-- 与推荐/热门同款（刷新 | 加载更多）双按钮 -->
-        <div v-if="searchItems.length" class="more-row">
+        <div v-if="searchItems.length" class="more-row" :style="L.wide">
           <div class="more-half" @click="onRefreshTab">
             <text class="more-text">刷新</text>
           </div>
@@ -230,74 +230,74 @@
             <text class="more-text">{{ moreBtnText }}</text>
           </div>
         </div>
-        <div v-if="!searchItems.length && !loading" class="empty">
+        <div v-if="!searchItems.length && !loading" class="empty" :style="L.wide">
           <text class="empty-text">{{ statusText || '输入关键词开始搜索' }}</text>
         </div>
       </scroller>
 
       <!-- 我的：登录态 + 播放历史 + 自检入口；mineView='qr' 时切换为扫码视图 -->
-      <scroller v-else-if="mineView === 'info'" class="list">
-        <div class="mine-head">
-          <div class="mine-idcol">
-            <text class="mine-name">{{ profile ? profile.uname : '未登录' }}</text>
-            <text class="mine-id">{{ profile ? ('Lv.' + profile.level + ' · mid ' + profile.mid + (profile.vipType ? ' · 大会员' : '')) : '登录后个性化推荐 · 身份持久保存' }}</text>
+      <scroller v-else-if="mineView === 'info'" class="list" :style="L.content">
+        <div class="mine-head" :style="L.wide">
+          <div class="mine-idcol" :style="L.wide">
+            <text class="mine-name" :style="L.wide">{{ profile ? profile.uname : '未登录' }}</text>
+            <text class="mine-id" :style="L.wide">{{ profile ? ('Lv.' + profile.level + ' · mid ' + profile.mid + (profile.vipType ? ' · 大会员' : '')) : '登录后个性化推荐 · 身份持久保存' }}</text>
           </div>
         </div>
-        <div v-if="!profile" class="mine-row" @click="onGoLogin">
+        <div v-if="!profile" class="mine-row" :style="L.wide" @click="onGoLogin">
           <text class="mine-label">扫码登录 B 站账号</text>
           <text class="mine-value">›</text>
         </div>
         <!-- 未登录说明（收官文案）：视频显示风险 + 行动引导 -->
-        <text v-if="!profile" class="mine-notice">未登录时视频可能无法正常显示，登录后体验更完整</text>
-        <div v-else class="mine-row" @click="onLogout">
+        <text v-if="!profile" class="mine-notice" :style="L.wide">未登录时视频可能无法正常显示，登录后体验更完整</text>
+        <div v-else class="mine-row" :style="L.wide" @click="onLogout">
           <text class="mine-label">退出登录</text>
           <text class="mine-value">{{ profile.uname }}</text>
         </div>
-        <div class="mine-row" @click="onRefreshProfile">
+        <div class="mine-row" :style="L.wide" @click="onRefreshProfile">
           <text class="mine-label">刷新登录态</text>
           <text class="mine-value">{{ profileStatus }}</text>
         </div>
         <!-- 视频调节：点整行轮转选项（falcon 无原生下拉，见 onCycleVideoQuality 注释） -->
-        <div class="mine-secrow">
+        <div class="mine-secrow" :style="L.wide">
           <text class="mine-sec">视频调节</text>
         </div>
-        <div class="mine-row" @click="onCycleVideoQuality">
+        <div class="mine-row" :style="L.wide" @click="onCycleVideoQuality">
           <text class="mine-label">画质</text>
           <text class="mine-value">{{ vqText() }} ›</text>
         </div>
-        <div class="mine-secrow">
+        <div class="mine-secrow" :style="L.wide">
           <text class="mine-sec">直播</text>
         </div>
-        <div class="mine-row" @click="onCycleLiveQuality">
+        <div class="mine-row" :style="L.wide" @click="onCycleLiveQuality">
           <text class="mine-label">画质</text>
           <text class="mine-value">{{ lqText() }} ›</text>
         </div>
-        <div class="mine-row">
+        <div class="mine-row" :style="L.wide">
           <text class="mine-label">取流方式</text>
           <text class="mine-value">本地直连 · 芯片硬解</text>
         </div>
-        <text class="mine-notice">点画质行可逐项切换（分辨率与帧率合一，不会出现服务端不存在的组合）。直播由本机 MPP 硬解，不经云端转码；未登录时服务端最高只给 480p。</text>
-        <div class="mine-secrow">
+        <text class="mine-notice" :style="L.wide">点画质行可逐项切换（分辨率与帧率合一，不会出现服务端不存在的组合）。直播由本机 MPP 硬解，不经云端转码；未登录时服务端最高只给 480p。</text>
+        <div class="mine-secrow" :style="L.wide">
           <text class="mine-sec">播放历史（{{ history.length }}）</text>
         </div>
-        <div v-if="history.length" class="grid">
-          <div v-for="h in history" :key="'h' + h.bvid" class="vrow" @click="onPlayItem(h)">
-            <image class="thumb" :src="h.cover" :width="166" :height="93"></image>
-            <div class="vinfo">
+        <div v-if="history.length" class="grid" :style="L.grid">
+          <div v-for="h in history" :key="'h' + h.bvid" class="vrow" :style="L.card" @click="onPlayItem(h)">
+            <image class="thumb" :src="h.cover" :width="L.num.card" :height="L.num.thumbH" :style="L.thumb"></image>
+            <div class="vinfo" :style="L.vinfo">
               <text class="vtitle">{{ h.title }}</text>
               <text class="vmeta">{{ h.up }} · {{ historyTime(h.at) }}</text>
             </div>
           </div>
         </div>
-        <div v-if="!history.length" class="mine-row">
+        <div v-if="!history.length" class="mine-row" :style="L.wide">
           <text class="mine-label">还没有播放记录</text>
         </div>
         <!-- 检查更新（用户需求 m14218-2）：「我的」页手动检测，点开弹窗只有 2 个按钮 -->
-        <div class="mine-row" @click="onCheckUpdateTap">
+        <div class="mine-row" :style="L.wide" @click="onCheckUpdateTap">
           <text class="mine-label">检查更新</text>
           <text class="mine-value">v{{ appVersion }} ›</text>
         </div>
-        <div class="mine-row">
+        <div class="mine-row" :style="L.wide">
           <text class="mine-label">PenBili</text>
           <text class="mine-value">v{{ appVersion }} · {{ profile ? '已登录' : '匿名' }}</text>
         </div>
@@ -305,10 +305,10 @@
         <!-- 关于：项目信息（GitHub / 开源协议 / 免责）。
              词典笔上没有能唤起浏览器的 JSAPI，所以 GitHub 地址同时给二维码，
              手机扫一下就能打开仓库——比让用户在 266px 高的屏上抄 URL 现实。 -->
-        <div class="mine-secrow">
+        <div class="mine-secrow" :style="L.wide">
           <text class="mine-sec">关于</text>
         </div>
-        <div class="mine-about">
+        <div class="mine-about" :style="L.wide">
           <div class="mine-about-text">
             <text class="mine-about-title">PenBili · 有道词典笔 B 站客户端</text>
             <text class="mine-about-line">作者 56dz · 开源协议 GPL-3.0</text>
@@ -329,7 +329,7 @@
       </scroller>
 
       <!-- 扫码视图：二维码真正水平居中（左右等宽弹力列夹持），状态/按钮在左列 -->
-      <div v-else class="qr-wrap">
+      <div v-else class="qr-wrap" :style="L.content">
         <div class="qr-left">
           <text class="qr-state">{{ qr.message }}</text>
           <text class="qr-hint">打开手机B站 App 扫码</text>
@@ -355,17 +355,17 @@
 
     <!-- 播放态中列（用户手绘稿 m11950）：上=视频(469x240)，下=可拖动进度条(26)。
          点击视频区暂停/继续（用户要求「接下来要修改为点击视频播放区暂停」）。 -->
-    <div v-if="mode === 'play'" class="pmid">
+    <div v-if="mode === 'play'" class="pmid" :style="L.playMid">
       <!-- 直播态：没有进度条，视频区撑满整个 469x266（见 base.less .pvideo-live）。
            注意 KMS 平面是硬件 overlay，尺寸由 native 的 render-rectangle 决定，
            这里的 class 只管 falcon 侧「挖孔」占位（hole）的几何 —— 两者必须一致，
            否则点击热区与画面对不上。 -->
-      <div :class="isLivePlay ? 'pvideo pvideo-live' : 'pvideo'" @click="onTogglePlay">
+      <div :class="isLivePlay ? 'pvideo pvideo-live' : 'pvideo'" :style="isLivePlay ? L.videoLive : L.video" @click="onTogglePlay">
         <!-- 点击视频区暂停/继续（用户要求 m11950-4）。
              hole 是视频平面上的透明占位，必须**自己**也绑 click —— falcon 的点击
              不一定从子节点冒泡到父容器，真机实测只绑父级会有一半面积点不动。 -->
-        <hole v-if="holeVisible" :class="isLivePlay ? 'video-hole video-hole-live' : 'video-hole'" @click="onTogglePlay"></hole>
-        <div v-else :class="isLivePlay ? 'play-idle play-idle-live' : 'play-idle'" @click="onTogglePlay">
+        <hole v-if="holeVisible" :class="isLivePlay ? 'video-hole video-hole-live' : 'video-hole'" :style="isLivePlay ? L.videoLive : L.video" @click="onTogglePlay"></hole>
+        <div v-else :class="isLivePlay ? 'play-idle play-idle-live' : 'play-idle'" :style="isLivePlay ? L.videoLive : L.video" @click="onTogglePlay">
           <text class="play-idle-text">{{ play.note || idleText }}</text>
         </div>
       </div>
@@ -375,11 +375,12 @@
       <div
         v-if="!isLivePlay"
         class="seek"
+        :style="L.seek"
         @touchstart="onSeekTouch"
         @touchmove="onSeekTouch"
         @touchend="onSeekRelease"
       >
-        <div class="seek-track">
+        <div class="seek-track" :style="L.seekTrack">
           <div class="seek-fill" :style="{ width: seekFillW + 'px' }"></div>
           <div class="seek-knob"></div>
         </div>
@@ -392,7 +393,7 @@
          直播的评论流与点播不同族（弹幕式、实时滚动），复用点播评论区语义不对；
          而且三个按钮（含收藏）在直播态已隐藏，favOverlay 永远不会被打开，
          整列一起隐藏是安全的。隐藏后中列视频区靠 .pvideo-live 撑满 266px。 -->
-    <div v-if="mode === 'play' && !isLivePlay" class="pright">
+    <div v-if="mode === 'play' && !isLivePlay" class="pright" :style="L.playRight">
       <!-- 收藏夹覆盖层 -->
       <template v-if="favOverlay">
         <div class="fav-head">
@@ -418,7 +419,7 @@
       </template>
       <!-- 评论区（默认） -->
       <template v-else>
-        <div class="pright-body">
+        <div class="pright-body" :style="L.rightBody">
           <scroller class="side-scroll">
             <text v-if="replyStatus" class="reply-status">{{ replyStatus }}</text>
             <div v-for="rp in replies" :key="'rp' + rp.rpid" class="reply-block reply-block-n">
@@ -448,7 +449,7 @@
         </div>
         <!-- 输入框 + 发送（用户要求 m11950：右下是输入框，点输入框输入文字，点右侧按钮发送）。
              笔端没有内嵌软键盘，所以点输入框唤起系统输入法，文本回填到框里，再点发送才真正提交。 -->
-        <div class="pinput">
+        <div class="pinput" :style="L.rightInput">
           <div class="pinput-box" @click="onComposeReply">
             <text :class="cinText ? 'pinput-text' : 'pinput-ph'">{{ cinText || (hasLogin ? '发个友善的评论…' : '未登录 · 不能评论') }}</text>
           </div>
@@ -466,15 +467,15 @@
          一旦 .pright 不渲染，这 278px 就没有任何不透明元素兜底，会把上一屏的 fb 残留
          像素透出来（浏览态列表的封面、图文正文等），看起来像"右侧半屏花了"。
          所以直播态放一个同宽同高、同底色的空占位，几何与 .pright 完全一致。 -->
-    <div v-if="isLivePlay" class="pright-fill"></div>
+    <div v-if="isLivePlay" class="pright-fill" :style="L.playRight"></div>
 
     <!-- 图文详情：中列正文（896 宽，评论打开时被评论面板替换） -->
-    <div v-if="mode === 'article' && !commentsOpen" class="astage">
-      <scroller class="art-scroll">
-        <div v-if="article.state === 'loading'" class="art-loading">
+    <div v-if="mode === 'article' && !commentsOpen" class="astage" :style="L.articleBody">
+      <scroller class="art-scroll" :style="L.articleBody">
+        <div v-if="article.state === 'loading'" class="art-loading" :style="L.articleBody">
           <text class="play-idle-text">图文加载中…</text>
         </div>
-        <div v-else-if="article.state === 'error'" class="art-loading">
+        <div v-else-if="article.state === 'error'" class="art-loading" :style="L.articleBody">
           <text class="play-idle-text">{{ article.note || '图文加载失败 · 返回列表' }}</text>
         </div>
         <template v-else>
@@ -482,9 +483,9 @@
             v-if="article.cover"
             class="art-cover"
             :src="article.cover"
-            :width="880"
+            :width="L.num.cover"
             :height="article.coverDh || 160"
-            :style="{ width: '880px', height: (article.coverDh || 160) + 'px' }"
+            :style="{ width: L.cover.width, height: (article.coverDh || 160) + 'px' }"
           ></image>
           <text class="art-title">{{ article.title }}</text>
           <text class="art-author">{{ article.author }}{{ article.read ? ' · 阅读 ' + formatCount(article.read) : '' }}{{ article.like ? ' · 点赞 ' + formatCount(article.like) : '' }}</text>
@@ -496,7 +497,7 @@
               :src="b.src"
               :width="b.dw || 880"
               :height="b.dh || 240"
-              :style="{ width: (b.dw || 880) + 'px', height: (b.dh || 240) + 'px' }"
+              :style="{ width: articleImgW(b.dw), height: (b.dh || 240) + 'px' }"
             ></image>
             <text v-else :key="'ab' + bi" class="art-p">{{ b.text }}</text>
           </template>
@@ -506,7 +507,7 @@
     </div>
 
     <!-- 图文评论面板（896 宽，盖住正文区） -->
-    <div v-if="mode === 'article' && commentsOpen" class="comments-col">
+    <div v-if="mode === 'article' && commentsOpen" class="comments-col" :style="L.articleBody">
       <div class="comments-head">
         <text class="comments-title">评论{{ replyCount ? ' · ' + replyCount : '' }}</text>
         <div class="ctrl comments-close" @click="closeComments">
@@ -641,6 +642,10 @@ import { cancelNativePosts } from '../../services/net.js';
 import { fetchReplies, addReply, fetchSubReplies } from '../../services/bili/reply.js';
 import { encodeQr, rowRuns } from '../../services/bili/qrcode.js';
 import { saveSession } from '../../services/storage.js';
+// 【X7 Pro 适配 3.6.1】容器宽高不再写死在 less 里，统一由 layout.js 按视口算
+// （960x266 与旧值逐像素相同；936x280 会把右侧/底部黑边吃掉）。
+import { layoutFor, layoutStyles } from '../../services/layout.js';
+import { buildProfile, readFalconEnv } from '../../services/device_profile.js';
 import { input } from '../../services/input.js';
 import {
   openVideo,
@@ -802,7 +807,15 @@ const LIVE_RECONNECT_NOTE = '直播重连中…';
 export default {
   name: 'PageBili',
   data() {
+    /* 画布 = 设备视口，且必须与 app.js 的 setViewPort 用**同一套判断**。
+     * 不直接读 env.width 的原因：部分固件的 deviceWidth/Height 报的是旋转前的
+     * 面板尺寸（480x960），直接拿来当画布宽会让整页按 480 去排。
+     * buildProfile 里有一道宽高比闸门（见 device_profile.js 注释），
+     * 不可信时退回机型预设（X6 960x266 / X7 936x280）。 */
+    const _p = buildProfile({ env: readFalconEnv() });
+    const L = layoutStyles(layoutFor(_p.cfg.width, _p.cfg.height));
     return {
+      L: L,
       tabs: TABS,
       searchTypes: SEARCH_TYPES_UI,
       tab: 'rcmd',
@@ -1032,7 +1045,8 @@ export default {
       const dur = s ? s.durationMs || 0 : 0;
       if (!(dur > 0)) return 0;
       const ms = this.seekDragMs == null ? this.play.positionMs : this.seekDragMs;
-      return seekFillWidth(ms / dur);
+      // 轨道宽跟着中列走（X6 453 / X7 441）：圆点直径 10 要从最大值里扣掉
+      return seekFillWidth(ms / dur, Math.max(20, this.L.seekTrackW - 10));
     },
     // 左列简介（用户手绘稿 m11950：左列上方显示视频标题和简介）
     playDesc() {
@@ -1337,7 +1351,7 @@ export default {
         return;
       }
       // 首屏也裁到列数整数倍，保证第一屏就是整行（用户要求 m11950-3）
-      const first = trimToGridRows(r.items, GRID_COLS);
+      const first = trimToGridRows(r.items, this.L.num.cols);
       if (id === 'rcmd') this.rcmdItems = first.items;
       else if (id === 'hot') this.hotItems = first.items;
       else if (id === 'search') this.searchResults[this.searchType] = first.items;
@@ -1363,7 +1377,7 @@ export default {
       const merged = appendDeduped(this.hotItems, r.items);
       // 用户要求 m11950-3：加载更多后条目数必须能被列数整除，否则最后一行填不满。
       // 只裁尾部（不重排），被裁掉的条目会在下一次「加载更多」时由新页补上。
-      const cut = trimToGridRows(merged.items, GRID_COLS);
+      const cut = trimToGridRows(merged.items, this.L.num.cols);
       this.hotItems = cut.items;
       this.hotPn = this.hotPn + 1;
       this.hotNoMore = r.noMore || merged.added === 0;
@@ -1441,7 +1455,7 @@ export default {
       this.hotMorePn = this.hotMorePn + 1;
       const merged = appendDeduped(this.rcmdItems, r.items);
       // 同上：尾部裁到列数整数倍（用户要求 m11950-3）
-      const cut = trimToGridRows(merged.items, GRID_COLS);
+      const cut = trimToGridRows(merged.items, this.L.num.cols);
       this.rcmdItems = cut.items;
       this.moreNoMore = r.noMore || merged.added === 0;
       this.statusText = merged.added === 0 ? '没有更多了' : '';
@@ -1480,7 +1494,7 @@ export default {
       this.searchNoMoreMap[st] = r.noMore;
       const merged = appendDeduped(this.searchResults[st], r.items);
       // 同上：尾部裁到列数整数倍（用户要求 m11950-3）
-      const cut = trimToGridRows(merged.items, GRID_COLS);
+      const cut = trimToGridRows(merged.items, this.L.num.cols);
       this.searchResults[st] = cut.items;
       this.statusText = merged.added === 0 ? '没有更多了' : '';
       logWarn('[bili] search(' + st + ') page ' + r.page + ' +' + merged.added + ' total=' + cut.items.length +
@@ -1736,6 +1750,7 @@ export default {
       this.stopPoll();
       this._pollLogged = false;
       this._audioDeadWarned = false; // 每次新播放重置音频中断提示状态。
+      this._audioOffWarned = false;  // 音频设备被占用的提示也按会话重置
       this._resyncNoteOn = false;
       /* 自愈状态按会话重置（任务 D）：换一个视频就是新会话，配额重新给满。 */
       this._avRecoverAt = 0;
@@ -1814,8 +1829,21 @@ export default {
         // 不能在"已播完"后再追加无声提示。
         if (st.audioDead && st.state === 'playing' && !this._audioDeadWarned) {
           this._audioDeadWarned = true;
-          this.play.note = '无声：音频输出被其他应用占用';
-          logWarn('[bili] audio chain dead（播放中）→ 音频输出可能被其他应用占用');
+          this.play.note = '无声：音轨未加载，已自动重试';
+          logWarn(
+            '[bili] audio dead（播放中，已自愈 ' + (st.audioHeals || 0) +
+            ' 次）→ 音轨仍然没有数据，可能是音频 URL 失效或音频输出被占用'
+          );
+        }
+        /*
+         * audioOff：native 因为「音频设备被别的进程占着」主动降级为无声
+         * （先等 400ms 重试过一次，仍然打不开）。这种时候画面是好的，
+         * 提示必须写清「画面正常、只是没声音」，否则用户会以为播放失败。
+         */
+        if (st.audioOff && st.state === 'playing' && !this._audioOffWarned) {
+          this._audioOffWarned = true;
+          this.play.note = '无声：音频设备被占用，已静音播放';
+          logWarn('[bili] audioOff（设备被占，已降级为无声播放，画面不受影响）');
         }
         // 起播门诊断（v1.7.1）：音频等待视频首帧的时长（正常=首帧耗时；15000=超时放行）
         if (st.gateWaitMs > 400 && st.gateWaitMs !== this._lastGateMs) {
@@ -2428,7 +2456,15 @@ export default {
     // pageX 是「相对被触摸元素」的坐标，不是整页坐标 —— 实测在 .seek 内点 x=37 得到的
     // pageX 就是 37，所以只需减 8px 左 padding，不用再减中列的绝对 x。
     seekRatioAt(x) {
-      return seekRatioFromX(x);
+      // 轨道宽 = 中列 − 左右 padding 16（X6 453 / X7 441），不能再写死 453
+      return seekRatioFromX(x, this.L.seekTrackW);
+    },
+    /* 图文图片宽度：不改原图比例，只把超过正文可用宽（X6 880 / X7 856）的压回来。
+     * 以前模板里写死 880，X7 Pro 上正文 872 宽，图片会顶到右边缘（裁 8px）。 */
+    articleImgW(dw) {
+      const max = this.L.num.cover;
+      const w = Number(dw) > 0 ? Number(dw) : max;
+      return (w > max ? max : w) + 'px';
     },
     /* 拖动中：**只更新本地 seekDragMs，绝不下发 seek**。
      *

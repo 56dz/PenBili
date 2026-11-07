@@ -296,10 +296,20 @@ function intOr(v, dflt) {
 
 function deviceArgs(opts) {
   const o = opts || {};
-  return [intOr(o.panelOffset, -1), intOr(o.planeId, 0)];
+  /*
+   * 第 19 位 = swScale（0/1）：解码后是否插 videoscale 把 buffer 缩到窗口大小。
+   * X7 Pro 上 plane-id 76 不可用、自选平面又可能没有缩放器，所以由 profile
+   * 下发 swScale=1 —— sink 拿到的画面与 render-rectangle 等大，谁都不需要缩放。
+   * 3.5.6：1 = 按 rotate 互换目标宽高（修「横帧被拉成竖条」的比例 bug），
+   *        2 = 不互换，给「解码器真的旋转了 buffer」的固件留的免打包回退。
+   * 缺省 0 让 X6 Pro 继续走硬件缩放（行为与 3.5.5 逐字节一致）。
+   */
+  const sw = intOr(o.swScale, 0);
+  return [intOr(o.panelOffset, -1), intOr(o.planeId, 0), sw === 1 || sw === 2 ? sw : 0];
 }
 
-// opts: { input, input2, startMs, durationMs, fps, audio, transpose, rect, audioDevice, userAgent, referer, fpsCap, isLive, panelOffset, planeId }
+// opts: { input, input2, startMs, durationMs, fps, audio, transpose, rect, audioDevice,
+//         userAgent, referer, fpsCap, isLive, panelOffset, planeId, swScale }
 export async function openSession(opts) {
   const m = await getPlayerModule();
   if (!m) return fail('PLAYER_NATIVE_MISSING', '播放器模块不可用（未随包安装 libjsapi_player2.so / libjsapi_player.so）');
@@ -310,7 +320,7 @@ export async function openSession(opts) {
   if (!isSafeReferer(o.referer)) return fail('PLAYER_BAD_HEADERS', 'Referer 参数不合法');
   const rect = o.rect || null;
   if (!rect || !(rect.width > 0) || !(rect.height > 0)) return fail('PLAYER_BAD_RECT', '视频矩形未计算');
-  // v1(player.c) 只按 argv[0..14] 取参，多出来的两个参数会被忽略，不影响回退路径。
+  // v1(player.c) 只按 argv[0..14] 取参，多出来的参数会被忽略，不影响回退路径。
   const res = call('open', buildOpenArgs(o).concat(deviceArgs(o)));
   if (res && res.ok === false && !res.code) res.code = 'PLAYER_OPEN_FAILED';
   return res;
@@ -384,6 +394,14 @@ export async function resumeRender() {
 export async function redraw() {
   await getPlayerModule();
   return callOptional('redraw', []);
+}
+
+/* 读 native 日志尾部（/tmp/pb2.log）。自检页「日志」用它 —— 真机没有 adb 时，
+ * 一张截图就能看到 bus error / plane missing / 音频自愈这些关键行。
+ * v1 没有这个接口 → callOptional 返回 PLAYER_UNSUPPORTED，页面按「无日志」降级。 */
+export async function logTail(maxBytes) {
+  await getPlayerModule();
+  return callOptional('logTail', [Math.round(Number(maxBytes) || 4096)]);
 }
 
 export async function info() {

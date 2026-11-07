@@ -3810,15 +3810,206 @@ async function main() {
     assert.strictEqual(p.planeId, 76);
   });
 
-  test('device: X7 Pro 936x280 → 偏移 100 / plane 自动 / 面板行 936', () => {
+  test('device: X7 Pro 936x280 → 偏移 100 / plane auto+软件缩放 / 面板行 936', () => {
     const p = dp.buildProfile({ env: { width: 936, height: 280, model: 'X7 Pro' } });
     assert.strictEqual(p.name, 'x7p');
     assert.strictEqual(p.cfg.width, 936);
     assert.strictEqual(p.cfg.height, 280);
     assert.strictEqual(p.panelXOffset, 100);
+    /*
+     * 2026-11-08 真机回归（第二次）：显式 plane-id=76 在 X7 Pro 上**不可用** ——
+     * vbranch 有、frames 恒 0，set_state(PLAYING) 返回 FAILURE(0)，管线停在
+     * PAUSED。所以改为「自选平面 + 软件缩放」：不赌 plane 对象号，由
+     * videoscale 把 buffer 缩到窗口大小，sink 侧不需要缩放能力。
+     */
     assert.strictEqual(p.planeId, -1);
-    assert.ok(Math.abs(p.scale - 0.975) < 1e-9);
+    assert.strictEqual(p.swScale, 1);
     assert.strictEqual(p.physical.height, 936);
+  });
+
+  test('device: swScale 三档语义（0 硬件 / 1 互换 / 2 不互换）', () => {
+    const x6 = dp.buildProfile({ env: { width: 960, height: 266, model: '' } });
+    assert.strictEqual(x6.swScale, 0, 'X6 必须继续走硬件缩放');
+    const x7 = dp.buildProfile({ env: { width: 936, height: 280, model: 'X7 Pro' } });
+    assert.strictEqual(x7.swScale, 1, 'X7 必须走「videoscale + 按 rotate 互换」');
+    /* 2 是免打包回退开关：某些固件的 mppvideodec 真的把 buffer 转成竖帧，
+     * 那时不该互换 videoscale 的目标宽高。storage 里写 {"swScale":2} 即可。 */
+    const fb = dp.buildProfile({
+      env: { width: 936, height: 280, model: 'X7 Pro' },
+      override: { swScale: 2 }
+    });
+    assert.strictEqual(fb.swScale, 2);
+    const bad = dp.buildProfile({
+      env: { width: 936, height: 280, model: 'X7 Pro' },
+      override: { swScale: 9 }
+    });
+    assert.strictEqual(bad.swScale, 2, '越界值收敛到合法上界');
+  });
+
+  test('native: videoscale 目标必须按 rotate 互换、且宽高偶数对齐', () => {
+    /* 真机教训（3.5.6）：mppvideodec rotation=270 只是旋转意图，videoscale
+     * 看到的仍是横向帧。把横帧直接缩到旋转后的物理竖矩形 253x450，等于把
+     * 16:9 拉成 9:16 —— 用户看到「视频被压扁，不同比例压扁程度不一样」。
+     * 修法：目标宽高按 rotate 互换，并与 render-rectangle 一起偶数对齐。 */
+    const src = fsx.readFileSync(
+      pathx.join(__dirname, '..', 'native', 'csrc', 'session', 'session.c'), 'utf8');
+    const body = src.slice(src.indexOf('static void video_post_rate_desc'),
+                           src.indexOf('static void on_pad_added'));
+    assert.ok(/g_w\.rotate == 90 \|\| g_w\.rotate == 270/.test(body),
+      'videoscale 必须按 rotate 互换目标宽高');
+    assert.ok(/tw = w & ~1/.test(body) && /th = h & ~1/.test(body),
+      '目标宽高必须偶数对齐（NV12 要求）');
+    assert.ok(/sscanf\(g_w\.rect/.test(body),
+      '目标必须来自真正下发的 render-rectangle，不能用 req->w/h（SET_RECT 会改）');
+    assert.ok(/normalize_video_rect\("OPEN"\)/.test(src),
+      'OPEN 时必须把 rect 对齐到偶数');
+    assert.ok(/normalize_video_rect\("SET_RECT"\)/.test(src),
+      'SET_RECT 后也必须对齐，否则键盘避让恢复又会差 1px');
+  });
+
+  test('player: swScale=2 必须能透传到 native（免打包回退开关）', () => {
+    const src = fsx.readFileSync(
+      pathx.join(__dirname, '..', 'src', 'services', 'player.js'), 'utf8');
+    const body = src.slice(src.indexOf('function deviceArgs'),
+                           src.indexOf('export async function openSession'));
+    assert.ok(/sw === 1 \|\| sw === 2 \? sw : 0/.test(body),
+      'deviceArgs 不能把 2 压成 1，否则真机上没法免打包回退');
+    const jsapi = fsx.readFileSync(
+      pathx.join(__dirname, '..', 'native', 'csrc', 'jsapi_player2.c'), 'utf8');
+    assert.ok(/req->swScale != 1 && req->swScale != 2/.test(jsapi),
+      'native 解析也必须保留 2 这一档');
+  });
+
+  test('device: X6 保持硬件缩放；显式改成自选平面时自动打开软件缩放', () => {
+    const x6 = dp.buildProfile({ env: { width: 960, height: 266, model: '' } });
+    assert.strictEqual(x6.planeId, 76, 'X6 必须继续用验证过的 76，不能跟着 X7 改');
+    assert.strictEqual(x6.swScale, 0, 'X6 走 0 拷贝的硬件缩放');
+
+    /* 用户在 X6 上手动覆盖成 planeId=-1：自选平面可能没有缩放器，
+     * swScale 必须跟着变 1，否则又会出现「画面被裁一条」。 */
+    const o = dp.buildProfile({
+      env: { width: 960, height: 266, model: '' },
+      override: { planeId: -1 }
+    });
+    assert.strictEqual(o.planeId, -1);
+    assert.strictEqual(o.swScale, 1);
+
+    /* 显式要 0 也能关掉（例如确认自选到了 Esmart） */
+    const off = dp.buildProfile({
+      env: { width: 936, height: 280, model: 'X7 Pro' },
+      override: { swScale: 0 }
+    });
+    assert.strictEqual(off.swScale, 0);
+  });
+
+  test('player: open 的第 19 位必须是 swScale（与 native 的解析下标对齐）', () => {
+    /* native: req->swScale = argc>=19 ? arg 18 : 0。JS 少传一位就会
+     * 让 native 读不到、静默回落硬件缩放 —— X7 上直接黑屏。 */
+    const src = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'services', 'player.js'), 'utf8');
+    const body = src.slice(src.indexOf('function deviceArgs'), src.indexOf('export async function openSession'));
+    assert.ok(/panelOffset/.test(body) && /planeId/.test(body) && /swScale/.test(body),
+      'deviceArgs 必须同时下发 panelOffset/planeId/swScale');
+    const m = body.match(/return \[([\s\S]*?)\];/);
+    assert.ok(m, 'deviceArgs 必须是一个数组字面量');
+    // 按顶层逗号计数：intOr(...) 内部也有逗号，不能数 intOr( 也不能直接 split(',')
+    let depth = 0;
+    let commas = 0;
+    for (const ch of m[1]) {
+      if (ch === '(') depth++;
+      else if (ch === ')') depth--;
+      else if (ch === ',' && depth === 0) commas++;
+    }
+    assert.strictEqual(commas + 1, 3, 'deviceArgs 必须是 3 个元素（第 17/18/19 位）');
+    assert.ok(/\bsw\b/.test(m[1]), '第 19 位必须来自 o.swScale 归一后的 sw 变量');
+    assert.ok(/sw === 1 \|\| sw === 2 \? sw : 0/.test(m[1]),
+      '第 19 位必须原样透传 0/1/2 三档（2 是免打包回退开关）');
+  });
+
+  /* ==================== 弹性布局（3.6.1：吃掉右侧/底部黑边） ==================== */
+  const lay = await import('../src/services/layout.js');
+
+  test('layout: X6 Pro 960x266 与 3.5.5 的硬编码逐字段相同', () => {
+    const L = lay.buildLayout(960, 266);
+    assert.strictEqual(L.width, 960);
+    assert.strictEqual(L.height, 266);
+    assert.strictEqual(L.nav, 76);
+    assert.strictEqual(L.content.width, 884);
+    assert.strictEqual(L.grid.cols, 5);
+    assert.strictEqual(L.grid.card, 166);
+    assert.strictEqual(L.grid.width, 870);
+    assert.strictEqual(L.grid.thumbH, 93);
+    assert.strictEqual(L.play.left, 213);
+    assert.strictEqual(L.play.mid, 469);
+    assert.strictEqual(L.play.right, 278);
+    assert.strictEqual(L.play.videoH, 240);
+    assert.strictEqual(L.play.seekH, 26);
+    assert.strictEqual(L.play.infoH, 192);
+    assert.strictEqual(L.play.btnsH, 74);
+    assert.strictEqual(L.play.rightBodyH, 240);
+    assert.strictEqual(L.play.rightInputH, 26);
+    assert.strictEqual(L.play.seekTrackW, 453);
+    assert.strictEqual(L.article.bodyW, 896);
+    assert.strictEqual(L.article.coverW, 880);
+  });
+
+  test('layout: X7 Pro 936x280 填满视口（三列和 = 936，两段高和 = 280）', () => {
+    const L = lay.buildLayout(936, 280);
+    assert.strictEqual(L.play.left + L.play.mid + L.play.right, 936);
+    assert.strictEqual(L.play.videoH + L.play.seekH, 280);
+    assert.strictEqual(L.play.infoH + L.play.btnsH, 280);
+    assert.strictEqual(L.play.rightBodyH + L.play.rightInputH, 280);
+    // 首页网格：5 列必须真正塞进内容区（这是「右侧 184px 黑边」的根因）
+    assert.strictEqual(L.grid.cols, 5);
+    assert.ok(L.grid.padLeft + L.grid.width <= L.content.width,
+      '网格 ' + L.grid.width + ' 超出内容区 ' + L.content.width);
+    assert.ok(L.content.width - L.grid.padLeft - L.grid.width < L.grid.card,
+      '网格右侧不该再空出半列以上');
+  });
+
+  test('layout: 任意常见视口都不越界、不留半列黑边', () => {
+    for (const [w, h] of [[960, 266], [936, 280], [960, 280], [1024, 300], [800, 260]]) {
+      const L = lay.buildLayout(w, h);
+      assert.ok(L.grid.padLeft + L.grid.width <= L.content.width + 1, w + 'x' + h + ' 网格越界');
+      assert.strictEqual(L.play.left + L.play.mid + L.play.right, w);
+      assert.strictEqual(L.play.videoH + L.play.seekH, h);
+      assert.ok(L.play.videoW > 100 && L.play.videoH > 80);
+    }
+  });
+
+  test('layout: 网格右侧必须留 4~12px 余量（临界值会整列换行 → 右侧黑边）', () => {
+    for (const [w, h] of [[960, 266], [936, 280], [960, 280]]) {
+      const L = lay.buildLayout(w, h);
+      const slack = L.content.width - L.grid.padLeft - L.grid.width;
+      assert.ok(slack >= 4, w + 'x' + h + ' 网格余量只有 ' + slack + 'px，第 5 列会被挤到下一行');
+      assert.ok(slack <= 14, w + 'x' + h + ' 网格余量 ' + slack + 'px 过大，右侧会留黑边');
+    }
+  });
+
+  test('layout: 播放页挖洞尺寸与 native 视频区完全一致', () => {
+    for (const [w, h] of [[960, 266], [936, 280]]) {
+      const p = dp.buildProfile({ env: { width: w, height: h, model: '' } });
+      const L = lay.buildLayout(w, h);
+      assert.strictEqual(p.videoArea.x, L.play.left);
+      assert.strictEqual(p.videoArea.width, L.play.videoW);
+      assert.strictEqual(p.videoArea.height, L.play.videoH);
+      assert.strictEqual(p.videoArea.height + L.play.seekH, h);
+      /* 物理换算的基准必须与本机视口一致：X7 的面板行是 936 而不是 960。
+       * 这两个值一旦写死成 960，视频平面就会相对挖洞整体偏移（真机表现为
+       * 「画面贴在底部、上下被裁」）。 */
+      assert.strictEqual(p.logical.width, w);
+      assert.strictEqual(p.physical.height, w);
+    }
+  });
+
+  test('probe: 自检页必须与首页同一套几何（防止回退到 X6 常量）', () => {
+    /* 真机教训：自检页曾经调用 screen.js 的 probeVideoRects（X6 的 469x240），
+     * 于是 X7 上打出 `out=240x427`、平面按 107 偏移摆放 —— 自检页看到的画面
+     * 和首页根本不是一回事，排障直接跑偏。 */
+    const src = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'services', 'bili', 'probe.js'), 'utf8');
+    assert.ok(!/probeVideoRects\s*\(/.test(src), 'probe.js 又用回了 X6 的 probeVideoRects');
+    assert.ok(/playVideoRectsFor/.test(src), 'probe.js 必须用 playVideoRectsFor 算矩形');
+    assert.ok(/panelOffset:/.test(src), 'probe.js 必须下发 panelOffset');
+    assert.ok(/planeId:/.test(src), 'probe.js 必须下发 planeId');
   });
 
   test('device: X6 Pro 新几何函数与旧 playVideoRects 逐字段相同', () => {
@@ -3846,6 +4037,23 @@ async function main() {
     }
   });
 
+  test('device: env 报面板尺寸（竖屏/近似方屏）时不许当画布宽', () => {
+    /* $falcon.env 的 deviceWidth/Height 文档只写「设备分辨率」。若固件报的是
+     * 旋转前的面板（480x960）而代码直接拿它当画布宽，整页会按 480 宽去排，
+     * 在 936 宽的屏幕上是灾难性错位。宽高比 < 2.2 一律视为不可用视口。 */
+    const a = dp.buildProfile({ env: { width: 480, height: 960, model: 'X7 Pro' } });
+    assert.strictEqual(a.cfg.width, 936);
+    assert.strictEqual(a.cfg.height, 280);
+    const b = dp.buildProfile({ env: { width: 480, height: 280, model: 'X7 Pro' } });
+    assert.strictEqual(b.cfg.width, 936);
+    const c = dp.buildProfile({ env: { width: 960, height: 480, model: 'X7 Pro' } });
+    assert.strictEqual(c.cfg.width, 936);
+    // 正常视口必须照用
+    const d = dp.buildProfile({ env: { width: 936, height: 280, model: '' } });
+    assert.strictEqual(d.cfg.width, 936);
+    assert.strictEqual(d.source, 'env');
+  });
+
   test('device: storage 覆盖能锁定真机实测的偏移与 plane-id', () => {
     const p = dp.buildProfile({
       env: { width: 936, height: 280, model: '' },
@@ -3860,7 +4068,7 @@ async function main() {
 
   test('device: describeProfile 含机型/偏移/平面诊断字段', () => {
     const s = dp.describeProfile(dp.buildProfile({ env: { width: 936, height: 280, model: '' } }));
-    assert.ok(/x7p/.test(s) && /panelOffset=100/.test(s) && /planeId=auto/.test(s));
+    assert.ok(/x7p/.test(s) && /panelOffset=100/.test(s) && /planeId=auto/.test(s) && /swScale=1/.test(s));
   });
 }
 
