@@ -465,6 +465,9 @@ export async function openVideo(ctx, item) {
     panelOffset: profile.panelXOffset,
     planeId: profile.planeId,
     swScale: profile.swScale,
+    /* 【3.5.6 第四轮】videoscale 输出倍率：X7 Pro 的 1:1 平面只认 buffer
+     * 像素尺寸，放大 buffer 才能让画面铺满挖洞区。100 = 与矩形等大。 */
+    bufScale: profile.bufScale,
     /* '' = 自动：已连蓝牙耳机走 bluealsa，否则内置扬声器（player.c 的 detect_bt_pcm） */
     audioDevice: '',
     userAgent: ctx.mediaUa,

@@ -310,6 +310,14 @@ static JSValue js_open(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
     /* 0=硬件缩放 / 1=videoscale 且按 rotate 互换目标 / 2=videoscale 不互换。
      * 2 是给「mppvideodec 真的把 buffer 转成竖帧」的固件留的免打包回退开关。 */
     if (req->swScale != 1 && req->swScale != 2) req->swScale = 0;
+    /*
+     * 【3.5.6 第四轮】第 20 个参数 = videoscale 输出倍率（百分比）。
+     * X7 Pro 自选平面疑似只做 1:1 贴 buffer，改 render-rectangle 不影响画面
+     * 大小；只有等比放大送进 sink 的 buffer 才能让画面铺满挖洞区。
+     * 缺省 100 = 与矩形等大（X6 Pro 与所有老调用方行为不变）。
+     */
+    req->bufScale = (argc >= 20) ? (int)arg_int(ctx, argc, argv, 19, 100) : 100;
+    if (req->bufScale < 50 || req->bufScale > 400) req->bufScale = 100;
 
     JS_FreeCString(ctx, input);
     if (audio_dev) JS_FreeCString(ctx, audio_dev);
@@ -466,6 +474,26 @@ static JSValue js_set_rect(JSContext *ctx, JSValueConst this_val, int argc, JSVa
 static JSValue js_recover(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)this_val; (void)argc; (void)argv;
     if (pb2_session_cmd(PB2_CMD_RECOVER, 0, NULL) != 0) {
+        return mk_fail(ctx, "PLAYER_BUSY", "queue full");
+    }
+    return mk_ok(ctx);
+}
+
+/*
+ * setSound(1)：运行时一键解除全局静音（3.5.6 第五轮）。
+ *
+ * 背景：调试期曾要求「测试一律静音」，设备上的 /tmp/pb2_mute 或
+ * PB2_MUTE=1 会让播放器在每次 OPEN 前把 card0 Playback Path 设成 OFF。
+ * 画面正常、音频字节持续增长、自检页也报「音=xxxxx/有」，但扬声器不响。
+ * 开发机无 adb，用户没法自己删文件 —— 所以在自检页给一个按钮，
+ * 通过命令队列让 worker 去删标志文件并选通输出通路。
+ * 老版本 JS 不调它时行为完全不变；v1 没有此接口，player.js 会降级。
+ */
+static JSValue js_set_sound(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    long long on;
+    (void)this_val;
+    on = (argc >= 1) ? arg_int(ctx, argc, argv, 0, 1) : 1;
+    if (pb2_session_cmd(PB2_CMD_SET_SOUND, on, NULL) != 0) {
         return mk_fail(ctx, "PLAYER_BUSY", "queue full");
     }
     return mk_ok(ctx);
@@ -773,6 +801,7 @@ static JSValue js_info(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
     /* 【X7 Pro 适配】返回本次会话真正生效的值，不再是写死的 76/107 */
     mk_int(ctx, "planeId", pb2_session_plane_id(), res);
     mk_int(ctx, "swScale", pb2_session_sw_scale(), res);
+    mk_int(ctx, "bufScale", pb2_session_buf_scale(), res);
     mk_int(ctx, "panelXOffset", pb2_session_panel_offset(), res);
     /* 真正生效的渲染矩形 "<x,y,w,h>"（面板坐标，已含 panelOffset） */
     mk_str(ctx, "rect", pb2_session_rect(), res);
@@ -860,6 +889,7 @@ static JSValue js_log_tail(JSContext *ctx, JSValueConst this_val, int argc, JSVa
     X("installAmr", js_install_amr, 1) \
     X("release", js_release, 0) \
     X("info", js_info, 0) \
+    X("setSound", js_set_sound, 1) \
     X("kmsProbe", js_kms_probe, 0) \
     X("logTail", js_log_tail, 1)
 

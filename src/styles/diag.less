@@ -1,9 +1,8 @@
 @import "var.less";
 
 // 链路自检页（diag）样式 —— 从原 base.less 拆出，只服务 pages/diag。
-// 坐标全部来自 X6 Pro 真机截屏 + cfg.json：逻辑 960x266（详见 app.js DESIGN_WIDTH 说明）。
-// 布局：左列 608px = 视频洞（与首页 play-col 同宽，见 services/screen.js::VIDEO_COL_WIDTH）；
-// 右列 352px = 步骤面板。
+// 尺寸一律由 diag.vue 的 :style（profile + 16:9 洞）内联覆盖，这里的值只是兜底：
+// 3.5.6 第四轮起洞宽 = 视口高 * 16/9（X7 Pro = 498），右侧面板 = 视口宽 - 洞宽。
 .page {
   width: 960px;
   height: 266px;
@@ -69,8 +68,9 @@
   flex-direction: column;
 }
 
+/* 20px：8 行步骤 + 设备行 + 几何行 + 底部按钮正好塞进 266/280 高的视口 */
 .row {
-  height: 21px;
+  height: 20px;
   flex-direction: row;
   align-items: center;
 }
@@ -177,13 +177,13 @@
 /* ---------- 3.6.2：窄按钮 + 日志页 ---------- */
 /* 底部要塞三个按钮（日志/重跑/返回）+ 两行摘要，72 宽放不下 */
 .btn-sm {
-  width: 56px;
-  margin-left: 6px;
+  width: 46px;
+  margin-left: 5px;
 }
 
 .btn-text-sm {
-  width: 56px;
-  font-size: 12px;
+  width: 46px;
+  font-size: 11px;
   color: #ffffff;
   text-align: center;
 }
@@ -230,3 +230,6 @@
   color: #9fb0c0;
   lines: 1;
 }
+
+/* 3.5.6：底部四个按钮（比例/日志/重跑/返回），46px x4 + 间距 = 204px，
+   352px 面板里还能给摘要留 140px。 */

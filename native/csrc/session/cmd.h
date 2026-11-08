@@ -90,6 +90,22 @@ int pb2_mixer_volume_read(const char *bt_ctl_name);
  * 【P1-12】返回 0 当且仅当两路 pb2_run 都返回 0（原来用 || 语义）。
  */
 int pb2_mixer_mute(void);
+/*
+ * 【3.5.6 第五轮】一键开声（只在 worker 线程调用）。
+ *
+ * 真机「画面正常但没有声音」：日志里 amixer 执行成功、音频字节持续增长，
+ * 但全局静音开关（/tmp/pb2_mute 或 PB2_MUTE=1）会在每次 OPEN 前把
+ * card0 Playback Path 设成 OFF；pb2_mixer_setup() 又会在系统 Master=0 时
+ * 直接早退，连通路都不打开。两者都会让「数据在走、扬声器不响」。
+ *
+ * 本函数由用户在自检页主动点「开声」触发，做三件事：
+ *   ① 删 /tmp/pb2_mute、建 /tmp/pb2_sound（下一次 pb2_mute_reload 即生效，
+ *      且重启后仍保持，不需要 adb / 不需要重新打包）；
+ *   ② 无条件把 Playback Path 选通 SPK；
+ *   ③ 仅当回读到系统 Master=0 时，才设成 80% —— 用户音量非 0 时
+ *      一个字节都不改，保持「播放器不拥有音量主权」的既有约定。
+ */
+int pb2_force_sound(void);
 
 /*
  * OPEN 之前的同步兜底静音（只设 card1 Master=0，约 10~17ms，不回读）。

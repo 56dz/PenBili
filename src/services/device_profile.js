@@ -20,7 +20,7 @@
 //   实际 (x,y) -> 面板列 yoffset + y，面板行 (cfg.width - (x + w))
 //   native 收到的是「逻辑带内坐标」，会自己再加 panelOffset。
 
-import { getString, logWarn } from './storage.js';
+import { getString, setString, logWarn } from './storage.js';
 import { fitLogicalRect, logicalRectToPhysicalRect } from './screen.js';
 import { buildLayout } from './layout.js';
 
@@ -64,7 +64,48 @@ export const PANEL = { width: 480, height: 960 };
 // 比例压扁程度不一样」）。若某固件真的把输出 buffer 转成了竖帧，设 2 关掉
 // 互换即可，不用重新打包。
 export const X6P_DEFAULTS = { width: 960, height: 266, planeId: 76, swScale: 0 };
-export const X7P_DEFAULTS = { width: 936, height: 280, planeId: -1, swScale: 1 };
+/*
+ * 【3.5.6 第四轮：四档截图定案】
+ *
+ * 真机把 A0/B0/C1/D2 各截了一张：四张的 `playing out=253x450` **完全相同**，
+ * 画面也都只占视频区的一小块（A/C/D 黑边在左/上，B 在左/下）。这说明前四档
+ * 的设计本身就不对题：它们只改「缩放方式 / 面板列偏移」，而
+ *   render-rectangle 的宽高、起点、以及送到平面的 buffer 尺寸**一像素没变**。
+ * 用户要的是「占满」，靠换缩放方式永远试不出来。
+ *
+ * 这一轮从两个确定的错位点下手：
+ *   ① 自检页挖洞区是 584x280（左整块），probe 却按首页播放区
+ *      （x=208 起、457x253）算矩形 → 画面天生偏到一边，且比洞小一圈。
+ *      现在洞改成 16:9（X7 = 498x280），probe 用洞本身作为 box，矩形与洞
+ *      严格同源，640x360 恰好铺满、零黑边。
+ *   ② X7 自选平面可能只做 1:1 贴 buffer（A0 那张窄条就是证据：640x360
+ *      横帧被按窗口裁了一块）。改 render-rectangle 对这种平面无效，必须改
+ *      **buffer 像素尺寸**。新增 bufScale：videoscale 目标在矩形基准上按
+ *      百分比放大，矩形不动。平面按矩形缩放时画面不变，按 buffer 1:1 时
+ *      画面随之变大 —— 两种驱动行为都覆盖到。
+ *
+ * 默认回到 swScale=1（软件缩放）：A0（硬件缩放）那张是四张里最差的窄条，
+ * C1/D2 至少有完整画面。X6 Pro 仍是 0（硬件缩放，已验证）。
+ *
+ * 【3.5.6 第五轮：panelXOffset 必须是 0，不是 100】
+ *
+ * 第四轮把四档全改成「几何档」时，把唯一验证过列偏移的 B0（off=0）删掉了，
+ * 四档统一回落到公式值 (480-280)/2=100。真机四张新截图：缓冲从 498x280
+ * 变到 946x532、横帧/竖帧都试了，**画面一模一样地贴在屏幕下方**，
+ * 生效矩形全是 <100,438,280,498> —— 用户「没有正常的，全部靠下」。
+ *
+ * 回头重看第三轮 B0（off=0）那张：画面是四张里最大的，上方黑边几乎没了，
+ * 用户当时说的「左侧和下方一小条」是**剩下的少量黑边**，不是画面小。
+ * 也就是说 rect.x 不该再加 100：JS 产出的 x 已经是面板绝对列坐标，
+ * native 再加一次 (480-280)/2 等于把整块画面往面板列 +100 推，
+ * 超出 280 宽逻辑带的部分被裁掉 → 只剩下方约 180 高、贴底。
+ *
+ * X6 Pro 保持 (480-266)/2=107：那台机器上 107 是验证过的正确值（3.5.5
+ * 起 native 就硬编码它），X7 不能跟着套公式。
+ */
+export const X7P_DEFAULTS = {
+  width: 936, height: 280, planeId: -1, swScale: 1, panelXOffset: 0
+};
 
 function num(v, fallback) {
   const n = typeof v === 'number' ? v : parseFloat(v);
@@ -141,8 +182,18 @@ export function buildProfile(input) {
   const panelWidth = clampInt(ov.panelWidth, PANEL.width, 240, 4096);
   // 面板行数：逻辑宽度映射过去（X6P 960 行、X7P 936 行），不是固定的 960。
   const panelHeight = clampInt(ov.panelHeight, width, 240, 4096);
-  // 逻辑带在 480 宽面板里居中；X6P=107、X7P=100。
-  const panelXOffset = clampInt(ov.panelXOffset, Math.round((panelWidth - height) / 2), 0, panelWidth - 1);
+  /*
+   * 面板列偏移：JS 产出的物理矩形 x 已经是面板绝对列坐标，native 会原样
+   * 加到这里的值上（do_open: g_w.rect = <panel_x_offset + req->x, ...>）。
+   *
+   * X6P = 107（(480-266)/2，3.5.5 起 native 硬编码、真机验证过）。
+   * X7P = **0**（不是 (480-280)/2=100）：第三轮 B0 档真机证明 0 时画面最大、
+   * 上方黑边最少；第四轮四档统一回落到 100 后「全部靠下」。详见 X7P_DEFAULTS
+   * 注释。override 仍可显式覆盖，STORAGE 里写 {"panelXOffset":100} 即可回到旧值。
+   */
+  const centeredOffset = Math.round((panelWidth - height) / 2);
+  const offsetDefault = preset.panelXOffset !== undefined ? preset.panelXOffset : centeredOffset;
+  const panelXOffset = clampInt(ov.panelXOffset, offsetDefault, 0, panelWidth - 1);
   const panelYOffset = clampInt(ov.panelYOffset, 0, 0, panelHeight - 1);
   /*
    * rowOffset：UI 合成带在「面板行方向」的起始行。
@@ -165,7 +216,17 @@ export function buildProfile(input) {
    * 显式 plane-id 时默认不开（走硬件缩放）；planeId<0（自选平面）默认开，
    * 因为自选很可能挑到没有缩放器的 Smart 平面。override 可显式关掉。
    */
-  const swScale = clampInt(ov.swScale, planeId < 0 ? 1 : preset.swScale, 0, 2);
+  /* X7 Pro 默认 0（硬件缩放）；只有「X6 Pro 被手动覆盖成自选平面」时才
+   * 自动开 1（自选平面可能没有缩放器）。X7 不能跟着这条规则走。 */
+  const swDefault = isX7 ? preset.swScale : (planeId < 0 ? 1 : preset.swScale);
+  const swScale = clampInt(ov.swScale, swDefault, 0, 2);
+  /*
+   * 【3.5.6 第四轮】bufScale：videoscale 输出相对 render-rectangle 的百分比。
+   * 100 = 与矩形等大（原行为）。X7 Pro 自选平面若只做 1:1 贴 buffer，
+   * 改矩形完全不起作用，必须把 buffer 本身放大才能「占满」。
+   * 只在 swScale 非 0 时生效；范围 50..400，超出会被 native 钳住。
+   */
+  const bufScale = clampInt(ov.bufScale, 100, 50, 400);
 
   // setViewPort(cfg.width) 让 1 个设计像素 = 1 个物理像素。
   // 【3.6.1 改动】以前 setViewPort(960) + scale = width/960，X7 Pro 上整页被
@@ -196,6 +257,7 @@ export function buildProfile(input) {
     transpose: transpose,
     planeId: planeId,
     swScale: swScale,
+    bufScale: bufScale,
     videoArea: { x: layout.play.left, y: 0, width: layout.play.videoW, height: layout.play.videoH },
     liveVideoArea: { x: layout.play.left, y: 0, width: layout.play.videoW, height: height }
   };
@@ -208,20 +270,25 @@ export function buildProfile(input) {
  * **物理像素**，所以这里不再乘 scale —— 3.6.1 起画布就是视口，1:1 不缩放。
  * X6 Pro 上 layout.play = 213/469/278 + 240/266，与旧常量逐像素相同，
  * 因此本函数在 X6 上的输出与 screen.js:playVideoRects 完全一致（单测守护）。
+ *
+ * 【3.5.6 第四轮】第 5 参数 box：调用方可以直接给「自己挖的洞」。
+ * 自检页的洞是左侧 16:9 整块（X7 = 498x280），与首页三列布局里的中列
+ * （x=208 起、457x253）完全不同；以前 probe 借首页的 area 算，画面自然
+ * 偏出洞外、还小一圈。现在两边都用各自的洞，矩形与洞严格同源。
  */
-export function playVideoRectsFor(videoWidth, videoHeight, profile, live) {
+export function playVideoRectsFor(videoWidth, videoHeight, profile, live, box) {
   const p = profile || buildProfile({});
-  const area = live ? p.liveVideoArea : p.videoArea;
-  const box = {
+  const area = box || (live ? p.liveVideoArea : p.videoArea);
+  const fitBox = {
     x: Math.round(area.x),
     y: Math.round(area.y),
     width: Math.round(area.width),
     height: Math.round(area.height)
   };
-  const fit = fitLogicalRect(videoWidth, videoHeight, { width: box.width, height: box.height });
+  const fit = fitLogicalRect(videoWidth, videoHeight, { width: fitBox.width, height: fitBox.height });
   const logical = {
-    x: box.x + fit.x,
-    y: box.y + fit.y,
+    x: fitBox.x + fit.x,
+    y: fitBox.y + fit.y,
     width: fit.width,
     height: fit.height
   };
@@ -242,7 +309,8 @@ export function describeProfile(p) {
     ' panelOffset=' + p.panelXOffset +
     ' rowOffset=' + (p.rowOffset || 0) +
     ' planeId=' + (p.planeId < 0 ? 'auto' : p.planeId) +
-    ' swScale=' + (p.swScale ? 1 : 0) +
+    ' swScale=' + (p.swScale || 0) +
+    ' bufScale=' + (p.bufScale || 100) +
     ' transpose=' + p.transpose;
 }
 
@@ -277,6 +345,59 @@ export function ensureProfile() {
       });
   }
   return loading;
+}
+
+/*
+ * 【3.5.6 第四轮】自检页「比例」按钮 = **几何档**。
+ *
+ * 旧四档（A0/B0/C1/D2）只改缩放方式与列偏移，四张真机截图里
+ * `playing out=253x450` 一模一样 —— 所以「没一个能占满」是必然的：
+ * 矩形和 buffer 尺寸从没变过。这一轮四档全部真正改变送到平面的像素：
+ *   A 横帧 ×1.0   videoscale 按 rect 互换，基准尺寸
+ *   B 竖帧 ×1.0   videoscale 不互换（解码器真转了 buffer 的固件）
+ *   C 横帧 ×1.9   buffer 放大 → 1:1 平面也能铺满窗口
+ *   D 竖帧 ×1.9   同上 + 不互换
+ *
+ * bufScale 只放大 **buffer**，render-rectangle 保持与挖洞区等大且不出面板；
+ * 所以放大档不会让 kmssink 因为矩形越界而拒绝上屏。
+ */
+export const RATIO_MODES = [
+  { label: 'A', swScale: 1, bufScale: 100, desc: '横帧 x1.0' },
+  { label: 'B', swScale: 2, bufScale: 100, desc: '竖帧 x1.0' },
+  { label: 'C', swScale: 1, bufScale: 190, desc: '横帧 x1.9' },
+  { label: 'D', swScale: 2, bufScale: 190, desc: '竖帧 x1.9' }
+];
+
+export function currentRatioMode(override) {
+  const i = Number(override && override.ratioMode);
+  return Number.isInteger(i) && i >= 0 && i < RATIO_MODES.length ? i : 0;
+}
+
+export async function cycleRatioMode() {
+  let ov = {};
+  try {
+    const raw = await getString(PROFILE_KEY, '');
+    if (raw) ov = JSON.parse(raw) || {};
+  } catch (e) { /* 解析失败就当空覆盖 */ }
+  const next = (currentRatioMode(ov) + 1) % RATIO_MODES.length;
+  /* 清掉上一档（含旧版四档）写过的字段，避免 B0 的 panelXOffset=0、旧
+   * A0 的 swScale=0 之类的残留跨档污染。 */
+  const clean = Object.assign({}, ov);
+  delete clean.swScale;
+  delete clean.bufScale;
+  delete clean.panelXOffset;
+  delete clean.label;
+  delete clean.desc;
+  const m = RATIO_MODES[next];
+  clean.ratioMode = next;
+  clean.swScale = m.swScale;
+  clean.bufScale = m.bufScale;
+  setString(PROFILE_KEY, JSON.stringify(clean));
+  /* 让下次 ensureProfile() 重新读，不要复用缓存 */
+  cached = null;
+  loading = null;
+  logWarn('[device] ratio mode -> ' + m.label + ' ' + JSON.stringify(clean));
+  return m;
 }
 
 // 同步读取（ensureProfile 尚未完成时返回 X6 Pro 默认，绝不抛异常）

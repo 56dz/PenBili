@@ -9,6 +9,8 @@
 //     onStep    : (u) => void，u = { id, state: running|ok|fail|skip, detail, ms }
 //     cancelled : () => boolean，true 时立即终止且**不再回调 onStep**
 //     target    : { bvid }
+//     videoBox  : 可选，自检页自己挖的洞（逻辑像素 {x,y,width,height}）；
+//                 不传则用 profile.videoArea（首页播放区）
 //     nowSec    : () => number（WBI wts）
 //     sleep     : (ms) => Promise
 //     onSession : (session) => void（触点落 storage + 回填 Cookie）
@@ -205,18 +207,16 @@ export async function runProbe(ctx) {
   if (guard()) return { cancelled: true };
   const dims = dimsForQn(stream.qn);
   /*
-   * 【3.6.2】矩形与平面参数必须和首页播放走同一套 profile。
+   * 【3.5.6 第四轮】矩形必须与**当前页面挖的洞**同源。
    *
-   * 之前这里用的是 screen.js 的 probeVideoRects（X6 Pro 常量 LOGICAL 960x266 /
-   * VIDEO_AREA 469x240），在 X7 Pro 上算出来是 240x427、面板偏移回落到 107 ——
-   * 真机自检页那行 `playing out=240x427` 就是它。后果有两个：
-   *   ① 自检页的画面位置与首页不一致，看不出首页的真实表现；
-   *   ② 偏移 107 在 280 宽的逻辑带上会顶出 7px，平面被裁。
-   * 现在统一用 ensureProfile() + playVideoRectsFor()，并把 panelOffset / planeId
-   * 一并下发（不传时 native 会回落到 X6 的 107/76）。
+   * 3.6.2 修掉了「probe 用 X6 常量」的错，但仍借用首页播放区
+   * （X7 = x208 起、457x253）算矩形；自检页的洞却是左侧整块 584x280。
+   * 两者对不上 → 画面偏在洞的一角、四周大片黑，四档怎么换缩放都不可能
+   * 「占满」。现在诊断页把自己的 16:9 洞通过 ctx.videoBox 传进来，
+   * 640x360 恰好铺满；不传时仍按首页播放区走（Node 单测/其它调用方不变）。
    */
   const profile = c.profile || (c.ensureProfile ? await c.ensureProfile() : null);
-  const rects = playVideoRectsFor(dims.width, dims.height, profile, false);
+  const rects = playVideoRectsFor(dims.width, dims.height, profile, false, c.videoBox);
   const openRes = await c.player.openSession({
     input: stream.url,
     startMs: 0,
@@ -228,6 +228,7 @@ export async function runProbe(ctx) {
     panelOffset: profile ? profile.panelXOffset : undefined,
     planeId: profile ? profile.planeId : undefined,
     swScale: profile ? profile.swScale : undefined,
+    bufScale: profile ? profile.bufScale : undefined,
     audioDevice: '',
     userAgent: c.mediaUa,
     referer: c.mediaReferer
@@ -241,7 +242,8 @@ export async function runProbe(ctx) {
   if (!openRes || openRes.ok !== true) {
     return stepFail('play', (openRes && (openRes.code + ': ' + openRes.error)) || 'open 失败');
   }
-  ok('play', 'playing out=' + openRes.outWidth + 'x' + openRes.outHeight + ' ' + openRes.fps + 'fps');
+  ok('play', 'playing out=' + openRes.outWidth + 'x' + openRes.outHeight +
+    ' ' + openRes.fps + 'fps ·buf' + (profile ? profile.bufScale : 100));
 
   // 8) 5 秒回读：帧数增长即证明真实解码渲染
   if (guard()) {

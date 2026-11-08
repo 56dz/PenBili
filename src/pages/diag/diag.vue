@@ -38,10 +38,22 @@
         <div class="row">
           <text class="detail dev">{{ deviceText }}</text>
         </div>
+        <!-- 【3.5.6 第四轮】这一行是「占满」判案的关键：挖洞区 / 下发矩形 /
+             实际送进平面的 buffer 尺寸 / 当前档位，四档切换时数字必须跟着变。 -->
+        <div class="row">
+          <text class="detail dev">{{ geomText }}</text>
+        </div>
         <div class="foot">
           <text class="summary">{{ summary }}</text>
+          <div class="btn btn-sm" @click="onRatioTap">
+            <text class="btn-text-sm">{{ ratioLabel }}</text>
+          </div>
           <div class="btn btn-sm" @click="onLogTap">
             <text class="btn-text-sm">日志</text>
+          </div>
+          <!-- 【3.5.6 第五轮】画面正常但没声音时，点一下解除全局静音并选通扬声器。 -->
+          <div class="btn btn-sm" @click="onSoundTap">
+            <text class="btn-text-sm">开声</text>
           </div>
           <div :class="running ? 'btn btn-sm btn-dim' : 'btn btn-sm'" @click="onPrimaryTap">
             <text class="btn-text-sm">{{ running ? '停止' : '重跑' }}</text>
@@ -59,9 +71,12 @@
 import { runProbe, STEPS } from '../../services/bili/probe.js';
 import { createClient, cookieFromSession, DEFAULT_UA, REFERER } from '../../services/bili/client.js';
 import { netAvailable } from '../../services/net.js';
-import { loadSession, loadSettings, saveSession, logWarn } from '../../services/storage.js';
+import { getString, loadSession, loadSettings, saveSession, logWarn } from '../../services/storage.js';
 import * as player from '../../services/player.js';
-import { buildProfile, ensureProfile, readFalconEnv } from '../../services/device_profile.js';
+import {
+  buildProfile, ensureProfile, readFalconEnv, playVideoRectsFor,
+  cycleRatioMode, currentRatioMode, RATIO_MODES, PROFILE_KEY
+} from '../../services/device_profile.js';
 
 const GLYPHS = {
   pending: '·',
@@ -80,27 +95,42 @@ export default {
     const pf = buildProfile({ env: readFalconEnv() });
     const W = pf.cfg.width;
     const H = pf.cfg.height;
-    const PANEL_W = 352;
+    /*
+     * 【3.5.6 第四轮】视频洞改成严格的 16:9。
+     *
+     * 旧值是「屏幕宽 - 352 面板」= X7 的 584x280（比例 2.09），而 probe
+     * 却按首页中列 457x253 算矩形 → 视频天生比洞小一圈、还偏在一角，
+     * 四档怎么换缩放方式都不可能「占满」。现在洞按 H 反推成 16:9
+     * （X7 = 498x280），并把这块洞原样传给 probe 当矩形基准：
+     * 640x360 恰好铺满、零黑边，画面边界与挖洞边界严格重合。
+     * 右侧面板随之变宽，文字与按钮不再挤在 352px 里。
+     */
+    const VIDEO_W = Math.min(W - 320, Math.round((H * 16) / 9));
+    const PANEL_W = W - VIDEO_W;
     const LOG_HEAD_H = 28;
     const px = (n) => Math.round(n) + 'px';
     return {
       L: {
         page: { width: px(W), height: px(H) },
-        videoCol: { width: px(W - PANEL_W), height: px(H) },
+        videoCol: { width: px(VIDEO_W), height: px(H) },
         panel: { width: px(PANEL_W), height: px(H) },
         logHead: { width: px(W), height: px(LOG_HEAD_H) },
         logScroll: { width: px(W), height: px(H - LOG_HEAD_H) }
       },
+      /* 洞的逻辑矩形：probe 用它算 render-rectangle，保证两边同源 */
+      videoBox: { x: 0, y: 0, width: VIDEO_W, height: H },
       steps: STEPS.map((s) => ({ id: s.id, label: s.label, state: 'pending', detail: '' })),
       running: false,
       playing: false,
       summary: '准备就绪',
       deviceText: '设备信息读取中…',
+      geomText: '几何信息读取中…',
       bvidText: '',
       idleText: '视频区 · 起播后显示 640x360',
       logOpen: false,
       logMeta: '',
-      logLines: []
+      logLines: [],
+      ratioLabel: 'A'
     };
   },
   created() {
@@ -109,6 +139,12 @@ export default {
     this.client = createClient({});
     this.target = { bvid: '' };
     this.loadDeviceInfo();
+    /* 档位是持久化在 storage 里的，进页面要显示真值，不能每次都从 A0 起。 */
+    getString(PROFILE_KEY, '').then((raw) => {
+      let ov = {};
+      try { ov = JSON.parse(raw || '{}') || {}; } catch (e) { /* 忽略坏数据 */ }
+      this.ratioLabel = RATIO_MODES[currentRatioMode(ov)].label;
+    });
     this.run();
   },
   methods: {
@@ -137,9 +173,35 @@ export default {
           p.name + ' ' + p.cfg.width + 'x' + p.cfg.height +
           ' ' + (g.cols || '?') + 'x' + (g.card || '?') +
           ' off' + p.panelXOffset + ' row' + (p.rowOffset || 0) +
-          ' | plane=' + (pid < 0 ? 'auto' : pid) + ' vs' + (pvs ? 1 : 0) +
-          ' · ' + win;
-        logWarn('[diag] ' + this.deviceText + (info && info.rect ? ' rect=' + info.rect : ''));
+          ' | plane=' + (pid < 0 ? 'auto' : pid) + ' vs' + pvs +
+          ' buf' + (p.bufScale || 100) + ' · ' + win;
+        /*
+         * 【3.5.6 第四轮】把「这一档到底把多少像素送进平面」摆到屏幕上。
+         * 旧四档的真机截图里这行不存在，四张的 out=253x450 又一模一样，
+         * 完全看不出档位有没有生效。现在洞 / 矩形 / 缓冲 / 倍率 / 档位
+         * 全部可见，一张截图就能判案。
+         */
+        const r = playVideoRectsFor(640, 360, p, false, this.videoBox).physical;
+        const even = (n) => Math.max(2, Math.round(Number(n) || 0) & ~1);
+        const bs = p.bufScale || 100;
+        let bw = even(r.height);
+        let bh = even(r.width);
+        if (p.swScale === 2) { bw = even(r.width); bh = even(r.height); }
+        bw = even((bw * bs + 50) / 100);
+        bh = even((bh * bs + 50) / 100);
+        /* 【3.5.6 第五轮】静音开关状态也摆出来：画面正常却没声音时，
+         * 这一眼就能区分「全局静音」与「音频分支故障」。 */
+        const muteSrc = String((info && info.mutedBy) || '').split('/').pop() || '?';
+        const muteText = (info && info.muted !== undefined)
+          ? ' 音=' + (info.muted ? '静音(' + muteSrc + ')' : '开') : '';
+        this.geomText =
+          '洞' + this.videoBox.width + 'x' + this.videoBox.height +
+          ' 矩形' + even(r.width) + 'x' + even(r.height) +
+          ' 缓冲' + (p.swScale ? bw + 'x' + bh : '硬件缩放') +
+          ' x' + (bs / 100).toFixed(1) + ' 档' + this.ratioLabel +
+          (info && info.rect ? ' 生效' + info.rect : '') + muteText;
+        logWarn('[diag] ' + this.deviceText);
+        logWarn('[diag] ' + this.geomText);
       } catch (e) {
         this.deviceText = '设备探测失败: ' + ((e && e.message) || 'unknown');
         logWarn('[diag] ' + this.deviceText);
@@ -148,8 +210,40 @@ export default {
     glyphOf(state) {
       return GLYPHS[state] || '·';
     },
-    /* 日志页：把 native 的 /tmp/pb2.log 尾部搬到屏幕上。
-     * 「播放错误：」这类空消息只能靠它定位（bus error 原文在里面）。 */
+    /* 【3.5.6 第四轮】四档是「几何档」：每档都真正改变送到平面的像素尺寸。
+     * 旧四档只换缩放方式/列偏移，四张真机截图的 out=253x450 一模一样。
+     * 切档后必须刷新设备行 —— 以前只在 created() 读一次，四张截图里
+     * deviceText 全是第一档的值，等于没有取证信息。 */
+    async onRatioTap() {
+      if (this.running) return;
+      const m = await cycleRatioMode();
+      this.ratioLabel = m.label;
+      this.summary = '档 ' + m.label + ' ' + (m.desc || '') + ' · 重跑中…';
+      this.run();
+      this.loadDeviceInfo();
+    },
+    /* 【3.5.6 第五轮】画面正常但没有声音时使用。
+     * 全局静音开关（/tmp/pb2_mute 或 PB2_MUTE=1）会在每次 OPEN 前把
+     * Playback Path 设成 OFF：音频数据照常走、自检页仍显示「音=xxxxx/有」，
+     * 但扬声器不响。开发机无 adb，用户删不了标志文件，只能由页面下发。
+     * 点一次会删掉静音标志并建 /tmp/pb2_sound，之后首页播放也一直有声。 */
+    async onSoundTap() {
+      this.summary = '正在开声…';
+      const r = await player.setSound(true);
+      if (!r || r.ok === false) {
+        this.summary = '开声失败：' + ((r && r.code) || 'native 不支持');
+        return;
+      }
+      this.summary = '已开声 · 重跑自检…';
+      this.run();
+    },
+    /* 【3.5.6 第五轮】日志页必须能一次看到「几何现场」。
+     * 真机拍回来的日志页整整一屏都是 amixer / ECHILD / A2DP 噪音：每次
+     * 音量探测打 6 行，几十轮就把 `OPEN rect` / `video: videoscale` 全挤出
+     * logTail(6000) 的窗口，等于没有取证。现在：
+     *   ① 读取 24KB（原来 6KB）；② 噪音只留最新 3 行；
+     *   ③ 几何/错误关键行置顶；④ 把 KMS 摘要里的窗口名与 dst 几何插到最前面。
+     * 这样一张截图就能同时看到：UI/视频平面的真实 dst、下发的矩形、buffer 尺寸。 */
     async onLogTap() {
       if (this.logOpen) {
         this.logOpen = false;
@@ -159,21 +253,44 @@ export default {
       this.logMeta = '读取中…';
       this.logLines = [];
       try {
-        const r = await player.logTail(6000);
+        const r = await player.logTail(24000);
+        let lines = [];
         if (r && r.ok && typeof r.text === 'string' && r.text.length) {
-          const lines = r.text.split('\n').filter((l) => l.length > 0);
-          /* 倒序显示（最新在上）：失败现场一定在最后几行，正序的话要滚到底
-           * 才能看到错误，截图时反而容易漏掉关键行。 */
-          this.logLines = lines.slice(-160).reverse();
-          this.logMeta = 'pb2.log ' + (r.bytes || 0) + 'B · ' + this.logLines.length +
-            ' 行 · 新→旧 · on=' + (r.on ? 1 : 0);
+          lines = r.text.split('\n').filter((l) => l.length > 0);
         } else if (r && r.code) {
           this.logMeta = 'logTail 不可用';
           this.logLines = ['native 返回 ' + r.code + '（.so 版本过旧？）'];
-        } else {
+          return;
+        }
+        const noise = /amixer|ECHILD|A2DP sink|avskewMs|sigchld|SIGCHLD/;
+        const key = /OPEN|rect:|video:|pad-added|plane|gate|bus error|set_state|first frame|KMS|Esmart|dst/i;
+        const noisy = lines.filter((l) => noise.test(l));
+        const rest = lines.filter((l) => !noise.test(l));
+        const keys = rest.filter((l) => key.test(l));
+        const others = rest.filter((l) => !key.test(l));
+        let kmsLines = [];
+        try {
+          const k = await player.kmsProbe();
+          if (k && k.ok && typeof k.summary === 'string' && k.summary.length) {
+            kmsLines = k.summary.split('\n')
+              .filter((l) => /Video Port|win\d|ACTIVE|dst|format|buf\[0\]|Connector/.test(l))
+              .slice(0, 14)
+              .map((l) => '[KMS] ' + l.trim());
+          }
+        } catch (e2) { /* KMS 读不到不影响日志主体 */ }
+        /* 顺序：KMS 平面几何 → 关键行（最新在上）→ 噪音样本 → 其余（最新在上） */
+        this.logLines = kmsLines
+          .concat(keys.slice(-40).reverse())
+          .concat(noisy.slice(-3).reverse())
+          .concat(others.slice(-100).reverse());
+        if (!this.logLines.length) {
           this.logMeta = '日志为空';
           this.logLines = ['/tmp/pb2.log 无内容：模块未加载，或本进程还没写过日志'];
+          return;
         }
+        this.logMeta = 'pb2.log ' + (r && r.bytes ? r.bytes : 0) + 'B · 显示' +
+          this.logLines.length + ' 行(KMS' + kmsLines.length + '/关键' +
+          Math.min(keys.length, 40) + ') · on=' + (r && r.on ? 1 : 0);
       } catch (e) {
         this.logMeta = '读取失败';
         this.logLines = [String((e && e.message) || e)];
@@ -248,6 +365,8 @@ export default {
         ensureProfile: ensureProfile,
         hasNet: netAvailable,
         target: this.target,
+        /* 自检页挖的 16:9 洞：probe 用它算矩形，画面边界与洞严格重合 */
+        videoBox: this.videoBox,
         mediaUa: DEFAULT_UA,
         mediaReferer: REFERER,
         nowSec: () => Math.floor(Date.now() / 1000),
@@ -269,6 +388,9 @@ export default {
 
       if (myGen !== this.gen) return;
       this.running = false;
+      /* 每次自检跑完都刷新 native 生效值（rect / planeId / bufScale），
+       * 切档后的截图才不会停留在上一档的信息。 */
+      this.loadDeviceInfo();
 
       if (result && result.cancelled) {
         this.markAllSkip('已取消');

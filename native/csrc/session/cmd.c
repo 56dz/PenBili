@@ -726,6 +726,41 @@ int pb2_mixer_pre_mute(void) {
     return rc == 0 ? 0 : -1;
 }
 
+/*
+ * 【3.5.6 第五轮】一键开声。详见 cmd.h 的声明注释。
+ *
+ * 为什么必须「只在 Master=0 才设音量」：用户此前明确反馈过「开始播放时
+ * 音量特别大，不管系统设置里是多少」，所以播放器早已不再拥有音量主权。
+ * 这里是用户**主动点按钮**要声音，属于显式授权；但即便如此也只在系统
+ * 音量为 0（等于用户把设备调成静音）时才给 80%，非 0 一律不碰。
+ */
+int pb2_force_sound(void) {
+    int fd;
+    int pct;
+    int path_ok;
+    int master_ok = 1;
+
+    unlink(PB2_MUTE_FILE);
+    fd = open(PB2_SOUND_FILE, O_CREAT | O_WRONLY | O_CLOEXEC, 0644);
+    if (fd >= 0) close(fd);
+
+    /* 不论之前是 OFF 还是别的通路，强制选通扬声器 */
+    path_ok = mixer_one(0, "Playback Path", "SPK", "'SPK'");
+
+    pct = mixer_get_pct(1, "Master");
+    if (pct == 0) {
+        master_ok = mixer_one(1, "Master", "80%", "[80%]");
+    } else if (pct < 0) {
+        /* 读不到 Master：保守不动，只打开通路 */
+        pb2_logf("force sound: master read failed -> leave volume untouched");
+    }
+    pb2_logf("force sound: rm %s, touch %s, path=%d(expect 'SPK'), master=%d%%%s, muted_now=%d src=%s",
+             PB2_MUTE_FILE, PB2_SOUND_FILE, path_ok, pct,
+             pct == 0 ? (master_ok ? " -> 80% ok" : " -> 80% FAILED") : " (untouched)",
+             pb2_mute_enabled(), pb2_mute_reason());
+    return 0;
+}
+
 /* ========================= 蓝牙 A2DP 输出设备探测 =========================
  *
  * 见 cmd.h 里 pb2_bt_pcm_detect() 的注释。这里只说实现上的三个坑：

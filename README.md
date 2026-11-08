@@ -254,7 +254,7 @@ npm ci
 # 交叉编译 native（产出三个 .so 到 libs/）
 npm run native
 
-# 打 AMR 包（产出 8002026110200001.3_6_0.amr）
+# 打 AMR 包（产出 8002026110200001.3_5_6.amr）
 npm run build
 
 # 单测
@@ -285,8 +285,8 @@ NODE_BIN=$PWD/node_modules/node/bin/node.exe bash tools/build-wsl.sh
 ## 安装
 
 ```bash
-adb push 8002026110200001.3_5_5.amr /tmp/
-adb shell "miniapp_cli install /tmp/8002026110200001.3_5_5.amr"   # 必须返回 "ret":0
+adb push 8002026110200001.3_5_6.amr /tmp/
+adb shell "miniapp_cli install /tmp/8002026110200001.3_5_6.amr"   # 必须返回 "ret":0
 
 # 冷启动：先切桌面再起目标页，保证重建页面实例
 adb shell "miniapp_cli start 8080222437664451"

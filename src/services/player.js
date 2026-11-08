@@ -285,9 +285,10 @@ export function buildOpenArgs(opts) {
   ];
 }
 
-// 【X7 Pro 适配】open 的第 17/18 个位置参数：面板列偏移 / kmssink plane-id。
-// 只在真正调 native 时追加，buildOpenArgs 的 16 参契约保持不变（单测逐项断言）。
-// 缺省 -1 / 0 = 让 native 回落 X6 Pro 的 107 / 76，老设备行为不变。
+// 【X7 Pro 适配】open 的第 17~20 个位置参数：面板列偏移 / kmssink plane-id /
+// 软件缩放开关 / videoscale 输出倍率。只在真正调 native 时追加，
+// buildOpenArgs 的 16 参契约保持不变（单测逐项断言）。
+// 缺省 -1 / 0 / 0 / 100 = 让 native 回落 X6 Pro 的 107 / 76，且不放大 buffer。
 function intOr(v, dflt) {
   if (v === undefined || v === null || v === '') return dflt;
   const n = Math.round(Number(v));
@@ -297,19 +298,25 @@ function intOr(v, dflt) {
 function deviceArgs(opts) {
   const o = opts || {};
   /*
-   * 第 19 位 = swScale（0/1）：解码后是否插 videoscale 把 buffer 缩到窗口大小。
-   * X7 Pro 上 plane-id 76 不可用、自选平面又可能没有缩放器，所以由 profile
-   * 下发 swScale=1 —— sink 拿到的画面与 render-rectangle 等大，谁都不需要缩放。
-   * 3.5.6：1 = 按 rotate 互换目标宽高（修「横帧被拉成竖条」的比例 bug），
-   *        2 = 不互换，给「解码器真的旋转了 buffer」的固件留的免打包回退。
-   * 缺省 0 让 X6 Pro 继续走硬件缩放（行为与 3.5.5 逐字节一致）。
+   * 第 19 位 = swScale（0/1/2）：解码后是否插 videoscale，以及目标宽高是否
+   * 按 rotate 互换。X7 Pro 上 plane-id 76 不可用，自选平面可能没有缩放器，
+   * 所以由 profile 下发 1 或 2，让 sink 拿到尺寸可控的 buffer。
+   * 第 20 位 = bufScale（百分比，100 = 与矩形等大）：3.5.6 第四轮新增。
+   * X7 的 1:1 平面不理会 render-rectangle 的大小，只按 buffer 像素贴屏，
+   * 所以「画面占不满」必须靠放大 buffer 解决，光改矩形无效。
    */
   const sw = intOr(o.swScale, 0);
-  return [intOr(o.panelOffset, -1), intOr(o.planeId, 0), sw === 1 || sw === 2 ? sw : 0];
+  const buf = intOr(o.bufScale, 100);
+  return [
+    intOr(o.panelOffset, -1),
+    intOr(o.planeId, 0),
+    sw === 1 || sw === 2 ? sw : 0,
+    buf < 50 ? 50 : buf > 400 ? 400 : buf
+  ];
 }
 
 // opts: { input, input2, startMs, durationMs, fps, audio, transpose, rect, audioDevice,
-//         userAgent, referer, fpsCap, isLive, panelOffset, planeId, swScale }
+//         userAgent, referer, fpsCap, isLive, panelOffset, planeId, swScale, bufScale }
 export async function openSession(opts) {
   const m = await getPlayerModule();
   if (!m) return fail('PLAYER_NATIVE_MISSING', '播放器模块不可用（未随包安装 libjsapi_player2.so / libjsapi_player.so）');
@@ -414,6 +421,17 @@ export async function info() {
 export async function kmsProbe() {
   await getPlayerModule();
   return callOptional('kmsProbe', []);
+}
+
+/* 【3.5.6 第五轮】一键开声：解除全局静音开关、选通输出通路。
+ * 真机「画面正常但没声音」多半是 /tmp/pb2_mute 或 PB2_MUTE=1 把
+ * Playback Path 设成 OFF；开发机无 adb，只能由页面按钮下发。
+ * 只在系统音量为 0 时才给默认音量，用户音量非 0 一律不碰。
+ * 老 native 没有此接口 → PLAYER_UNSUPPORTED，页面照常降级。
+ * 点一次是进程级/文件级生效，之后首页播放也有声，不必反复点。 */
+export async function setSound(on) {
+  await getPlayerModule();
+  return callOptional('setSound', [on === false ? 0 : 1]);
 }
 
 export function warnUnsupportedOnce(what) {

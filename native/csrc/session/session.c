@@ -408,6 +408,8 @@ typedef struct {
     int plane_fallback_done;
     /* 1 = 解码后插 videoscale，把 buffer 缩到窗口大小（平面无需缩放能力） */
     int sw_scale;
+    /* videoscale 输出相对 rect 的百分比（100 = 等大）；见 session.h */
+    int buf_scale;
     /*
      * 音频设备被占（alsasink 打不开）时的降级状态：
      *   audio_off        = 本会话**主动**关了音频（不是片源本身没音轨）
@@ -736,6 +738,31 @@ static const char *pad_caps_name(GstPad *pad, char *buf, size_t cap, int *mpegve
     return name;
 }
 
+/*
+ * 【3.5.6 排障】读 demuxer pad 上的**编码尺寸**（SPS 解析后的 width/height）。
+ * 只读，不参与任何判断 —— 目的是让日志页能直接看到「源帧到底是横还是竖」，
+ * 不用再靠用户描述画面有没有被压扁。
+ */
+static void pad_caps_size(GstPad *pad, int *w_out, int *h_out) {
+    GstCaps *caps = gst_pad_get_current_caps(pad);
+    GstStructure *st;
+    int w = 0, h = 0;
+    if (w_out) *w_out = 0;
+    if (h_out) *h_out = 0;
+    if (!caps) caps = gst_pad_query_caps(pad, NULL);
+    if (!caps) return;
+    if (gst_caps_get_size(caps) >= 1) {
+        st = gst_caps_get_structure(caps, 0);
+        if (st) {
+            if (!gst_structure_get_int(st, "width", &w)) w = 0;
+            if (!gst_structure_get_int(st, "height", &h)) h = 0;
+        }
+    }
+    gst_caps_unref(caps);
+    if (w_out) *w_out = w;
+    if (h_out) *h_out = h;
+}
+
 static GstElement *parse_bin(const char *desc) {
     GError *err = NULL;
     GstElement *b = gst_parse_bin_from_description(desc, 1, &err);
@@ -1036,9 +1063,16 @@ static void normalize_video_rect(const char *tag) {
  *       不用重新打包）
  */
 static void video_post_rate_desc(char *out, size_t cap) {
-    int x = 0, y = 0, w = 0, h = 0, tw, th;
-    if (!g_w.sw_scale ||
-        sscanf(g_w.rect, "<%d,%d,%d,%d>", &x, &y, &w, &h) != 4 ||
+    int x = 0, y = 0, w = 0, h = 0, tw, th, bs;
+    if (!g_w.sw_scale) {
+        /* 与 3.5.5（X6 Pro）完全同构，旋转与缩放全交给 kmssink。
+         * 日志里明确写出这一行，真机截图才能确认档位真的生效了。 */
+        pb2_logf("video: hw scale, NO videoscale (rect=%s rotate=%d)",
+                 g_w.rect, g_w.rotate);
+        snprintf(out, cap, "video/x-raw,framerate=%s ! ", PB2_PANEL_RATE);
+        return;
+    }
+    if (sscanf(g_w.rect, "<%d,%d,%d,%d>", &x, &y, &w, &h) != 4 ||
         w < 2 || h < 2) {
         snprintf(out, cap, "video/x-raw,framerate=%s ! ", PB2_PANEL_RATE);
         return;
@@ -1050,12 +1084,31 @@ static void video_post_rate_desc(char *out, size_t cap) {
         tw = th;
         th = t;
     }
+    /*
+     * 【3.5.6 第四轮：真正能改变画面大小的旋钮】
+     * 真机四档截图里 out=253x450 完全没变、画面始终只占挖洞区一小块 ——
+     * X7 Pro 自选的 overlay 平面疑似只做 1:1 贴 buffer：改 render-rectangle
+     * 对它的显示尺寸毫无作用。只有把送进 sink 的 buffer 等比放大，画面才会
+     * 跟着变大。矩形本身保持与挖洞区等大、不越出面板，kmssink 不会拒绝。
+     *
+     * 等比放大（宽高同乘）不会引入比例变形；偶数化是 NV12 的硬性要求。
+     * 100 = 与矩形等大，等同旧行为（X6 Pro 永远走这条）。
+     */
+    bs = (g_w.buf_scale >= 50 && g_w.buf_scale <= 400) ? g_w.buf_scale : 100;
+    if (bs != 100) {
+        tw = (tw * bs + 50) / 100;
+        th = (th * bs + 50) / 100;
+        tw &= ~1;
+        th &= ~1;
+        if (tw > 4096) tw = 4096;
+        if (th > 4096) th = 4096;
+    }
     if (tw < 2 || th < 2) {
         snprintf(out, cap, "video/x-raw,framerate=%s ! ", PB2_PANEL_RATE);
         return;
     }
-    pb2_logf("video: videoscale -> %dx%d (panel rect %dx%d, rotate=%d, mode=%d)",
-             tw, th, w, h, g_w.rotate, g_w.sw_scale);
+    pb2_logf("video: videoscale -> %dx%d (panel rect %dx%d, rotate=%d, mode=%d, buf=%d%%)",
+             tw, th, w, h, g_w.rotate, g_w.sw_scale, bs);
     snprintf(out, cap,
              "videoscale ! video/x-raw,width=%d,height=%d,framerate=%s ! ",
              tw, th, PB2_PANEL_RATE);
@@ -1098,6 +1151,11 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
     }
 
     if (strncmp(cn, "video/", 6) == 0) {
+        int src_w = 0, src_h = 0;
+        pad_caps_size(pad, &src_w, &src_h);
+        pb2_logf("pad-added: source=%dx%d (encoded) rotate=%d rect=%s swScale=%d buf=%d%%",
+                 src_w, src_h, g_w.rotate, g_w.rect, g_w.sw_scale,
+                 (g_w.buf_scale >= 50 && g_w.buf_scale <= 400) ? g_w.buf_scale : 100);
         /*
          * 【P1-3】队列上限按源类型选：
          *   点播 -> 8s/6MB（为了装下 seek 时 demuxer 把落后一路推进到对齐点
@@ -2850,6 +2908,7 @@ static void do_open(pb2_open_req_t *req) {
     g_w.panel_x_offset = (req->panelOffset >= 0) ? req->panelOffset : PB2_PANEL_X_OFFSET;
     g_w.kms_plane_id = (req->planeId == 0) ? PB2_KMS_PLANE_ID : req->planeId;
     g_w.sw_scale = (req->swScale == 1 || req->swScale == 2) ? req->swScale : 0;
+    g_w.buf_scale = (req->bufScale >= 50 && req->bufScale <= 400) ? req->bufScale : 100;
     /*
      * 【平面兜底重试】上一次 OPEN 已经判定「显式平面不可用」。这次不再用它，
      * 直接切「自动挑平面 + 软件缩放」。注意必须写在上面两行之后 ——
@@ -2861,8 +2920,9 @@ static void do_open(pb2_open_req_t *req) {
         g_w.sw_scale = 1;
         pb2_logf("OPEN retry: force planeId=auto + videoscale");
     }
-    pb2_logf("OPEN device profile: panelXOffset=%d planeId=%s swScale=%d",
-             g_w.panel_x_offset, g_w.kms_plane_id < 0 ? "auto" : "fixed", g_w.sw_scale);
+    pb2_logf("OPEN device profile: panelXOffset=%d planeId=%s swScale=%d bufScale=%d%%",
+             g_w.panel_x_offset, g_w.kms_plane_id < 0 ? "auto" : "fixed", g_w.sw_scale,
+             g_w.buf_scale);
     snprintf(g_w.rect, sizeof(g_w.rect), "<%d,%d,%d,%d>",
              g_w.panel_x_offset + req->x, req->y, req->w, req->h);
     /* videoscale 的输出 caps 必须是偶数宽高（NV12），且与 render-rectangle
@@ -4682,6 +4742,19 @@ static void process_cmd(pb2_cmd_t *c) {
                 pb2_logf("RESUME took %lldms", pb2_now_ms() - t0);
             }
             break;
+        case PB2_CMD_SET_SOUND:
+            /*
+             * 【3.5.6 第五轮】一键开声。真机「画面正常但没有声音」时，
+             * 多半是全局静音开关把 Playback Path 设成了 OFF（音频数据
+             * 仍在走，自检页 `音=xxxxx/有` 也照常增长）。
+             * 文件操作与 amixer 全在 worker 线程，JSAPI 零阻塞。
+             */
+            pb2_logf("SET_SOUND: before muted=%d src=%s",
+                     pb2_mute_enabled(), pb2_mute_reason());
+            if (c->i64 != 0) pb2_force_sound();
+            pb2_logf("SET_SOUND: after muted=%d src=%s",
+                     pb2_mute_enabled(), pb2_mute_reason());
+            break;
         case PB2_CMD_RECOVER:
             /*
              * 【P0-1】真正的自愈入口。
@@ -5268,6 +5341,9 @@ int pb2_session_panel_offset(void) {
 
 int pb2_session_plane_id(void) { return g_w.kms_plane_id; }
 int pb2_session_sw_scale(void) { return g_w.sw_scale; }
+int pb2_session_buf_scale(void) {
+    return (g_w.buf_scale >= 50 && g_w.buf_scale <= 400) ? g_w.buf_scale : 100;
+}
 /* 1 = 本会话因音频设备被占而主动降级为无声（片源本身有音轨） */
 int pb2_session_audio_off(void) { return g_w.audio_off; }
 

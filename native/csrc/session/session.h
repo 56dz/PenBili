@@ -101,6 +101,21 @@ typedef struct {
      * 语义：0/缺省 = 硬件缩放（保持 X6 Pro 现状）；1 = 软件缩放。
      */
     int swScale;
+
+    /*
+     * 【3.5.6 第四轮】videoscale 输出相对 render-rectangle 的尺寸百分比。
+     *
+     * 真机四档截图里 `out=253x450` 一模一样，画面始终只占挖洞区的一小块：
+     * X7 Pro 自选的 overlay 平面很可能只做 **1:1 贴 buffer**，既不按
+     * render-rectangle 缩放，也不理会矩形变大。这种情况下唯一能改变画面
+     * 实际尺寸的旋钮是「解码后送进 sink 的 buffer 有多少像素」。
+     *
+     * 100 = 与矩形等大（原行为，X6 Pro 必须保持）；190 = 宽高等比放大到
+     * 1.9 倍。只放大 buffer，不动 render-rectangle，所以矩形永远不会越出
+     * 面板、kmssink 不会因为矩形非法而拒绝上屏。放大是等比的，不引入变形。
+     * 缺省 100，范围由 native 钳到 50..400。
+     */
+    int bufScale;
 } pb2_open_req_t;
 
 void pb2_open_req_free(pb2_open_req_t *req);
@@ -139,8 +154,10 @@ int pb2_session_gst_ready(void);
 /* 【X7 Pro 适配】当前会话生效的面板列偏移 / kmssink plane-id（-1 = 自动） */
 int pb2_session_panel_offset(void);
 int pb2_session_plane_id(void);
-/* 本次会话是否在用软件缩放（1 = 解码后 videoscale 到窗口大小） */
+/* 本次会话是否在用软件缩放（1/2 = 解码后 videoscale 到窗口大小） */
 int pb2_session_sw_scale(void);
+/* 本次会话 videoscale 输出倍率（100 = 与矩形等大） */
+int pb2_session_buf_scale(void);
 /* 1 = 本次会话因音频设备被占而主动降级为无声（画面正常） */
 int pb2_session_audio_off(void);
 
