@@ -409,6 +409,69 @@ async function main() {
     assert.strictEqual(upd.downloadUrl(null, false), '');
   });
 
+  test('updater: 镜像只对 GitHub 资产生效（GitCode 直连本来就通，套代理只是多一跳）', () => {
+    const gh = 'https://github.com/o/r/releases/download/v3.6.0/PenBili.amr';
+    const ghc = 'https://objects.githubusercontent.com/github-production-release-asset/x/y';
+    const gc = 'https://gitcode.com/dz56dz/PenBili/releases/download/v3.6.0/PenBili.amr';
+    const gapi = 'https://api.gitcode.com/api/v5/repos/dz56dz/PenBili/releases/latest';
+    assert.strictEqual(upd.isMirrorable(gh), true);
+    assert.strictEqual(upd.isMirrorable(ghc), true);
+    assert.strictEqual(upd.isMirrorable(gc), false, 'GitCode 资产不能走 gh-proxy');
+    assert.strictEqual(upd.isMirrorable(gapi), false);
+    assert.strictEqual(upd.isMirrorable(''), false);
+    assert.strictEqual(upd.isMirrorable(null), false);
+    assert.strictEqual(upd.isMirrorable('ftp://github.com/x'), false, '只认 http(s)');
+    // 「假的 github.com」不能被当成 GitHub 主机（后缀判断要带点）
+    assert.strictEqual(upd.isMirrorable('https://evilgithub.com/x'), false);
+    assert.strictEqual(upd.isMirrorable('https://github.com.evil.io/x'), false);
+    // downloadUrl 的对外行为：GitCode 资产即使在镜像模式也原样返回
+    assert.strictEqual(upd.downloadUrl(gc, true), gc);
+    assert.strictEqual(upd.downloadUrl(gc, false), gc);
+  });
+
+  test('updater: 检测源顺序必须是 GitCode 主、GitHub 备', () => {
+    assert.strictEqual(upd.SOURCES.length, 2);
+    assert.strictEqual(upd.SOURCES[0].id, 'gitcode', '主源必须是 GitCode（国内可直连）');
+    assert.strictEqual(upd.SOURCES[1].id, 'github', 'GitHub 只能是兜底');
+    assert.ok(/^https:\/\/api\.gitcode\.com\/api\/v5\/repos\//.test(upd.SOURCES[0].api),
+      'GitCode 检测地址必须是 api.gitcode.com/api/v5');
+    assert.ok(/^https:\/\/api\.github\.com\/repos\//.test(upd.SOURCES[1].api),
+      'GitHub 检测地址必须是直连 api.github.com');
+    assert.ok(/^https:\/\/gitcode\.com\//.test(upd.SOURCES[0].repoUrl));
+    assert.ok(/^https:\/\/github\.com\//.test(upd.SOURCES[1].repoUrl));
+    // GitHub API 强制要 User-Agent，两个源都得带
+    assert.ok(upd.SOURCES[0].headers['User-Agent'], 'GitCode 源也要带 User-Agent');
+    assert.ok(upd.SOURCES[1].headers['User-Agent'], 'GitHub 源必须带 User-Agent');
+    // sourceById 永不返回 null；label 可直接用于按钮文案
+    assert.strictEqual(upd.sourceById('gitcode').id, 'gitcode');
+    assert.strictEqual(upd.sourceById('github').id, 'github');
+    assert.strictEqual(upd.sourceById('nope').id, 'gitcode', '未知 id 回退主源');
+    assert.strictEqual(upd.sourceById(undefined).id, 'gitcode');
+    assert.strictEqual(upd.sourceLabel('github'), 'GitHub');
+    assert.strictEqual(upd.sourceLabel('gitcode'), 'GitCode');
+    assert.strictEqual(upd.sourceLabel(null), 'GitCode');
+  });
+
+  test('updater: normalizeRelease 认出 GitCode 的 release_status=pre（预览版不许检测）', () => {
+    const base = {
+      tag_name: 'v3.6.0', name: 'v3.6.0', body: 'x',
+      html_url: 'https://gitcode.com/dz56dz/PenBili/releases/tag/v3.6.0',
+      assets: [{ name: 'PenBili.amr', size: 100, browser_download_url: 'https://gitcode.com/a' }]
+    };
+    assert.ok(upd.normalizeRelease(base), '正常 release 必须通过');
+    assert.strictEqual(upd.normalizeRelease(Object.assign({}, base, { release_status: 'pre' })), null);
+    assert.strictEqual(upd.normalizeRelease(Object.assign({}, base, { release_status: 'PRE' })), null);
+    assert.ok(upd.normalizeRelease(Object.assign({}, base, { release_status: 'latest' })));
+    // 字符串形态的 prerelease（不同序列化风格）
+    assert.strictEqual(upd.normalizeRelease(Object.assign({}, base, { prerelease: 'true' })), null);
+    // html_url 缺失时用第二个参数兜底（GitCode 与 GitHub 各给各的主页）
+    const noUrl = Object.assign({}, base);
+    delete noUrl.html_url;
+    assert.strictEqual(upd.normalizeRelease(noUrl, 'https://gitcode.com/x/y').htmlUrl,
+      'https://gitcode.com/x/y');
+    assert.strictEqual(upd.normalizeRelease(noUrl).htmlUrl, upd.REPO_URL, '没有第二参时回退 GitHub 主页');
+  });
+
   test('updater: bodyLines 去 Markdown 且切成单行（<text> 里不能有换行）', () => {
     const md = [
       '# v3.6.0',
@@ -557,9 +620,13 @@ async function main() {
     const v = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'pages', 'index', 'index.vue'), 'utf8');
     const src = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'services', 'updater.js'), 'utf8');
     // 自动：4 个按钮（直连 / 镜像 / 跳过此版本 / 今天内不提示）
-    ['立即更新（直连 GitHub）', '立即更新（使用镜像）', '跳过此版本', '今天内不提示'].forEach((t) => {
+    // 「直连」后面的源名必须是动态的 —— 写死 GitHub 在 GitCode 主通道下就是错文案
+    ['立即更新（直连 {{ updSourceLabel }}）', '跳过此版本', '今天内不提示'].forEach((t) => {
       assert.ok(v.indexOf(t) > 0, '自动弹窗缺按钮文案：' + t);
     });
+    assert.ok(v.indexOf('立即更新（直连 GitHub）') < 0, '不能再写死「直连 GitHub」');
+    assert.ok(v.indexOf("updMirrorLabel") > 0, '第二个按钮的文案必须由源推导');
+    assert.ok(/updMirrorLabel\(\)\s*\{/.test(v), '必须有 updMirrorLabel computed');
     // 手动：2 个按钮，且不得混入自动态语义
     const mi = v.indexOf("upd.mode === 'manual'");
     assert.ok(mi > 0, '必须有手动检测分支');
@@ -568,9 +635,29 @@ async function main() {
     assert.ok(seg.indexOf('暂不更新') > 0, '手动弹窗缺「暂不更新」');
     assert.ok(seg.indexOf('跳过此版本') < 0, '手动弹窗不该有「跳过此版本」');
     assert.ok(seg.indexOf('今天内不提示') < 0, '手动弹窗不该有「今天内不提示」');
-    // 检测走直连 api.github.com，镜像前缀只能用于下载
-    assert.ok(/API_LATEST = 'https:\/\/api\.github\.com\//.test(src), '检测接口必须是直连 api.github.com');
+    // 检测双源都必须是直连（不经过镜像），镜像前缀只能用于下载
+    assert.ok(/API_GITCODE = 'https:\/\/api\.gitcode\.com\/api\/v5\/repos\//.test(src),
+      'GitCode 检测接口必须是直连 api.gitcode.com/api/v5');
+    assert.ok(/API_LATEST = 'https:\/\/api\.github\.com\//.test(src), 'GitHub 检测接口必须是直连 api.github.com');
     assert.ok(/MIRROR_PREFIX = 'https:\/\/v4\.gh-proxy\.org\/'/.test(src), '镜像前缀必须是 v4.gh-proxy.org');
+    // 检测顺序：GitCode 必须排在 GitHub 前面（用户要求以 GitCode 为主通道）
+    const gi = src.indexOf("id: 'gitcode'");
+    const hi = src.indexOf("id: 'github'");
+    assert.ok(gi > 0 && hi > gi, 'SOURCES 里 GitCode 必须排在 GitHub 之前');
+    // 依次重试而不是并发（两个平台限流都很紧，并发只会更快撞限流）
+    assert.ok(/for \(let i = 0; i < list\.length; i\+\+\)/.test(src), 'fetchLatestRelease 必须按源顺序逐个试');
+    assert.ok(src.indexOf('Promise.all') < 0, '检测源不能并发（会被限流）');
+  });
+
+  test('updater: fetchLatestRelease 是 async 且失败不 reject（检查更新不能打断观看）', () => {
+    const src = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'services', 'updater.js'), 'utf8');
+    const at = src.indexOf('export async function fetchLatestRelease');
+    assert.ok(at > 0, 'fetchLatestRelease 必须是 async');
+    const seg = src.slice(at, at + 2600);
+    assert.ok(seg.indexOf('try {') > 0, '每个源都必须被 try 包住');
+    assert.ok(seg.indexOf('tried.push(src.id)') > 0, '必须记录试过哪些源（日志/诊断要用）');
+    assert.ok(/return \{ ok: false, stage: last\.stage/.test(seg), '全部失败也必须 resolve 成 ok:false');
+    assert.ok(seg.indexOf('source: src.id') > 0, '成功时必须回传 source，界面据此换按钮文案');
   });
 
   test('首页：检查更新弹窗是整页替换（不得依赖 position:absolute / z-index）', () => {

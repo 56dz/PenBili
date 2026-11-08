@@ -2,7 +2,7 @@
   <!-- page-live 只在「视频像素真的在 fb 上」时启用透明背景（见 base.less 注释）；
        未起播/起播失败/已播完时必须用不透明底色，否则会把上一屏的 fb 残留像素透出来。 -->
   <div :class="holeVisible && !upd.visible ? 'page page-live' : 'page'">
-    <!-- 检查更新（v3.5.5）：弹窗不是浮层而是**整页替换**。
+    <!-- 检查更新（v3.5.6 起双源）：弹窗不是浮层而是**整页替换**。
          falcon 运行时 position:absolute 不可靠、全仓没有一个 z-index 能用（base.less
          文件头铁律），所以靠 upd.visible 把正常视图整体不渲染 —— 零定位依赖，
          也就不会出现「弹窗和列表叠在一起」。 -->
@@ -30,13 +30,15 @@
         </scroller>
       </div>
       <div class="upd-right">
-        <!-- 进入软件时自动检测：4 个按钮 -->
+        <!-- 进入软件时自动检测：4 个按钮
+             第一个按钮的括号里必须是**当前命中的源名**（GitCode / GitHub）——
+             写死「直连 GitHub」在 GitCode 主通道下就是错的，用户会以为点了也白点。 -->
         <template v-if="upd.mode === 'auto' && upd.stage === 'ready'">
           <div class="upd-btn upd-btn-main" @click="onUpdInstall(false)">
-            <text class="upd-btn-t-main">立即更新（直连 GitHub）</text>
+            <text class="upd-btn-t-main">立即更新（直连 {{ updSourceLabel }}）</text>
           </div>
-          <div class="upd-btn upd-btn-main" @click="onUpdInstall(true)">
-            <text class="upd-btn-t-main">立即更新（使用镜像）</text>
+          <div class="upd-btn upd-btn-main" @click="onUpdInstallMirror">
+            <text class="upd-btn-t-main">{{ updMirrorLabel }}</text>
           </div>
           <div class="upd-btn" @click="onUpdSkip">
             <text class="upd-btn-t">跳过此版本</text>
@@ -568,15 +570,21 @@ import { isAutotestSeedEnabled, readAutotestSeed } from '../../services/autotest
 /* 直播「下播」判据的引擎级自证（probeLiveEnd）：纯计算，不取流不播放不亮屏。
  * 单独成模块是为了让「假 status → 判据结论」这张用例表能被 Node 单测直接跑。 */
 import { runLiveEndCases } from '../../services/live_end_probe.js';
-/* 检查更新（GitHub Release）：版本比较 / 资产挑选 / 镜像 URL / 提示决策 / 正文切行
- * 全部是纯函数（可 Node 单测），运行时只有 fetch/download/install 三个薄封装。
+/* 检查更新（双源 Release：GitCode 主 / GitHub 备）：版本比较 / 资产挑选 / 镜像 URL /
+ * 提示决策 / 正文切行全部是纯函数（可 Node 单测），运行时只有 fetch/download/install
+ * 三个薄封装。
+ * 为什么是双源：部分国内网络完全打不开 github.com（用户明确要求改用 GitCode）；
+ * GitHub 留着当兜底，也是原始发布地。
  * 为什么不用 $falcon.jsapi.updater：它是有道自家服务端升级通道（service_upgrade_push），
- * 需要自家服务器下发 payload，与 GitHub Release 无关 —— strings libfalcon.so 已确认。 */
+ * 需要自家服务器下发 payload，与公开 Release 无关 —— strings libfalcon.so 已确认。 */
 import {
   APP_VERSION,
   REPO_URL,
   MIRROR_PREFIX,
   SAVE_DIR,
+  SOURCES,
+  sourceLabel,
+  isMirrorable,
   downloadUrl,
   fetchLatestRelease,
   downloadFileToDisk,
@@ -876,6 +884,8 @@ export default {
       upd: {
         visible: false,
         mode: 'auto',
+        // 命中的检测源 id（'gitcode' / 'github'），决定按钮文案与镜像是否有意义
+        source: 'gitcode',
         stage: 'idle',
         message: '',
         release: null,
@@ -918,12 +928,24 @@ export default {
       return this.upd.stage === 'checking' || this.upd.stage === 'downloading' ||
              this.upd.stage === 'installing';
     },
+    // 命中的检测源名（没命中时显示主源，避免出现空的「直连 」）
+    updSourceLabel() {
+      return sourceLabel(this.upd.source);
+    },
+    // 第二个按钮的文案：命中 GitCode 时它是「换 GitHub 走镜像」（真正的备用通道）；
+    // 命中 GitHub 时它就是普通镜像加速。镜像只对 GitHub 资产有意义，见 isMirrorable。
+    updMirrorLabel() {
+      return this.upd.source === 'github' ? '立即更新（使用镜像）' : '立即更新（GitHub 镜像）';
+    },
     // 右下角小字：把「为什么不能点」讲清楚（镜像 403、资产缺失、来源是直连还是镜像）
     updTip() {
       if (this.upd.tip) return this.upd.tip;
       const r = this.upd.release;
       if (this.upd.stage === 'ready' && r && !r.assetUrl) return '该版本没有可用安装包';
-      if (this.upd.stage === 'ready') return '当前 v' + APP_VERSION + ' · 检测走直连，镜像仅用于下载加速';
+      if (this.upd.stage === 'ready') {
+        return '当前 v' + APP_VERSION + ' · 检测 ' + this.updSourceLabel +
+               ' 直连，镜像仅用于 GitHub 加速';
+      }
       if (this.upd.stage === 'done') return '重新打开软件即可使用新版本';
       return '';
     },
@@ -2983,7 +3005,7 @@ export default {
       return liveQualityLabel(this.videoSettings);
     },
 
-    /* ---------- 检查更新（GitHub Release，v3.5.5）----------
+    /* ---------- 检查更新（双源 Release：GitCode 主 / GitHub 备）----------
      *
      * 三条硬约束（都是真机实测，别按常识改）：
      *   1) 检测走**直连** api.github.com。镜像 v4.gh-proxy.org 访问 api.github.com
@@ -3000,8 +3022,9 @@ export default {
       this.upd = {
         visible: true,
         mode: m,
+        source: SOURCES[0].id,
         stage: 'checking',
-        message: '正在连接 GitHub 检查最新正式版本…',
+        message: '正在检查最新正式版本…',
         release: null,
         lines: [],
         tip: ''
@@ -3018,6 +3041,7 @@ export default {
       }
       if (!isNewer(r.release.tag, APP_VERSION)) {
         this.upd = Object.assign({}, this.upd, {
+          source: r.source || this.upd.source,
           stage: 'latest',
           message: '当前 v' + APP_VERSION + ' 已是线上最新的正式版本（' + r.release.tag + '）',
           release: r.release,
@@ -3027,22 +3051,23 @@ export default {
         });
         return;
       }
-      this.updShowReady(m, r.release);
+      this.updShowReady(m, r.release, r.source);
     },
 
     // 「发现新版本」：把发布说明切成行（<text> 里不能有换行，见 base.less 铁律）
-    updShowReady(mode, release) {
+    updShowReady(mode, release, source) {
       this.upd = {
         visible: true,
         mode: mode,
+        source: source || this.upd.source || SOURCES[0].id,
         stage: 'ready',
         message: '新版本 ' + release.tag + ' · 当前 v' + APP_VERSION,
         release: release,
         lines: bodyLines(release.body),
         tip: ''
       };
-      logWarn('[bili] upd ready ' + release.tag + ' asset=' + (release.assetName || '-') +
-              ' size=' + (release.assetSize || 0));
+      logWarn('[bili] upd ready ' + release.tag + ' src=' + this.upd.source +
+              ' asset=' + (release.assetName || '-') + ' size=' + (release.assetSize || 0));
     },
 
     // 进入软件时的自动检测（静默失败：检查更新绝不能打断正常观看）
@@ -3059,7 +3084,7 @@ export default {
                   ' quiet=' + (st.quietDay || '-') + ' remote=' + r.release.tag + ')');
           return;
         }
-        this.updShowReady('auto', r.release);
+        this.updShowReady('auto', r.release, r.source);
       } catch (e) {
         logWarn('[bili] upd auto check error: ' + ((e && e.message) || e));
       }
@@ -3105,6 +3130,44 @@ export default {
       logWarn('[bili] upd release page: ' + url);
     },
 
+    // 「立即更新（GitHub 镜像）」：命中 GitCode 时这是**换源**按钮 ——
+    // 重新从 GitHub 拿同一版本，再走 gh-proxy 镜像下载。为什么需要：
+    // GitCode 的资产偶尔会 404 或限流，此时镜像是从国内唯一还能下的路子；
+    // 而命中 GitHub 时它退化成普通的「镜像加速」，行为不变。
+    async onUpdInstallMirror() {
+      if (this.upd.source === 'github') {
+        await this.onUpdInstall(true);
+        return;
+      }
+      const tag = this.upd.release ? this.upd.release.tag : '-';
+      this.upd = Object.assign({}, this.upd, {
+        stage: 'checking',
+        message: '正在从 GitHub 获取 ' + tag + '…',
+        tip: ''
+      });
+      logWarn('[bili] upd mirror: re-fetch from github for ' + tag);
+      const r = await fetchLatestRelease('github');
+      if (!r.ok || !r.release) {
+        this.upd = Object.assign({}, this.upd, {
+          stage: 'ready',
+          message: '新版本 ' + tag + ' · 当前 v' + APP_VERSION,
+          tip: 'GitHub 也连不上，可用直连 ' + this.updSourceLabel + ' 重试'
+        });
+        logWarn('[bili] upd mirror: github fetch fail ' + (r.message || '-'));
+        return;
+      }
+      // GitHub 上的版本可能比 GitCode 落后（发布顺序），只认更新的那个，
+      // 否则会把用户降级回旧包 —— 那是比「下载失败」严重得多的事故。
+      const useRelease = isNewer(r.release.tag, this.upd.release.tag) ? r.release : this.upd.release;
+      this.upd = Object.assign({}, this.upd, {
+        source: 'github',
+        stage: 'ready',
+        release: useRelease,
+        message: '新版本 ' + useRelease.tag + ' · 当前 v' + APP_VERSION
+      });
+      await this.onUpdInstall(true);
+    },
+
     // 下载：先试用户选定的源；失败且没指定镜像时自动改用镜像再试一次。
     // 为什么自动回退：「我的」页手动检测只有 2 个按钮（用户在需求里明确不要选源），
     // 直连被墙时必须有兜底，否则「立即更新」在国内基本等于不可用。
@@ -3119,7 +3182,9 @@ export default {
         const mirror = order[i];
         const url = downloadUrl(r.assetUrl, mirror);
         if (!url) continue;
-        const label = mirror ? '镜像' : '直连';
+        // 只有 GitHub 资产能走镜像（isMirrorable）；GitCode 资产套镜像只是多一跳，
+        // 返回值与直连完全相同，此时的 label 必须诚实写成直连，否则日志会误导排查。
+        const label = mirror && isMirrorable(r.assetUrl) ? '镜像' : '直连';
         this.upd = Object.assign({}, this.upd, {
           stage: 'downloading',
           message: '正在下载 ' + (r.assetName || '安装包') + '（' + label + '加速）…',

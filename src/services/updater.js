@@ -1,10 +1,15 @@
-// 检查更新 / 下载安装（GitHub Release）
+// 检查更新 / 下载安装（双源：GitCode 主 / GitHub 备）
+//
+// 为什么是双源：GitHub 在部分国内网络下完全不可达（用户明确要求改成 GitCode 为主）。
+// 所以检测顺序是 **GitCode → GitHub**，谁先用谁的；下载镜像只对 GitHub 资产有意义
+// （GitCode 本身国内可直连，套一层代理反而多一跳）。
 //
 // 设计约束（都是真机实测结论，别按常识猜）：
-//   1) 检测走**直连** api.github.com。镜像 https://v4.gh-proxy.org/ 访问 api.github.com
+//   1) 检测走**直连**，且**不用镜像**。镜像 https://v4.gh-proxy.org/ 访问 api.github.com
 //      会被共享出口 IP 限流（实测 403 rate limit exceeded），所以镜像只用于**下载资产**。
-//   2) 只用 `/releases/latest`：它天然排除 prerelease 与 draft，不需要自己过滤
-//      （用户明确要求「不要检测预览版」）。
+//   2) 只用 `/releases/latest`（两个平台都有这个接口）：天然排除 prerelease 与 draft，
+//      不需要自己过滤（用户明确要求「不要检测预览版」）。GitCode 另外还有
+//      `release_status` 字段（'pre' / 'latest'），一并过滤。
 //   3) net.js 的 httpGet 拿不到响应头，非 2xx 时 body 也不可得，错误文本形如
 //      `curl ... resCode:403` —— 状态码只能从这里正则取，见 unwrapResponse。
 //   4) 本模块的**纯逻辑部分**（版本比较、资产挑选、镜像 URL、提示决策、正文切行）
@@ -18,14 +23,56 @@ import { httpGet } from './net.js';
 import { logWarn } from './storage.js';
 import { getPlayerModule } from './player.js';
 
-export const APP_VERSION = '3.5.5';
+export const APP_VERSION = '3.5.6';
 
-/** GitHub 仓库（检测/下载的唯一来源） */
+/** 主源：GitCode（国内可直连，GitHub 在部分网络下完全打不开） */
+export const GITCODE_REPO = 'dz56dz/PenBili';
+/** GitCode 最新正式版接口（同样天然排除 prerelease / draft） */
+export const API_GITCODE = 'https://api.gitcode.com/api/v5/repos/' + GITCODE_REPO + '/releases/latest';
+/** GitCode 仓库主页 */
+export const REPO_GITCODE_URL = 'https://gitcode.com/' + GITCODE_REPO;
+/** 备源：GitHub 仓库 */
 export const REPO = '56dz/PenBili';
-/** 直连检测接口（天然排除 prerelease / draft） */
+/** GitHub 最新正式版接口（天然排除 prerelease / draft） */
 export const API_LATEST = 'https://api.github.com/repos/' + REPO + '/releases/latest';
-/** 仓库主页（人工兜底：更新失败时告诉用户去哪儿手动下） */
+/** 同 API_LATEST，语义化别名（SOURCES 里用） */
+export const API_GITHUB = API_LATEST;
+/** GitHub 仓库主页（人工兜底：更新失败时告诉用户去哪儿手动下） */
 export const REPO_URL = 'https://github.com/' + REPO;
+
+/**
+ * 检测源列表，**顺序即优先级**：GitCode 在前。
+ * 为什么 GitCode 优先：用户明确「部分用户网络环境无法连接 github」，
+ * 主通道必须在国内可用；GitHub 留着给海外/能直连的网络，且它是原始发布地。
+ * headers 按平台分：GitHub API 强制要 User-Agent，GitCode 不介意多带。
+ */
+export const SOURCES = [
+  {
+    id: 'gitcode',
+    label: 'GitCode',
+    api: API_GITCODE,
+    repoUrl: REPO_GITCODE_URL,
+    headers: { 'User-Agent': 'PenBili-Updater', Accept: 'application/json' }
+  },
+  {
+    id: 'github',
+    label: 'GitHub',
+    api: API_LATEST,
+    repoUrl: REPO_URL,
+    headers: { 'User-Agent': 'PenBili-Updater', Accept: 'application/vnd.github+json' }
+  }
+];
+
+/** 按 id 取源（找不到给主源，永不返回 null） */
+export function sourceById(id) {
+  for (let i = 0; i < SOURCES.length; i++) if (SOURCES[i].id === id) return SOURCES[i];
+  return SOURCES[0];
+}
+
+/** 源的展示名（弹窗按钮/提示里用，未知源回退成主源名） */
+export function sourceLabel(id) {
+  return sourceById(id).label;
+}
 /**
  * 从 downloadFile 的回调/返回值里取落盘路径。
  *
@@ -121,11 +168,18 @@ export function isNewer(remoteTag, localVersion) {
 
 /**
  * 把 release JSON 归一化成页面要用的形状；不是合法 release（无 tag / draft / prerelease）返回 null。
- * @param {*} rel api.github.com/repos/:o/:r/releases/latest 的 body（对象或 JSON 字符串）
+ *
+ * GitHub 与 GitCode 的返回体高度相似（`tag_name` / `body` / `html_url` /
+ * `assets[].name|size|browser_download_url` 同名），所以一个归一化函数通吃。
+ * 唯一差别：GitCode 多一个 `release_status`（'pre' 预发布 / 'latest' 最新），
+ * 预发布必须按用户要求排除，所以两种标记都要判。
+ *
+ * @param {*} rel 最新 release 的 body（对象或 JSON 字符串）
+ * @param {string} [repoUrl] 归一化兜底用的仓库主页（缺 html_url 时用）
  * @returns {{tag:string, version:string, name:string, body:string, htmlUrl:string,
  *            assetName:string, assetSize:number, assetUrl:string}|null}
  */
-export function normalizeRelease(rel) {
+export function normalizeRelease(rel, repoUrl) {
   let d = rel;
   if (typeof d === 'string') {
     try {
@@ -136,7 +190,9 @@ export function normalizeRelease(rel) {
   }
   if (!d || typeof d !== 'object') return null;
   if (d.draft === true) return null;
-  if (d.prerelease === true) return null;
+  if (d.prerelease === true || d.prerelease === 'true') return null;
+  // GitCode 专有：release_status='pre' 表示预发布（用户要求不检测预览版）
+  if (typeof d.release_status === 'string' && d.release_status.toLowerCase() === 'pre') return null;
   const tag = typeof d.tag_name === 'string' ? d.tag_name.trim() : '';
   if (!tag) return null;
   const parsed = parseVersion(tag);
@@ -148,7 +204,7 @@ export function normalizeRelease(rel) {
     version: parsed.nums.join('.'),
     name: typeof d.name === 'string' ? d.name : tag,
     body: typeof d.body === 'string' ? d.body : '',
-    htmlUrl: typeof d.html_url === 'string' ? d.html_url : REPO_URL,
+    htmlUrl: typeof d.html_url === 'string' ? d.html_url : (repoUrl || REPO_URL),
     assetName: hit && typeof hit.name === 'string' ? hit.name : '',
     assetSize: hit ? Number(hit.size) || 0 : 0,
     assetUrl: hit && typeof hit.browser_download_url === 'string' ? hit.browser_download_url : ''
@@ -156,15 +212,36 @@ export function normalizeRelease(rel) {
 }
 
 /**
- * 生成下载 URL。useMirror 为真时加镜像前缀；没有原始资产 URL 时返回空串
- * （调用方据此禁用「立即更新」按钮，而不是拼一个必然 404 的地址）。
+ * 这个资产 URL 能不能走 GitHub 加速镜像。
+ * 只有 github.com / *.githubusercontent.com 的地址有意义 —— 镜像站是
+ * 「前缀 + 完整原始 URL」的通用反代，套在 GitCode 地址上只是多一跳，
+ * 而且 GitCode 在国内本来就直连可用，套了反而变慢/可能 404。
+ * @param {string} assetUrl
+ * @returns {boolean}
+ */
+export function isMirrorable(assetUrl) {
+  if (typeof assetUrl !== 'string' || !/^https?:\/\//i.test(assetUrl)) return false;
+  const m = assetUrl.match(/^https?:\/\/([^/?#]+)/i);
+  if (!m) return false;
+  const host = m[1].toLowerCase();
+  // 后缀判断必须带点，不能只 endswith('github.com')：
+  // 'evilgithub.com' / 'github.com.evil.io' 都不是 GitHub，却能骗过裸后缀。
+  return host === 'github.com' || host.slice(-11) === '.github.com' ||
+         host === 'githubusercontent.com' || host.slice(-22) === '.githubusercontent.com';
+}
+
+/**
+ * 生成下载 URL。useMirror 为真时**只**给 GitHub 资产加镜像前缀（见 isMirrorable）；
+ * 没有原始资产 URL 时返回空串（调用方据此禁用「立即更新」按钮，
+ * 而不是拼一个必然 404 的地址）。
  * @param {string} assetUrl
  * @param {boolean} useMirror
  * @returns {string}
  */
 export function downloadUrl(assetUrl, useMirror) {
   if (typeof assetUrl !== 'string' || !/^https?:\/\//i.test(assetUrl)) return '';
-  return useMirror ? MIRROR_PREFIX + assetUrl : assetUrl;
+  if (!useMirror) return assetUrl;
+  return isMirrorable(assetUrl) ? MIRROR_PREFIX + assetUrl : assetUrl;
 }
 
 /**
@@ -292,30 +369,55 @@ function httpJsapi() {
 }
 
 /**
- * 拉取最新正式 release。失败一律 resolve 成 {ok:false, stage, message}，
- * **绝不 reject** —— 检查更新失败不能打断用户的任何正常操作。
- * @returns {Promise<{ok:boolean, stage?:string, message?:string, release?:object}>}
+ * 逐个源试，返回第一个拿到的正式 release。
+ *
+ * 顺序即优先级（SOURCES 里 GitCode 在前）。为什么要依次而不是并发：
+ * 两个平台的限流都很紧（GitCode 429 / GitHub 403），并发只会更快撞限流；
+ * 而正常情况下第一个源 1~2 秒就返回了，兜底源大多数时候根本不会被访问。
+ *
+ * 失败一律 resolve 成 {ok:false, stage, message, tried}，**绝不 reject** ——
+ * 检查更新失败不能打断用户的任何正常操作。
+ *
+ * @param {string} [onlyId] 只试某个源（诊断用）
+ * @returns {Promise<{ok:boolean, stage?:string, message?:string, release?:object,
+ *                    source?:string, sourceLabel?:string, tried?:string[]}>}
  */
-export async function fetchLatestRelease() {
-  try {
-    const r = await httpGet(API_LATEST, {
-      timeout: 12000,
-      // GitHub API 强制要求 User-Agent；Accept 固定 json 版本，避免拿到 html
-      headers: {
-        'User-Agent': 'PenBili-Updater/' + APP_VERSION,
-        Accept: 'application/vnd.github+json'
+export async function fetchLatestRelease(onlyId) {
+  const list = onlyId ? [sourceById(onlyId)] : SOURCES;
+  const tried = [];
+  let last = { stage: 'transport', message: '没有可用的检测源' };
+  for (let i = 0; i < list.length; i++) {
+    const src = list[i];
+    tried.push(src.id);
+    try {
+      const r = await httpGet(src.api, {
+        timeout: 12000,
+        headers: Object.assign({}, src.headers, { 'User-Agent': 'PenBili-Updater/' + APP_VERSION })
+      });
+      const code = r && typeof r.statusCode === 'number' ? r.statusCode : 0;
+      if (code && code !== 200) {
+        // GitCode 在「仓库还没有任何 Release」时返回 400 Release not found，
+        // 这不是网络故障，但对用户来说同样是「没拿到版本」，继续试下一个源。
+        last = {
+          stage: 'http',
+          message: src.label + ' HTTP ' + code + (r && r.errorMessage ? ' · ' + r.errorMessage : '')
+        };
+        logWarn('[bili] upd source ' + src.id + ' http ' + code + ', next');
+        continue;
       }
-    });
-    const code = r && typeof r.statusCode === 'number' ? r.statusCode : 0;
-    if (code && code !== 200) {
-      return { ok: false, stage: 'http', message: 'HTTP ' + code + (r.errorMessage ? ' · ' + r.errorMessage : '') };
+      const rel = normalizeRelease(r && r.body, src.repoUrl);
+      if (!rel) {
+        last = { stage: 'parse', message: src.label + ' 发布信息解析失败' };
+        logWarn('[bili] upd source ' + src.id + ' parse fail, next');
+        continue;
+      }
+      return { ok: true, release: rel, source: src.id, sourceLabel: src.label, tried: tried };
+    } catch (e) {
+      last = { stage: 'transport', message: src.label + ' ' + ((e && e.message) || String(e)) };
+      logWarn('[bili] upd source ' + src.id + ' transport fail, next');
     }
-    const rel = normalizeRelease(r && r.body);
-    if (!rel) return { ok: false, stage: 'parse', message: '发布信息解析失败' };
-    return { ok: true, release: rel };
-  } catch (e) {
-    return { ok: false, stage: 'transport', message: (e && e.message) || String(e) };
   }
+  return { ok: false, stage: last.stage, message: last.message, tried: tried };
 }
 
 /**
