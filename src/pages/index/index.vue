@@ -30,15 +30,16 @@
         </scroller>
       </div>
       <div class="upd-right">
-        <!-- 进入软件时自动检测：4 个按钮
+        <!-- 进入软件时自动检测：4 个按钮，两个下载按钮**都是直连**（v3.5.6 起不再有镜像）。
              第一个按钮的括号里必须是**当前命中的源名**（GitCode / GitHub）——
-             写死「直连 GitHub」在 GitCode 主通道下就是错的，用户会以为点了也白点。 -->
+             写死「直连 GitHub」在 GitCode 主通道下就是错的，用户会以为点了也白点。
+             第二个按钮是换源：两个平台的网络可达性互补，GitCode 挂了还能直连 GitHub。 -->
         <template v-if="upd.mode === 'auto' && upd.stage === 'ready'">
-          <div class="upd-btn upd-btn-main" @click="onUpdInstall(false)">
+          <div class="upd-btn upd-btn-main" @click="onUpdInstall()">
             <text class="upd-btn-t-main">立即更新（直连 {{ updSourceLabel }}）</text>
           </div>
-          <div class="upd-btn upd-btn-main" @click="onUpdInstallMirror">
-            <text class="upd-btn-t-main">{{ updMirrorLabel }}</text>
+          <div class="upd-btn upd-btn-main" @click="onUpdInstallFrom(updAltSource)">
+            <text class="upd-btn-t-main">立即更新（直连 {{ updAltLabel }}）</text>
           </div>
           <div class="upd-btn" @click="onUpdSkip">
             <text class="upd-btn-t">跳过此版本</text>
@@ -47,9 +48,9 @@
             <text class="upd-btn-t">今天内不提示</text>
           </div>
         </template>
-        <!-- 「我的」页手动检测：2 个按钮（下载源由 onUpdInstall 自动回退，不给用户选） -->
+        <!-- 「我的」页手动检测：2 个按钮（下载源由 onUpdInstall 自动换源，不给用户选） -->
         <template v-else-if="upd.mode === 'manual' && upd.stage === 'ready'">
-          <div class="upd-btn upd-btn-main" @click="onUpdInstall(false)">
+          <div class="upd-btn upd-btn-main" @click="onUpdInstall(updAltSource)">
             <text class="upd-btn-t-main">立即更新</text>
           </div>
           <div class="upd-btn" @click="onUpdClose">
@@ -570,9 +571,9 @@ import { isAutotestSeedEnabled, readAutotestSeed } from '../../services/autotest
 /* 直播「下播」判据的引擎级自证（probeLiveEnd）：纯计算，不取流不播放不亮屏。
  * 单独成模块是为了让「假 status → 判据结论」这张用例表能被 Node 单测直接跑。 */
 import { runLiveEndCases } from '../../services/live_end_probe.js';
-/* 检查更新（双源 Release：GitCode 主 / GitHub 备）：版本比较 / 资产挑选 / 镜像 URL /
+/* 检查更新（双源 Release：GitCode 主 / GitHub 备）：版本比较 / 资产挑选 / 下载 URL /
  * 提示决策 / 正文切行全部是纯函数（可 Node 单测），运行时只有 fetch/download/install
- * 三个薄封装。
+ * 三个薄封装。两个下载按钮都是直连，不再提供镜像入口（v3.5.6）。
  * 为什么是双源：部分国内网络完全打不开 github.com（用户明确要求改用 GitCode）；
  * GitHub 留着当兜底，也是原始发布地。
  * 为什么不用 $falcon.jsapi.updater：它是有道自家服务端升级通道（service_upgrade_push），
@@ -580,11 +581,10 @@ import { runLiveEndCases } from '../../services/live_end_probe.js';
 import {
   APP_VERSION,
   REPO_URL,
-  MIRROR_PREFIX,
   SAVE_DIR,
   SOURCES,
+  sourceById,
   sourceLabel,
-  isMirrorable,
   downloadUrl,
   fetchLatestRelease,
   downloadFileToDisk,
@@ -932,19 +932,21 @@ export default {
     updSourceLabel() {
       return sourceLabel(this.upd.source);
     },
-    // 第二个按钮的文案：命中 GitCode 时它是「换 GitHub 走镜像」（真正的备用通道）；
-    // 命中 GitHub 时它就是普通镜像加速。镜像只对 GitHub 资产有意义，见 isMirrorable。
-    updMirrorLabel() {
-      return this.upd.source === 'github' ? '立即更新（使用镜像）' : '立即更新（GitHub 镜像）';
+    // 第二个按钮换哪个源：两个平台互为备用（GitCode 国内通、GitHub 海外通）
+    updAltSource() {
+      return this.upd.source === 'github' ? 'gitcode' : 'github';
     },
-    // 右下角小字：把「为什么不能点」讲清楚（镜像 403、资产缺失、来源是直连还是镜像）
+    updAltLabel() {
+      return sourceLabel(this.updAltSource);
+    },
+    // 右下角小字：把「为什么不能点」讲清楚（资产缺失、来源是哪个平台、缓存在哪）
     updTip() {
       if (this.upd.tip) return this.upd.tip;
       const r = this.upd.release;
       if (this.upd.stage === 'ready' && r && !r.assetUrl) return '该版本没有可用安装包';
       if (this.upd.stage === 'ready') {
-        return '当前 v' + APP_VERSION + ' · 检测 ' + this.updSourceLabel +
-               ' 直连，镜像仅用于 GitHub 加速';
+        return '当前 v' + APP_VERSION + ' · 两个按钮都是直连：' +
+               this.updSourceLabel + ' / ' + this.updAltLabel;
       }
       if (this.upd.stage === 'done') return '重新打开软件即可使用新版本';
       return '';
@@ -3130,109 +3132,147 @@ export default {
       logWarn('[bili] upd release page: ' + url);
     },
 
-    // 「立即更新（GitHub 镜像）」：命中 GitCode 时这是**换源**按钮 ——
-    // 重新从 GitHub 拿同一版本，再走 gh-proxy 镜像下载。为什么需要：
-    // GitCode 的资产偶尔会 404 或限流，此时镜像是从国内唯一还能下的路子；
-    // 而命中 GitHub 时它退化成普通的「镜像加速」，行为不变。
-    async onUpdInstallMirror() {
-      if (this.upd.source === 'github') {
-        await this.onUpdInstall(true);
+    /* 换源下载：按指定平台重新取 Release 再直连下载。
+     * 为什么需要两个按钮而不是只留一个：「部分用户网络环境无法连接 github」是真实的，
+     * 反过来 GitHub 在某些海外/校园网又比 GitCode 稳。两个平台互为备用，
+     * 但**都走直连** —— 用户明确要求去掉镜像（v3.5.6）。 */
+    async onUpdInstallFrom(onlyId) {
+      const id = onlyId || this.upd.source;
+      const cur = this.upd.release;
+      // 目标源就是当前命中的源、包也已经在手 -> 不用再请求一次
+      if (id === this.upd.source && cur && cur.assetUrl) {
+        await this.onUpdInstall();
         return;
       }
-      const tag = this.upd.release ? this.upd.release.tag : '-';
+      const tag = cur ? cur.tag : '-';
       this.upd = Object.assign({}, this.upd, {
         stage: 'checking',
-        message: '正在从 GitHub 获取 ' + tag + '…',
+        message: '正在从 ' + sourceLabel(id) + ' 获取 ' + tag + '…',
         tip: ''
       });
-      logWarn('[bili] upd mirror: re-fetch from github for ' + tag);
-      const r = await fetchLatestRelease('github');
-      if (!r.ok || !r.release) {
+      logWarn('[bili] upd switch source -> ' + id + ' for ' + tag);
+      const r = await fetchLatestRelease(id);
+      if (!r.ok || !r.release || !r.release.assetUrl) {
         this.upd = Object.assign({}, this.upd, {
           stage: 'ready',
           message: '新版本 ' + tag + ' · 当前 v' + APP_VERSION,
-          tip: 'GitHub 也连不上，可用直连 ' + this.updSourceLabel + ' 重试'
+          tip: sourceLabel(id) + ' 暂时取不到该版本，可点另一个按钮重试'
         });
-        logWarn('[bili] upd mirror: github fetch fail ' + (r.message || '-'));
+        logWarn('[bili] upd switch source fail ' + id + ': ' + (r.message || '-'));
         return;
       }
-      // GitHub 上的版本可能比 GitCode 落后（发布顺序），只认更新的那个，
-      // 否则会把用户降级回旧包 —— 那是比「下载失败」严重得多的事故。
-      const useRelease = isNewer(r.release.tag, this.upd.release.tag) ? r.release : this.upd.release;
+      // 两个平台的发布顺序不保证同步：目标平台上可能还没有这个 tag。
+      // 这时**不能**把手上那个源的包当作"从目标源下载"去下 —— 日志和提示都会说谎，
+      // 用户也会以为 GitHub 能通（实际根本没连到 GitHub）。宁可明确报"还没有"。
+      const sameOrNewer = r.release.tag === tag || isNewer(r.release.tag, tag);
+      if (!sameOrNewer) {
+        this.upd = Object.assign({}, this.upd, {
+          stage: 'ready',
+          message: '新版本 ' + tag + ' · 当前 v' + APP_VERSION,
+          tip: sourceLabel(id) + ' 上还没有 ' + tag + '，可点另一个按钮'
+        });
+        logWarn('[bili] upd switch source: ' + id + ' has ' + r.release.tag +
+                ' < ' + tag + ' -> keep ' + this.upd.source);
+        return;
+      }
       this.upd = Object.assign({}, this.upd, {
-        source: 'github',
+        source: r.source,
         stage: 'ready',
-        release: useRelease,
-        message: '新版本 ' + useRelease.tag + ' · 当前 v' + APP_VERSION
+        release: r.release,
+        message: '新版本 ' + r.release.tag + ' · 当前 v' + APP_VERSION
       });
-      await this.onUpdInstall(true);
+      await this.onUpdInstall();
     },
 
-    // 下载：先试用户选定的源；失败且没指定镜像时自动改用镜像再试一次。
-    // 为什么自动回退：「我的」页手动检测只有 2 个按钮（用户在需求里明确不要选源），
-    // 直连被墙时必须有兜底，否则「立即更新」在国内基本等于不可用。
-    async onUpdInstall(useMirror) {
+    /* 下载 + 安装，**只走直连**（v3.5.6 起没有镜像按钮）。
+     * altSourceId 给了且首源失败时，换另一个平台再试一次：
+     * 「我的」页手动检测只有 2 个按钮，用户没法自己换源，必须有兜底。 */
+    async onUpdInstall(altSourceId) {
       const r = this.upd.release;
       if (!r || !r.assetUrl) {
         this.upd = Object.assign({}, this.upd, { tip: '该版本没有可用安装包，请到发布页手动下载' });
         return;
       }
-      const order = useMirror ? [true, false] : [false, true];
-      for (let i = 0; i < order.length; i++) {
-        const mirror = order[i];
-        const url = downloadUrl(r.assetUrl, mirror);
-        if (!url) continue;
-        // 只有 GitHub 资产能走镜像（isMirrorable）；GitCode 资产套镜像只是多一跳，
-        // 返回值与直连完全相同，此时的 label 必须诚实写成直连，否则日志会误导排查。
-        const label = mirror && isMirrorable(r.assetUrl) ? '镜像' : '直连';
+      if (await this.updTryInstall(r, this.updSourceLabel)) return;
+      if (!altSourceId) return;
+      // 换源重试：换的是**源**，不是镜像前缀
+      const alt = sourceById(altSourceId);
+      this.upd = Object.assign({}, this.upd, {
+        stage: 'checking',
+        message: '正在从 ' + alt.label + ' 重试…',
+        tip: ''
+      });
+      logWarn('[bili] upd retry via source ' + alt.id);
+      const r2 = await fetchLatestRelease(alt.id);
+      if (!r2.ok || !r2.release || !r2.release.assetUrl) {
         this.upd = Object.assign({}, this.upd, {
-          stage: 'downloading',
-          message: '正在下载 ' + (r.assetName || '安装包') + '（' + label + '加速）…',
-          tip: progressText(0, r.assetSize)
-        });
-        logWarn('[bili] upd download via ' + label + ': ' + url);
-        const d = await downloadFileToDisk(url);
-        if (!d.ok) {
-          logWarn('[bili] upd download fail via ' + label + ': ' + (d.message || ''));
-          if (i === order.length - 1) {
-            this.upd = Object.assign({}, this.upd, {
-              stage: 'error',
-              message: '下载失败：' + (d.message || '未知错误'),
-              tip: '两个下载源都失败了，可稍后重试或到发布页手动下载'
-            });
-            return;
-          }
-          continue;
-        }
-        logWarn('[bili] upd downloaded via ' + label + ' -> ' + d.filePath);
-        this.upd = Object.assign({}, this.upd, {
-          stage: 'installing',
-          message: '下载完成，正在安装…',
-          tip: d.filePath || ''
-        });
-        const ins = await installAmr(d.filePath);
-        if (!ins.ok) {
-          logWarn('[bili] upd install fail: ' + (ins.message || '') + ' rc=' + (ins.rc == null ? '?' : ins.rc));
-          this.upd = Object.assign({}, this.upd, {
-            stage: 'error',
-            message: '安装失败：' + (ins.message || '未知错误'),
-            tip: '安装包已下载到 ' + (d.filePath || SAVE_DIR)
-          });
-          return;
-        }
-        logWarn('[bili] upd install done ' + r.tag);
-        this.upd = Object.assign({}, this.upd, {
-          stage: 'done',
-          message: '已安装 ' + r.tag,
-          tip: '重新打开软件即可使用新版本'
+          stage: 'error',
+          message: '两个平台都取不到安装包',
+          tip: '请到发布页手动下载'
         });
         return;
       }
       this.upd = Object.assign({}, this.upd, {
-        stage: 'error',
-        message: '没有可用的下载地址',
-        tip: '请到发布页手动下载'
+        source: r2.source,
+        stage: 'ready',
+        release: r2.release,
+        message: '新版本 ' + r2.release.tag + ' · 当前 v' + APP_VERSION
       });
+      await this.updTryInstall(r2.release, alt.label);
+    },
+
+    /* 单个源上的一次完整「下载 -> 安装」。成功返回 true；失败返回 false 并把
+     * 阶段的 message/tip 写好（调用方决定要不要换源重试）。 */
+    async updTryInstall(rel, label) {
+      const url = downloadUrl(rel.assetUrl, false);
+      if (!url) {
+        this.upd = Object.assign({}, this.upd, {
+          stage: 'error',
+          message: '没有可用的下载地址',
+          tip: '请到发布页手动下载'
+        });
+        return false;
+      }
+      this.upd = Object.assign({}, this.upd, {
+        stage: 'downloading',
+        message: '正在从 ' + label + ' 下载 ' + (rel.assetName || '安装包') + '…',
+        tip: progressText(0, rel.assetSize)
+      });
+      logWarn('[bili] upd download via ' + label + ' 直连: ' + url);
+      const d = await downloadFileToDisk(url);
+      if (!d.ok) {
+        logWarn('[bili] upd download fail via ' + label + ': ' + (d.message || ''));
+        this.upd = Object.assign({}, this.upd, {
+          stage: 'error',
+          message: '下载失败：' + (d.message || '未知错误'),
+          tip: d.message || ''
+        });
+        return false;
+      }
+      logWarn('[bili] upd downloaded via ' + label + ' -> ' + d.filePath);
+      this.upd = Object.assign({}, this.upd, {
+        stage: 'installing',
+        message: '下载完成，正在安装…',
+        tip: d.filePath || ''
+      });
+      const ins = await installAmr(d.filePath);
+      if (!ins.ok) {
+        logWarn('[bili] upd install fail: ' + (ins.message || '') +
+                ' rc=' + (ins.rc == null ? '?' : ins.rc));
+        this.upd = Object.assign({}, this.upd, {
+          stage: 'error',
+          message: '安装失败：' + (ins.message || '未知错误'),
+          tip: '安装包已下载到 ' + (d.filePath || SAVE_DIR)
+        });
+        return false;
+      }
+      logWarn('[bili] upd install done ' + rel.tag);
+      this.upd = Object.assign({}, this.upd, {
+        stage: 'done',
+        message: '已安装 ' + rel.tag,
+        tip: '重新打开软件即可使用新版本'
+      });
+      return true;
     },
 
     /* ---------- 「我的」页手动检测更新 ---------- */
@@ -3258,8 +3298,8 @@ export default {
       const newer = isNewer(r.release.tag, APP_VERSION);
       logWarn('[bili] UPD-PROBE newer=' + (newer ? 1 : 0) + ' prompt=' +
               (shouldAutoPrompt(normalizeUpdateState(null), r.release.tag, APP_VERSION, Date.now()) ? 1 : 0));
-      const link = downloadUrl(r.release.assetUrl, true);
-      logWarn('[bili] UPD-PROBE mirror url=' + (link || '(none)'));
+      const link = downloadUrl(r.release.assetUrl, false);
+      logWarn('[bili] UPD-PROBE direct url=' + (link || '(none)'));
       if (!link) {
         logWarn('[bili] UPD-PROBE FAIL at url');
         return;

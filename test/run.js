@@ -403,6 +403,7 @@ async function main() {
   test('updater: downloadUrl 镜像前缀拼接，非 http 返回空串', () => {
     const u = 'https://github.com/o/r/releases/download/v3.6.0/PenBili.amr';
     assert.strictEqual(upd.downloadUrl(u, false), u);
+    // 镜像能力仍保留在纯函数里（老客户端可能还在用），但 v3.5.6 起界面只走直连
     assert.strictEqual(upd.downloadUrl(u, true), upd.MIRROR_PREFIX + u);
     assert.strictEqual(upd.downloadUrl('', true), '');
     assert.strictEqual(upd.downloadUrl('ftp://x/y', true), '');
@@ -619,14 +620,17 @@ async function main() {
   test('updater: 自动检测（进软件时）与手动检测（我的页）文案必须分家', () => {
     const v = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'pages', 'index', 'index.vue'), 'utf8');
     const src = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'services', 'updater.js'), 'utf8');
-    // 自动：4 个按钮（直连 / 镜像 / 跳过此版本 / 今天内不提示）
+    // 自动：4 个按钮，两个下载按钮都是直连（v3.5.6 起去掉镜像）
     // 「直连」后面的源名必须是动态的 —— 写死 GitHub 在 GitCode 主通道下就是错文案
     ['立即更新（直连 {{ updSourceLabel }}）', '跳过此版本', '今天内不提示'].forEach((t) => {
       assert.ok(v.indexOf(t) > 0, '自动弹窗缺按钮文案：' + t);
     });
     assert.ok(v.indexOf('立即更新（直连 GitHub）') < 0, '不能再写死「直连 GitHub」');
-    assert.ok(v.indexOf("updMirrorLabel") > 0, '第二个按钮的文案必须由源推导');
-    assert.ok(/updMirrorLabel\(\)\s*\{/.test(v), '必须有 updMirrorLabel computed');
+    assert.ok(v.indexOf("updAltLabel") > 0, '第二个按钮的文案必须由源推导');
+    assert.ok(/updAltLabel\(\)\s*\{/.test(v), '必须有 updAltLabel computed');
+    assert.ok(!/updMirrorLabel|onUpdInstallMirror/.test(v), 'v3.5.6 起不再有镜像按钮');
+    assert.ok(/立即更新（直连 \{\{ updAltLabel \}\}）/.test(v), '第二个按钮必须是直连另一个源');
+    assert.ok(!/使用镜像|GitHub 镜像/.test(v), '弹窗里不许再出现镜像字样');
     // 手动：2 个按钮，且不得混入自动态语义
     const mi = v.indexOf("upd.mode === 'manual'");
     assert.ok(mi > 0, '必须有手动检测分支');

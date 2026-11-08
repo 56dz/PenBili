@@ -204,15 +204,15 @@ ignore-error=false（丢弃坏帧）             → 40 秒内 0 组 / 0 组闪�
 
 五条实测结论（都是真机踩出来的，别按常识改）：
 
-1. **检测必须直连，不能走镜像**。镜像 `v4.gh-proxy.org` 访问 `api.github.com` 会被共享出口 IP 限流，直接返回 `403 API rate limit exceeded`；它只适合**下载 GitHub 资产**。
+1. **检测必须直连**。`v4.gh-proxy.org` 这类通用反代访问 `api.github.com` 会被共享出口 IP 限流，直接返回 `403 API rate limit exceeded`；它只适合**下载 GitHub 资产**，不能判断版本。
 2. **只用 `/releases/latest`**。两个平台都有这个接口，天然排除 prerelease 与 draft，正好满足「不检测预览版」——不需要拉全量列表再过滤。GitCode 的 `release_status=pre` 再过滤一次。
-3. **镜像只对 GitHub 资产生效**。`v4.gh-proxy.org` 是「前缀 + 完整原始 URL」的通用反代，套在 GitCode 地址上只是多一跳（GitCode 国内本来直连可用），所以 `isMirrorable()` 只放行 `github.com` / `githubusercontent.com` 及其子域，后缀判断必须带点（`evilgithub.com` 不是 GitHub）。
+3. **两个下载按钮都是直连**。早期版本提供过「使用镜像」（`v4.gh-proxy.org` 前缀 + 原始 URL）的第二个入口，实测收益不稳定、歧义又大（用户分不清哪个按钮更快），已经去掉：界面上只有「立即更新（直连 GitCode）」和「立即更新（直连 GitHub）」。`downloadUrl()` 的镜像分支与 `isMirrorable()` 保留在纯函数层给老客户端兜底，界面不再调用。
 4. **弹窗不是浮层，是整页替换**。Falcon 运行时 `position:absolute` 不可靠、全仓没有可用的 `z-index`，任何「叠在内容上」的做法在真机上直接失效。所以 `upd.visible` 为真时正常视图整块 `v-else` 掉，弹窗自身是 `.upd`（居中容器）+ `.upd-card`（760×232 圆角卡片），视觉上和播放页右栏同一套圆角与底色。
 5. **安装走 native，不走 JSAPI**。设备上的 `$falcon.jsapi` **没有 `pm` 模块**（`libfalcon.so` 的模块名池只有 `http/storage/modal/nvue/updater`），`pm.installPackage` 永远是 `undefined`。所以 `player2` 模块导出了 `installAmr(path)`，内部调 `/bin/miniapp_cli install`——这和 `tools/deploy.ps1` 走的是同一条装机路径，解析输出里的 `"ret": 0` 判成败。
 
 下载落盘目录是 `/userdisk/miniapp/downloaded/`，文件名由 `http.downloadFile` 按 URL 内容的 md5 生成（`saveName` 不生效，但天然去重缓存）。回调参数是 `{"result": "<路径字符串>"}` —— `result` 是**字符串**不是对象，早期按 `result.filePath` 取会一直判「未拿到文件路径」。
 
-自动弹窗有四个按钮：直连当前源（文案跟着命中的源变，「直连 GitCode」/「直连 GitHub」）、换源走镜像、跳过此版本、今天内不提示。手动弹窗只给「立即更新」和「暂不更新」，源的选择交给内部回退：先试用户选的源，失败自动换另一个再试一次。换源按钮在命中 GitCode 时会重新向 GitHub 取同一个 tag，且**只接受不旧于当前包的版本**——发布顺序不同步时宁可下载失败，也不能把用户降级回旧包。
+自动弹窗有四个按钮：`立即更新（直连 GitCode）` / `立即更新（直连 GitHub）` / `跳过此版本` / `今天内不提示`。第一个按钮的括号里是**本次命中的源名**，第二个是另一个源——两个平台的可达性互补，一个挂了还能换另一个，但**都走直连**。手动弹窗只给「立即更新」和「暂不更新」，源的选择交给内部自动回退：先试当前源，失败换另一个再试一次。换源时会重新向目标平台取同一个 tag，且**只接受不旧于当前包的版本**——两个平台发布顺序不同步时宁可下载失败，也不能把用户降级回旧包。
 
 ### 代码结构
 
