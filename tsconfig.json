@@ -1,0 +1,13 @@
+{
+  "//": "aiot-vue-cli@1.0.32 无条件启用 @rollup/plugin-typescript；项目里没有任何 .ts 输入时它会用默认 include=['**/*'] 并抛 TS18003 中断打包。这个文件把输入收敛到 typecheck.ts（不参与 bundle）。",
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "esnext",
+    "moduleResolution": "node",
+    "strict": false,
+    "skipLibCheck": true,
+    "allowJs": false,
+    "lib": ["ES2020", "dom"]
+  },
+  "include": ["src/typecheck.ts"]
+}

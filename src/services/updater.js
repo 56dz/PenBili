@@ -23,7 +23,7 @@ import { httpGet } from './net.js';
 import { logWarn } from './storage.js';
 import { getPlayerModule } from './player.js';
 
-export const APP_VERSION = '3.5.6';
+export const APP_VERSION = '3.5.7';
 
 /** 主源：GitCode（国内可直连，GitHub 在部分网络下完全打不开） */
 export const GITCODE_REPO = 'dz56dz/PenBili';

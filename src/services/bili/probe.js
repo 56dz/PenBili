@@ -9,6 +9,8 @@
 //     onStep    : (u) => void，u = { id, state: running|ok|fail|skip, detail, ms }
 //     cancelled : () => boolean，true 时立即终止且**不再回调 onStep**
 //     target    : { bvid }
+//     videoBox  : 可选，自检页自己挖的洞（逻辑像素 {x,y,width,height}）；
+//                 不传则用 profile.videoArea（首页播放区）
 //     nowSec    : () => number（WBI wts）
 //     sleep     : (ms) => Promise
 //     onSession : (session) => void（触点落 storage + 回填 Cookie）
@@ -17,7 +19,7 @@
 
 import { buildPlayurlQuery, parseHtml5Response, validateStreamUrl, dimsForQn, QN_LADDER, HTML5_FPS } from './playurl.js';
 import { deriveMixinKey } from './wbi.js';
-import { probeVideoRects } from '../screen.js';
+import { playVideoRectsFor } from '../device_profile.js';
 
 export const STEPS = [
   { id: 'net', label: '网络通道' },
@@ -204,15 +206,29 @@ export async function runProbe(ctx) {
   // 7) 起播（真正 open）
   if (guard()) return { cancelled: true };
   const dims = dimsForQn(stream.qn);
-  const rects = probeVideoRects(dims.width, dims.height);
+  /*
+   * 【3.5.6 第四轮】矩形必须与**当前页面挖的洞**同源。
+   *
+   * 3.6.2 修掉了「probe 用 X6 常量」的错，但仍借用首页播放区
+   * （X7 = x208 起、457x253）算矩形；自检页的洞却是左侧整块 584x280。
+   * 两者对不上 → 画面偏在洞的一角、四周大片黑，四档怎么换缩放都不可能
+   * 「占满」。现在诊断页把自己的 16:9 洞通过 ctx.videoBox 传进来，
+   * 640x360 恰好铺满；不传时仍按首页播放区走（Node 单测/其它调用方不变）。
+   */
+  const profile = c.profile || (c.ensureProfile ? await c.ensureProfile() : null);
+  const rects = playVideoRectsFor(dims.width, dims.height, profile, false, c.videoBox);
   const openRes = await c.player.openSession({
     input: stream.url,
     startMs: 0,
     durationMs: durationMs,
     fps: HTML5_FPS,
     audio: true,
-    transpose: 2,
+    transpose: profile ? profile.transpose : 2,
     rect: rects.physical,
+    panelOffset: profile ? profile.panelXOffset : undefined,
+    planeId: profile ? profile.planeId : undefined,
+    swScale: profile ? profile.swScale : undefined,
+    bufScale: profile ? profile.bufScale : undefined,
     audioDevice: '',
     userAgent: c.mediaUa,
     referer: c.mediaReferer
@@ -226,7 +242,8 @@ export async function runProbe(ctx) {
   if (!openRes || openRes.ok !== true) {
     return stepFail('play', (openRes && (openRes.code + ': ' + openRes.error)) || 'open 失败');
   }
-  ok('play', 'playing out=' + openRes.outWidth + 'x' + openRes.outHeight + ' ' + openRes.fps + 'fps');
+  ok('play', 'playing out=' + openRes.outWidth + 'x' + openRes.outHeight +
+    ' ' + openRes.fps + 'fps ·buf' + (profile ? profile.bufScale : 100));
 
   // 8) 5 秒回读：帧数增长即证明真实解码渲染
   if (guard()) {
@@ -239,6 +256,8 @@ export async function runProbe(ctx) {
   let lastPos = 0;
   let playState = 'playing';
   let playErr = '';
+  let audioBytes = 0;
+  let hasAudio = false;
   for (let r = 0; r < WATCH_ROUNDS; r++) {
     await (c.sleep ? c.sleep(WATCH_INTERVAL_MS) : Promise.resolve());
     if (guard()) {
@@ -250,8 +269,15 @@ export async function runProbe(ctx) {
     if (st && st.ok !== false) {
       if (typeof st.frames === 'number' && st.frames > maxFrames) maxFrames = st.frames;
       if (typeof st.positionMs === 'number') lastPos = st.positionMs;
+      /* 音频字节是「有没有真声音」的唯一硬证据：画面正常但 ab 恒 0 就是丢音轨。
+       * 自检页把它显示出来，不用再靠用户描述「有没有声音」。 */
+      if (typeof st.audioBytes === 'number') audioBytes = st.audioBytes;
+      if (st.hasAudio !== undefined) hasAudio = !!st.hasAudio;
       if (st.state) playState = st.state;
-      if (st.error) playErr = String(st.error).slice(0, 80);
+      /* native 的字段名是 lastError（码）/ lastErrorMsg（文本）。
+       * 以前读的是 st.error —— 永远 undefined，所以自检页只显示「播放错误：」。 */
+      if (st.lastErrorMsg) playErr = String(st.lastErrorMsg).slice(0, 120);
+      else if (st.lastError) playErr = 'code=' + st.lastError;
     } else if (st && st.ok === false) {
       playState = 'error';
       playErr = st.error || st.code || 'status 失败';
@@ -268,9 +294,13 @@ export async function runProbe(ctx) {
     await c.player.stop();
     await c.player.release();
   }
-  if (playState === 'error') return stepFail('watch', '播放错误: ' + playErr);
+  if (playState === 'error') {
+    return stepFail('watch', '播放错误: ' + (playErr || '(native 未给消息)') +
+      ' · 帧=' + maxFrames + ' 音=' + audioBytes + (hasAudio ? '/有' : '/无'));
+  }
   if (!(maxFrames > 0)) return stepFail('watch', '5s 无帧输出（state=' + playState + '）');
-  ok('watch', '帧=' + maxFrames + ' 位=' + (lastPos / 1000).toFixed(1) + 's ✓ 播放保持');
+  ok('watch', '帧=' + maxFrames + ' 位=' + (lastPos / 1000).toFixed(1) + 's 音=' +
+    audioBytes + (hasAudio ? '/有' : '/无') + ' ✓');
 
   return {
     ok: true,

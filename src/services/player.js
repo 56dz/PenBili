@@ -285,7 +285,38 @@ export function buildOpenArgs(opts) {
   ];
 }
 
-// opts: { input, input2, startMs, durationMs, fps, audio, transpose, rect, audioDevice, userAgent, referer, fpsCap }
+// 【X7 Pro 适配】open 的第 17~20 个位置参数：面板列偏移 / kmssink plane-id /
+// 软件缩放开关 / videoscale 输出倍率。只在真正调 native 时追加，
+// buildOpenArgs 的 16 参契约保持不变（单测逐项断言）。
+// 缺省 -1 / 0 / 0 / 100 = 让 native 回落 X6 Pro 的 107 / 76，且不放大 buffer。
+function intOr(v, dflt) {
+  if (v === undefined || v === null || v === '') return dflt;
+  const n = Math.round(Number(v));
+  return isFinite(n) ? n : dflt;
+}
+
+function deviceArgs(opts) {
+  const o = opts || {};
+  /*
+   * 第 19 位 = swScale（0/1/2）：解码后是否插 videoscale，以及目标宽高是否
+   * 按 rotate 互换。X7 Pro 上 plane-id 76 不可用，自选平面可能没有缩放器，
+   * 所以由 profile 下发 1 或 2，让 sink 拿到尺寸可控的 buffer。
+   * 第 20 位 = bufScale（百分比，100 = 与矩形等大）：3.5.6 第四轮新增。
+   * X7 的 1:1 平面不理会 render-rectangle 的大小，只按 buffer 像素贴屏，
+   * 所以「画面占不满」必须靠放大 buffer 解决，光改矩形无效。
+   */
+  const sw = intOr(o.swScale, 0);
+  const buf = intOr(o.bufScale, 100);
+  return [
+    intOr(o.panelOffset, -1),
+    intOr(o.planeId, 0),
+    sw === 1 || sw === 2 ? sw : 0,
+    buf < 50 ? 50 : buf > 400 ? 400 : buf
+  ];
+}
+
+// opts: { input, input2, startMs, durationMs, fps, audio, transpose, rect, audioDevice,
+//         userAgent, referer, fpsCap, isLive, panelOffset, planeId, swScale, bufScale }
 export async function openSession(opts) {
   const m = await getPlayerModule();
   if (!m) return fail('PLAYER_NATIVE_MISSING', '播放器模块不可用（未随包安装 libjsapi_player2.so / libjsapi_player.so）');
@@ -296,7 +327,8 @@ export async function openSession(opts) {
   if (!isSafeReferer(o.referer)) return fail('PLAYER_BAD_HEADERS', 'Referer 参数不合法');
   const rect = o.rect || null;
   if (!rect || !(rect.width > 0) || !(rect.height > 0)) return fail('PLAYER_BAD_RECT', '视频矩形未计算');
-  const res = call('open', buildOpenArgs(o));
+  // v1(player.c) 只按 argv[0..14] 取参，多出来的参数会被忽略，不影响回退路径。
+  const res = call('open', buildOpenArgs(o).concat(deviceArgs(o)));
   if (res && res.ok === false && !res.code) res.code = 'PLAYER_OPEN_FAILED';
   return res;
 }
@@ -371,9 +403,35 @@ export async function redraw() {
   return callOptional('redraw', []);
 }
 
+/* 读 native 日志尾部（/tmp/pb2.log）。自检页「日志」用它 —— 真机没有 adb 时，
+ * 一张截图就能看到 bus error / plane missing / 音频自愈这些关键行。
+ * v1 没有这个接口 → callOptional 返回 PLAYER_UNSUPPORTED，页面按「无日志」降级。 */
+export async function logTail(maxBytes) {
+  await getPlayerModule();
+  return callOptional('logTail', [Math.round(Number(maxBytes) || 4096)]);
+}
+
 export async function info() {
   await getPlayerModule();
   return callOptional('info', []);
+}
+
+/* 【X7 Pro 适配】只读 DRM/KMS 平面摘要（player2 才有；v1 返回
+ * PLAYER_UNSUPPORTED，诊断页据此显示"不可用"而不是抛异常）。 */
+export async function kmsProbe() {
+  await getPlayerModule();
+  return callOptional('kmsProbe', []);
+}
+
+/* 【3.5.6 第五轮】一键开声：解除全局静音开关、选通输出通路。
+ * 真机「画面正常但没声音」多半是 /tmp/pb2_mute 或 PB2_MUTE=1 把
+ * Playback Path 设成 OFF；开发机无 adb，只能由页面按钮下发。
+ * 只在系统音量为 0 时才给默认音量，用户音量非 0 一律不碰。
+ * 老 native 没有此接口 → PLAYER_UNSUPPORTED，页面照常降级。
+ * 点一次是进程级/文件级生效，之后首页播放也有声，不必反复点。 */
+export async function setSound(on) {
+  await getPlayerModule();
+  return callOptional('setSound', [on === false ? 0 : 1]);
 }
 
 export function warnUnsupportedOnce(what) {

@@ -11,7 +11,10 @@
 import { QN_LADDER, HTML5_FPS, buildPlayurlQuery, parseHtml5Response, parseDashResponse, validateStreamUrl } from './bili/playurl.js';
 import { fetchLivePlayUrl, LIVE_FPS } from './bili/live.js';
 import { deriveMixinKey } from './bili/wbi.js';
-import { playVideoRects, LIVE_VIDEO_AREA } from './screen.js';
+// 【X7 Pro 适配】视频矩形改由设备 profile 计算：X6 Pro 结果与旧的
+// playVideoRects 完全一致；X7 Pro 会按 936x280 视口缩放并把面板列偏移、
+// plane-id 一起下发给 native（旧代码把 107 / 76 写死在 C 里）。
+import { ensureProfile, playVideoRectsFor } from './device_profile.js';
 import { dashLadderFor, videoFpsCapFor, liveFpsCapFor, liveQnFor, pixelBudgetFor } from './video_settings.js';
 
 export const SEEK_STEP_MS = 20000;
@@ -433,11 +436,14 @@ export async function openVideo(ctx, item) {
   const rs = await resolveVideoUrl(ctx, item);
   if (!rs.ok) return rs;
   if (cancelled(ctx)) return { ok: false, stage: 'cancel', message: '已取消' };
-  // 矩形按**稿件真实显示宽高**做信箱适配（竖屏 → 物理竖柱，不再被拉伸成横屏）
-  // 直播没有进度条，视频区是 469x266（LIVE_VIDEO_AREA）；点播是 469x240（底部 26px 留给进度条）。
-  // 这两个矩形必须与 falcon 侧 hole 的几何严格一致（见 base.less .pvideo-live / .video-hole-live），
-  // 否则会出现「画面与点击热区差 26px」的错位。
-  const rects = playVideoRects(rs.width, rs.height, rs.live ? LIVE_VIDEO_AREA : null);
+  // 矩形按**稿件真实显示宽高**做信箱适配（竖屏 → 物理竖柱，不再被拉伸成横屏）。
+  // 直播没有进度条，视频区用 LIVE_VIDEO_DESIGN（266 高）；点播是 240 高 + 26px 进度条。
+  // profile 会把设计坐标乘 setViewPort 的缩放系数，并按本机视口宽度做旋转变换：
+  // X7 Pro 的面板行数是 936 而不是 960，列偏移是 100 而不是 107。
+  // 这两个矩形必须与 falcon 侧 hole 的几何严格一致（见 base.less），
+  // 否则会出现「画面与点击热区错位」。
+  const profile = await ensureProfile();
+  const rects = playVideoRectsFor(rs.width, rs.height, profile, rs.live === true);
   /* 帧率上限（0 = 不限）：native 侧在 mppvideodec 之后插 videorate max-rate=N。
    * 为什么必须有这道闸：部分稿件服务端**只给 60fps 档**（例如 1080P60），
    * 光靠「请求 30fps 档」会直接落空；videorate 只做上限不插帧，低帧率内容直通。 */
@@ -449,8 +455,19 @@ export async function openVideo(ctx, item) {
     durationMs: rs.durationMs, // 直播 = 0（时长未知）
     fps: fpsCap > 0 ? Math.min(rs.fps || HTML5_FPS, fpsCap) : (rs.fps || HTML5_FPS),
     audio: true,
-    transpose: 2,
+    transpose: profile.transpose,
     rect: rects.physical,
+    /* 【X7 Pro 适配】native 不再写死 107 / 76：
+     * panelOffset = 逻辑带在 480 宽面板里的起始列；
+     * planeId = -1 时 kmssink 自动挑空闲 overlay 平面（X7 Pro 默认）；
+     * swScale = 1 时 native 在解码后插 videoscale，把 buffer 缩到窗口大小 ——
+     * 自选平面可能没有缩放器，靠它保证画面比例正确（X7 Pro 默认开）。 */
+    panelOffset: profile.panelXOffset,
+    planeId: profile.planeId,
+    swScale: profile.swScale,
+    /* 【3.5.6 第四轮】videoscale 输出倍率：X7 Pro 的 1:1 平面只认 buffer
+     * 像素尺寸，放大 buffer 才能让画面铺满挖洞区。100 = 与矩形等大。 */
+    bufScale: profile.bufScale,
     /* '' = 自动：已连蓝牙耳机走 bluealsa，否则内置扬声器（player.c 的 detect_bt_pcm） */
     audioDevice: '',
     userAgent: ctx.mediaUa,
@@ -502,10 +519,12 @@ export async function openVideo(ctx, item) {
       outHeight: openRes.outHeight,
       /* 键盘避让恢复用：open 时下发给 native 的物理矩形（= open 参数里的 x/y/width/height）。
        * 注意坐标系：x 是「视频逻辑区左缘」，**不含**面板偏移 —— native 在
-       * build_pipeline 与 PB2_CMD_SET_RECT 里都会统一加 PB2_PANEL_X_OFFSET(107)。
-       * 所以这里原样回传给 setVideoRect 即可，不要在 JS 侧再加偏移（加了会变 214）。
-       * 真机实测：orig.x=0 → 管线里 render-rectangle 是 <107,299,240,427>。 */
-      rectPhysical: rects.physical
+       * build_pipeline 与 PB2_CMD_SET_RECT 里统一加当前会话的 panelOffset
+       * （X6 Pro=107、X7 Pro=100，由 device_profile.js 下发）。
+       * 所以这里原样回传给 setVideoRect 即可，不要在 JS 侧再加偏移。
+       * X6 Pro 真机实测：orig.x=0 → render-rectangle 是 <107,299,240,427>。 */
+      rectPhysical: rects.physical,
+      deviceProfile: profile.name
     }
   };
 }

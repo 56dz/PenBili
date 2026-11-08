@@ -68,6 +68,15 @@ typedef enum {
      *   - 点播 → 以当前位置投递一次原地 seek（与旧 JS 行为一致，但少一次往返）
      */
     PB2_CMD_RECOVER = 12,
+    /*
+     * 【PB2_CMD_SET_SOUND】运行时一键解除静音（3.5.6 第五轮）。
+     * i64 = 1 强制有声 / 0 只恢复自动判定。worker 收到后执行
+     * pb2_force_sound()：删 /tmp/pb2_mute、建 /tmp/pb2_sound、
+     * 打开 Playback Path，并在系统音量为 0 时给一个可听的默认值。
+     * 必须走 worker：这些操作会 fork/exec amixer（几十毫秒），
+     * JSAPI 线程绝不允许阻塞。
+     */
+    PB2_CMD_SET_SOUND = 13,
     PB2_CMD_QUIT = 10
 } pb2_cmd_type_t;
 

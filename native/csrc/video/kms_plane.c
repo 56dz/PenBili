@@ -85,6 +85,69 @@ static const char *find_block_end(const char *p) {
     return q;
 }
 
+/*
+ * 【X7 Pro 适配】找不到 X6 Pro 的 Esmart1-win0 时，扫描 summary 里其它
+ * ACTIVE 的窗口。UI 合成层（Esmart0-win* / Cluster0-win*）必须排除，
+ * 否则会把常亮的 UI 平面误当成"视频平面 ACTIVE"，巡检永远绿。
+ *
+ * 只用于诊断/巡检，不参与管线构建；kmssink 真正用哪个平面由
+ * open 的 planeId 参数决定（-1 = 自动选择）。
+ */
+static const char *find_video_window(const char *buf) {
+    const char *line = buf;
+    while (*line) {
+        const char *eol = strchr(line, '\n');
+        size_t len = eol ? (size_t)(eol - line) : strlen(line);
+        const char *s = line;
+        const char *win;
+        const char *r;
+        const char *q;
+        int digits = 0;
+        int is_ui;
+        int active = 0;
+
+        while (s < line + len && (*s == ' ' || *s == '\t')) s++;
+        win = s;
+        while (win + 4 <= line + len && strncmp(win, "-win", 4) != 0) win++;
+        if (win + 4 > line + len) goto next_line;
+        r = win + 4;
+        while (r < line + len && *r >= '0' && *r <= '9') { r++; digits++; }
+        if (digits == 0 || r >= line + len || *r != ':') goto next_line;
+
+        is_ui = (strncmp(s, "Esmart0-win", 11) == 0) ||
+                (strncmp(s, "Cluster0-win", 12) == 0);
+        for (q = r; q + 6 <= line + len; q++) {
+            if (strncmp(q, "ACTIVE", 6) == 0) { active = 1; break; }
+        }
+        if (!is_ui && active) return s;
+
+    next_line:
+        if (!eol) break;
+        line = eol + 1;
+    }
+    return NULL;
+}
+
+/*
+ * 只读导出整份 summary 给诊断页。使用调用方缓冲，不碰 worker 的 g_buf。
+ */
+int pb2_kms_summary(char *out, size_t cap) {
+    int fd;
+    size_t total = 0;
+    if (!out || cap < 2) return -1;
+    fd = open(PB2_DRM_SUMMARY, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    for (;;) {
+        ssize_t n = read(fd, out + total, cap - 1 - total);
+        if (n <= 0) break;
+        total += (size_t)n;
+        if (total >= cap - 1) break;
+    }
+    close(fd);
+    out[total] = '\0';
+    return (int)total;
+}
+
 int pb2_plane_query(void) {
     const char *p;
     const char *seg_end;
@@ -97,6 +160,7 @@ int pb2_plane_query(void) {
     }
 
     p = strstr(g_buf, PB2_PLANE_WIN);
+    if (!p) p = find_video_window(g_buf); /* X7 Pro：窗口名不同也能找到视频平面 */
     if (!p) {
         atomic_store_explicit(&g_cached, -1, memory_order_relaxed);
         return -1;

@@ -21,8 +21,20 @@
 #ifndef PENBILI_PB2_KMS_PLANE_H
 #define PENBILI_PB2_KMS_PLANE_H
 
-/* 播放用的平面窗口名（X6 Pro 上视频走 Esmart1-win0） */
+#include <stddef.h>
+
+/* 播放用的平面窗口名（X6 Pro 上视频走 Esmart1-win0）。
+ * 【X7 Pro 适配】只是首选名；pb2_plane_query() 找不到它时会自动扫描
+ * summary 里其它 ACTIVE 的非 UI 窗口，避免别的机型换个窗口名就永远
+ * 返回 -1（planeActive 恒 0 → JS 误报"画面丢失"）。 */
 #define PB2_PLANE_WIN "Esmart1-win0"
+
+/*
+ * 把整份 /sys/kernel/debug/dri/0/summary 读进调用方缓冲（不碰 g_buf，
+ * 因此可以在 JS 线程安全地调用，不会和 worker 的巡检抢缓冲）。
+ * 返回字节数；-1 = 打不开。诊断页用它列出真机上到底有哪些平面。
+ */
+int pb2_kms_summary(char *out, size_t cap);
 
 /*
  * 读一次 summary，判断 plane 状态。
