@@ -10,9 +10,12 @@
   background-color: @background-color;
 }
 
+/* 第十五轮：视频列里现在有两个孩子（洞 + 28px 控制条），必须显式竖排。
+ * 以前只有一个洞，方向无所谓；加了控制条如果不写，条子会跑到洞右边。 */
 .video-col {
   width: 608px;
   height: 266px;
+  flex-direction: column;
 }
 
 .video-hole {
@@ -33,18 +36,29 @@
   color: @text-color-dim;
 }
 
+/* 右栏：**上滚 + 下固定**（第十六轮）。
+ * 真机上这一栏的内容（8 行步骤 + 设备/几何/播放现场 + 3 行日志）约 280~300px，
+ * 视口只有 266~280px；原来是个普通 div，超出的部分直接裁掉，底部四个按钮
+ * 永远点不到，而且没有滚动容器、手指划不动。
+ * 现在：.panel（固定视口高、column）里 = scroller（可滑）+ .panel-foot（固定）。 */
 .panel {
-  width: 352px;
-  height: 266px;
+  flex-direction: column;
+}
+
+.panel-scroll {
+  flex-direction: column;
+}
+
+.panel-body {
   flex-direction: column;
   padding-left: 10px;
   padding-right: 8px;
-  padding-top: 6px;
-  padding-bottom: 6px;
+  padding-top: 4px;
+  padding-bottom: 4px;
 }
 
 .head {
-  height: 22px;
+  height: 18px;
   flex-direction: row;
   align-items: center;
 }
@@ -68,22 +82,23 @@
   flex-direction: column;
 }
 
-/* 20px：8 行步骤 + 设备行 + 几何行 + 底部按钮正好塞进 266/280 高的视口 */
+/* 16px：8 行步骤 + 设备行 + 几何行 + 播放现场 + 3 行日志 + 按钮
+ * 才塞得进 280 高的视口（第十五轮加了同屏日志，行高从 20 收到 16） */
 .row {
-  height: 20px;
+  height: 16px;
   flex-direction: row;
   align-items: center;
 }
 
 .glyph {
   width: 16px;
-  font-size: 13px;
+  font-size: 12px;
   color: @text-color-dim;
 }
 
 .label {
-  width: 74px;
-  font-size: 13px;
+  width: 70px;
+  font-size: 12px;
   color: @text-color;
   lines: 1;
   text-overflow: ellipsis;
@@ -93,7 +108,7 @@
   flex-grow: 1;
   flex-shrink: 1;
   flex-basis: 0px;
-  font-size: 12px;
+  font-size: 11px;
   color: @text-color-dim;
   lines: 1;
   text-overflow: ellipsis;
@@ -132,20 +147,27 @@
   color: @text-color-dim;
 }
 
-.foot {
-  margin-top: 4px;
+/* 底部按钮行：**在滚动区之外**，永远贴在栏底。
+ * 真机要的是"能点到"，不是"划到底才能点" —— 所以它不随上面的 scroller 滚。
+ * 底色与页面一致，避免滚动内容从下面"透"出来。 */
+.panel-foot {
   height: 30px;
   flex-direction: row;
   align-items: center;
+  padding-left: 10px;
+  padding-right: 8px;
+  background-color: @background-color;
+  /* 不被上面的滚动区挤压 */
+  flex-shrink: 0;
 }
 
 .summary {
   flex-grow: 1;
   flex-shrink: 1;
   flex-basis: 0px;
-  font-size: 12px;
+  font-size: 10px;
   color: @text-color;
-  lines: 2;
+  lines: 1;
   text-overflow: ellipsis;
 }
 
@@ -233,3 +255,161 @@
 
 /* 3.5.6：底部四个按钮（比例/日志/重跑/返回），46px x4 + 间距 = 204px，
    352px 面板里还能给摘要留 140px。 */
+
+/* ---------- 3.5.6 第十轮：自检页进度条 ----------
+ * 用户反馈「diag 界面没有进度条，无法查找 bug」。自检页现在每秒读一次
+ * native status()，把播放位置画成一条真实的进度条：进度是否在推进、
+ * 时长有没有读到、帧数有没有涨，一张截图就能判案。
+ * 宽由页面按面板宽内联下发（X7 面板 320~440 之间浮动），这里只管高与配色。 */
+.dg-track {
+  height: 8px;
+  margin-top: 2px;
+  margin-bottom: 2px;
+  border-radius: 4px;
+  flex-direction: row;
+  align-items: center;
+  background-color: @card-border-color;
+}
+
+.dg-fill {
+  height: 8px;
+  border-radius: 4px;
+  background-color: @accent;
+}
+
+
+/* ==================== 3.5.6 第十五轮：自检页控制条 + 同屏日志 ====================
+ * 用户要求：「自检页单独包加上进度条和全屏按钮，同时显示日志」。
+ * 控制条挂在视频洞下方 28px（洞高同步扣掉，画面边界与洞边界仍然重合）：
+ *   播放/暂停 32 | 当前时间 38 | 轨道（内联宽度） | 总时长 38 | 全屏 40
+ * 轨道宽 = 列宽 − 148 − 16，与 vdTrackW 同源（命中测试也用它）。 */
+.vd-bar {
+  flex-direction: row;
+  align-items: center;
+  background-color: #000000;
+}
+
+.vd-play {
+  width: 32px;
+  height: 24px;
+  border-radius: 6px;
+  background-color: rgba(255, 255, 255, 0.14);
+  align-items: center;
+  justify-content: center;
+}
+
+.vd-play:active {
+  opacity: 0.6;
+}
+
+.vd-play-t {
+  font-size: 10px;
+  color: #ffffff;
+  text-align: center;
+}
+
+.vd-time {
+  width: 38px;
+  font-size: 10px;
+  color: @text-color-dim;
+  text-align: center;
+}
+
+/* 命中区 28 高（视觉轨道只有 4，笔尖不用瞄）。
+ * 【第十六轮】轨道 / 填充 / 滑块全部对齐主播放器（= 参考 seekbar：
+ * 4px 轨道 rgba(255,255,255,0.3)、#FF6699 填充、12px 白滑块）。
+ * 自检页的条子以前是 10px 粗槽 + 14px 点，和主界面不是一套。 */
+.vd-hit {
+  height: 28px;
+  flex-direction: row;
+  align-items: center;
+}
+
+.vd-line {
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0px;
+  height: 4px;
+  flex-direction: row;
+  align-items: center;
+  border-radius: 2px;
+  background-color: rgba(255, 255, 255, 0.30);
+}
+
+.vd-fill {
+  height: 4px;
+  border-radius: 2px;
+  background-color: @accent-play;
+}
+
+.vd-knob {
+  width: 12px;
+  height: 12px;
+  border-radius: 6px;
+  background-color: #FFFFFF;
+}
+
+.vd-fs {
+  width: 40px;
+  height: 24px;
+  border-radius: 6px;
+  background-color: rgba(255, 255, 255, 0.14);
+  align-items: center;
+  justify-content: center;
+}
+
+.vd-fs:active {
+  opacity: 0.6;
+}
+
+.vd-fs-t {
+  font-size: 10px;
+  color: #ffffff;
+  text-align: center;
+}
+
+/* 同屏日志：3 行、10px、单行省略。高度 36 + 标题 13 = 49 */
+.lv-head {
+  height: 13px;
+  flex-direction: row;
+  align-items: center;
+}
+
+.lv-title {
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0px;
+  font-size: 10px;
+  color: @text-color-dim;
+  lines: 1;
+}
+
+.lv-body {
+  height: 36px;
+  flex-direction: column;
+}
+
+.lv-line {
+  font-size: 10px;
+  line-height: 12px;
+  color: #9FB0C0;
+  lines: 1;
+  text-overflow: ellipsis;
+}
+
+.btn-xs {
+  width: 26px;
+  height: 13px;
+  margin-left: 4px;
+  border-radius: 4px;
+  background-color: @accent-dim;
+  align-items: center;
+  justify-content: center;
+}
+
+.btn-text-xs {
+  width: 26px;
+  font-size: 9px;
+  color: #ffffff;
+  text-align: center;
+}

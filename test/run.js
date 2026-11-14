@@ -849,12 +849,126 @@ async function main() {
     const v5 = await c5.fetchView('BV1ZCeb6NEyM');
     assert.strictEqual(v5.ok, false);
   });
+  /* ==================== 分P / 合集（第十六轮） ====================
+   * 解析全部是纯函数，不建 client 也能测；但 fetchView 那条链要单独验一次
+   * 「pages / season 真的进了返回值」，否则页面会拿到空列表、页签永远不出现。 */
+  test('video_meta: 分P 解析（part 兜底 / 缺 cid 跳过 / 单P）', async () => {
+    const vm = await import('../src/services/bili/video_meta.js');
+    const pages = vm.parsePages({
+      pages: [
+        { cid: 101, page: 1, part: '第一段', duration: 61 },
+        { cid: 102, page: 2, part: '', duration: 62 },
+        { cid: 0, page: 3, part: '坏数据' }
+      ]
+    });
+    assert.strictEqual(pages.length, 2);
+    assert.strictEqual(pages[0].cid, 101);
+    assert.strictEqual(pages[0].title, '第一段');
+    assert.strictEqual(pages[1].title, 'P2'); // part 空 → P+序号
+    assert.strictEqual(pages[1].durationSec, 62);
+    assert.deepStrictEqual(vm.parsePages({}), []);
+    assert.deepStrictEqual(vm.parsePages(null), []);
+    // 单 P 也返回一条 —— 页面用它算 pageIndex，不能用 length===1 当"没分P"
+    assert.strictEqual(vm.parsePages({ pages: [{ cid: 7, page: 1, part: 'x' }] }).length, 1);
+  });
+
+  test('video_meta: 合集解析（多节 / bvid 只在 arc / 纯数字标题 / 顶层兜底）', async () => {
+    const vm = await import('../src/services/bili/video_meta.js');
+    const s = vm.parseSeason({
+      ugc_season: {
+        id: 9,
+        title: '某合集',
+        sections: [
+          {
+            title: '正片',
+            episodes: [
+              { bvid: 'BV1aa41111a1', cid: 1, title: '第一集', arc: { title: '第一集', duration: 100, pic: 'p1' } },
+              // bvid 只在 arc 里（早期响应形态）
+              { cid: 2, title: '第二集', arc: { bvid: 'BV1aa41111a2', title: '第二集', duration: 200 } },
+              // 标题是纯数字 → 用 arc.title
+              { bvid: 'BV1aa41111a3', cid: 3, title: '3', arc: { title: '真正的第三集', duration: 300 } },
+              // 坏 bvid → 跳过
+              { bvid: 'not-a-bv', cid: 4, title: '坏' }
+            ]
+          },
+          { title: '花絮', episodes: [{ bvid: 'BV1aa41111a4', cid: 5, title: '花絮一', arc: { duration: 10 } }] }
+        ]
+      }
+    });
+    assert.strictEqual(s.count, 4);
+    assert.strictEqual(s.sections.length, 2);
+    assert.strictEqual(s.sections[0].items.length, 3);
+    assert.strictEqual(s.sections[0].items[1].bvid, 'BV1aa41111a2');
+    assert.strictEqual(s.sections[0].items[2].title, '真正的第三集');
+    assert.strictEqual(s.sections[1].items[0].title, '花絮一');
+    // 不属于合集 / 空数据
+    assert.strictEqual(vm.parseSeason({}), null);
+    assert.strictEqual(vm.parseSeason({ ugc_season: { sections: [] } }), null);
+    // 老响应：episodes 在顶层
+    const old = vm.parseSeason({ ugc_season: { title: '老合集', episodes: [{ bvid: 'BV1aa41111a5', cid: 6, title: 'x' }] } });
+    assert.strictEqual(old.count, 1);
+    assert.strictEqual(old.sections[0].title, '老合集');
+  });
+
+  test('video_meta: 当前 P / 当前集的定位与时长格式', async () => {
+    const vm = await import('../src/services/bili/video_meta.js');
+    const pages = [{ cid: 11 }, { cid: 22 }, { cid: 33 }];
+    assert.strictEqual(vm.pageIndexOf(pages, 22), 1);
+    assert.strictEqual(vm.pageIndexOf(pages, 99), -1);
+    assert.strictEqual(vm.pageIndexOf(null, 11), -1);
+    const season = vm.parseSeason({
+      ugc_season: {
+        title: 'S',
+        sections: [
+          { title: 'a', episodes: [{ bvid: 'BV1aa41111a1', cid: 1 }, { bvid: 'BV1aa41111a2', cid: 2 }] },
+          { title: 'b', episodes: [{ bvid: 'BV1aa41111a3', cid: 3 }] }
+        ]
+      }
+    });
+    assert.deepStrictEqual(vm.episodeIndexOf(season, 'BV1aa41111a3'), { si: 1, ii: 0 });
+    assert.deepStrictEqual(vm.episodeIndexOf(season, 'BV1aa41111zz'), { si: -1, ii: -1 });
+    assert.strictEqual(vm.fmtDur(0), '');
+    assert.strictEqual(vm.fmtDur(61), '1:01');
+    assert.strictEqual(vm.fmtDur(3723), '1:02:03');
+  });
+
+  test('client: fetchView 带回分P与合集（页面页签的数据源）', async () => {
+    const c = createClient({
+      get: okGet({
+        code: 0,
+        data: {
+          cid: 101,
+          aid: 1,
+          title: '多P稿件',
+          desc: '简介正文',
+          duration: 180,
+          pages: [
+            { cid: 101, page: 1, part: 'P1', duration: 60 },
+            { cid: 102, page: 2, part: 'P2', duration: 70 },
+            { cid: 103, page: 3, part: 'P3', duration: 50 }
+          ],
+          ugc_season: {
+            id: 5,
+            title: '合集名',
+            sections: [{ title: '正片', episodes: [{ bvid: 'BV1aa41111a1', cid: 101, title: '第一集', arc: { duration: 60 } }] }]
+          }
+        }
+      })
+    });
+    const v = await c.fetchView('BV1ZCeb6NEyM');
+    assert.strictEqual(v.ok, true);
+    assert.strictEqual(v.pages.length, 3);
+    assert.strictEqual(v.pages[2].title, 'P3');
+    assert.strictEqual(v.desc, '简介正文');
+    assert.ok(v.season && v.season.count === 1, '合集必须被解析出来');
+    assert.strictEqual(v.season.title, '合集名');
+  });
+
   test('client: buildQuery 字符串透传、对象编码', () => {
     assert.strictEqual(buildQuery('a=1&b=%20x'), 'a=1&b=%20x');
     assert.strictEqual(buildQuery({ a: 1, b: 'x y' }), 'a=1&b=x%20y');
     assert.strictEqual(buildQuery(null), '');
-  });
-  test('client: describeBiliCode 收录/未收录码', () => {
+  });  test('client: describeBiliCode 收录/未收录码', () => {
     assert.ok(describeBiliCode(-12345).indexOf('-12345') >= 0);
     assert.ok(describeBiliCode(-412).indexOf('412') >= 0);
     assert.ok(describeBiliCode(-101).indexOf('未登录') >= 0);
@@ -1121,9 +1235,32 @@ async function main() {
   test('screen: 360p 视频区矩形（X6 Pro 逻辑 960x266 / 物理 266x960）', () => {
     const r = probeVideoRects(640, 360);
     assert.deepStrictEqual(r.logical, { x: 234, y: 0, width: 427, height: 240 });
-    assert.deepStrictEqual(r.physical, { x: 0, y: 299, width: 240, height: 427 });
+    assert.deepStrictEqual(r.physical, { x: 0, y: 300, width: 240, height: 426 });
     assert.strictEqual(isRectInsidePanel(r.physical), true);
   });
+  test('screen: 物理矩形四边必须偶数（NV12 chroma 相位，左侧绿线根因）', () => {
+    /* 真机：横屏 16:9 视频左侧一条纯绿细线。物理矩形原本是
+     * {x:12, y:271, w:257, h:457} —— native 的 normalize 只对齐了宽高，
+     * 起点 y=271 仍是奇数，UV 相位错位，最边缘一列取到 YUV 全 0（绿）。
+     * 现在 x/y 向上取偶、宽高向下取偶，四个数必须全偶。 */
+    const cases = [
+      [1920, 1080], [1080, 1920], [640, 360], [1920, 800], [3840, 1600]
+    ];
+    for (const [w, h] of cases) {
+      for (const r of [playVideoRects(w, h), playVideoRects(w, h, LIVE_VIDEO_AREA), probeVideoRects(w, h)]) {
+        const ph = r.physical;
+        assert.strictEqual(ph.x % 2, 0, 'x 必须偶数: ' + JSON.stringify(ph));
+        assert.strictEqual(ph.y % 2, 0, 'y 必须偶数: ' + JSON.stringify(ph));
+        assert.strictEqual(ph.width % 2, 0, 'width 必须偶数: ' + JSON.stringify(ph));
+        assert.strictEqual(ph.height % 2, 0, 'height 必须偶数: ' + JSON.stringify(ph));
+      }
+    }
+    /* 对齐最多挪 1px，不允许把画面缩小一截 */
+    const r = playVideoRects(1920, 1080);
+    assert.ok(Math.abs(r.physical.width - r.logical.height) <= 1);
+    assert.ok(Math.abs(r.physical.height - r.logical.width) <= 1);
+  });
+
   test('screen: fitLogicalRect 信箱适配', () => {
     const r = fitLogicalRect(1920, 1080);
     assert.strictEqual(r.width, 473); // 960x266 box：16:9 按高适配 → 473x266
@@ -1384,8 +1521,14 @@ async function main() {
     assert.strictEqual(w.calls.open, 1);
     assert.strictEqual(w.openedWith.userAgent, DEFAULT_UA);
     assert.strictEqual(w.openedWith.referer, REFERER);
-    assert.strictEqual(w.openedWith.rect.width, 240);
-    assert.strictEqual(w.openedWith.rect.height, 427);
+    /* 只守"16:9 不变形 + 宽度不越出面板列"：控制条高度一改（26→30）像素就变，
+     * 写死数字只会每次都要来改一遍。注意物理矩形是旋转过的（宽高互换），
+     * 所以"窄的那条"才是面板列方向。 */
+    const rc = w.openedWith.rect;
+    assert.ok(Math.abs(rc.width / rc.height - 9 / 16) < 0.02, '16:9 不许变形: ' + JSON.stringify(rc));
+    /* 自检页仍走"fit 到洞"的老路（它的洞是 16:9 整块，正好铺满），
+     * 所以这里守的是"不越出面板列宽 280"——主页播放页已经改成不 fit 的外框。 */
+    assert.ok(rc.width <= 280, '矩形不许越出面板列宽: ' + JSON.stringify(rc));
     const fails = w.events.filter((e) => e.state === 'fail');
     assert.strictEqual(fails.length, 0, JSON.stringify(fails));
     const okIds = w.events.filter((e) => e.state === 'ok').map((e) => e.id);
@@ -2359,7 +2502,11 @@ async function main() {
     assert.strictEqual(r.session.qn, 16);
     assert.strictEqual(r.session.durationMs, 206000);
     const o = w.calls.open[0];
-    assert.deepStrictEqual(o.rect, { x: 0, y: 299, width: 240, height: 427 });
+    /* 【第二十九轮】矩形 = 画面本身（fit 到中列全高 280 的框），且四个数
+     * 四边落到 16 网格：16:9 → 逻辑 457x257 → 物理 256x456 → 16 网格
+     * {16, 272, 256, 448}。驱动会把不在网格上的 x/y/w/h 圆整，多出的区域
+     * 没 buffer 写入 = YUV 0 = 绿；缩到网格是唯一能播放的消绿边方案。 */
+    assert.deepStrictEqual(o.rect, { x: 16, y: 272, width: 256, height: 448 });
     assert.strictEqual(o.userAgent, DEFAULT_UA);
     assert.strictEqual(o.referer, REFERER);
     assert.strictEqual(o.fps, HTML5_FPS); // 不锁死数值：锚定 openVideo 传递配置常量（v2.5.1 起 24）
@@ -2399,8 +2546,36 @@ async function main() {
     assert.strictEqual(r.session.cid, 777);
     assert.strictEqual(r.session.durationMs, 60000);
     assert.strictEqual(r.session.title, 'feed标题', 'item 标题优先');
-    // 16:9 横屏 → 视频区(448x240)内居中的横矩形
-    assert.deepStrictEqual(w.calls.open[0].rect, { x: 0, y: 299, width: 240, height: 427 });
+    // 16:9 横屏：物理 256x456 → 四边 16 网格 → {16,272,256,448}
+    assert.deepStrictEqual(w.calls.open[0].rect, { x: 16, y: 272, width: 256, height: 448 });
+  });
+  test('play_session: 多P稿件用当前P的时长（view.duration 是所有P之和）', async () => {
+    const w = fakePlayDeps();
+    w.client.fetchView = async () => ({
+      ok: true,
+      cid: 101,
+      duration: 180, /* 3P 之和 */
+      title: '多P稿件',
+      desc: '总简介',
+      width: 1920,
+      height: 1080,
+      pages: [
+        { cid: 101, page: 1, title: 'P1', durationSec: 60 },
+        { cid: 102, page: 2, title: 'P2', durationSec: 70 },
+        { cid: 103, page: 3, title: 'P3', durationSec: 50 }
+      ],
+      season: null
+    });
+    const r = await openVideo(w, { bvid: 'BV1ZCeb6NEyM', cid: 102, useCid: true, title: '' });
+    assert.strictEqual(r.ok, true, r.message);
+    assert.strictEqual(r.session.cid, 102, 'useCid 必须生效（切P靠它）');
+    /* 旧实现直接拿 view.duration → 播 P2 会显示 3:00，进度条永远走不到头，
+     * 片尾自动连播也不会触发。 */
+    assert.strictEqual(r.session.durationMs, 70000, '必须是 P2 自己的 70s，不是 180s');
+    assert.strictEqual(r.session.part, 'P2', 'part 用于左列标题「稿件 · P2」');
+    assert.strictEqual(r.session.title, '多P稿件', 'item.title 为空时用 view 的稿件标题');
+    assert.strictEqual(r.session.pages.length, 3);
+    assert.strictEqual(r.session.desc, '总简介', '简介必须来自本次 view，不能沿用上一集');
   });
   test('play_session: 竖屏稿件(1080x1920) → 物理竖柱 rect（不拉伸成横屏）', async () => {
     const w = fakePlayDeps();
@@ -2408,10 +2583,14 @@ async function main() {
     const r = await openVideo(w, { kind: 'video', bvid: 'BV1ZCeb6NEyM', cid: 1, durationSec: 1, title: '' });
     assert.strictEqual(r.ok, true, r.message);
     const rect = w.calls.open[0].rect;
-    // 信箱适配：逻辑 {380,0,135,240} → 物理 {0,445,240,135}（宽高互换的竖柱，比例=9:16 不变形）
-    assert.deepStrictEqual(rect, { x: 0, y: 445, width: 240, height: 135 });
-    assert.ok(rect.height < rect.width, '竖屏输出应为竖长方形');
-    // 输出比例 ≈ 源比例（不拉伸）：物理 h/w = 135/240 ≈ 1080/1920
+    /* 【第二十九轮 v3】竖屏也要落 16 网格（真机：竖屏左侧同样有绿线）：
+     * 物理 280x158 → 等比 256x144（缩到 91%，比例误差 0.34%）→ {16,432,256,144}。
+     * 旧注释留档：第二十五轮竖屏 fit 到 457x280 → 157x280，
+     * 物理宽高互换 {0, 936-(208+157)=571, 280, 157}。
+     * 关键是 plane 只有画面那么宽 —— 左右不会再有 add-borders 的绿幕，
+     * 多出来的黑由 UI 层（hole 之外的 fb 黑）提供。 */
+    assert.deepStrictEqual(rect, { x: 0, y: 416, width: 288, height: 160 });
+    assert.ok(rect.height < rect.width, '竖屏输出应为竖长方形（物理宽高互换后）');
     const outRatio = rect.height / rect.width;
     const srcRatio = 1080 / 1920;
     assert.ok(Math.abs(outRatio - srcRatio) < 0.02, 'ratio=' + outRatio);
@@ -3493,18 +3672,18 @@ async function main() {
   });
 
   // ---------------- 播放几何（213 + 469 + 278 = 960，用户手绘稿 m11950）----------------
-  test('screen: playVideoRects 16:9 居中，物理 {0,299,240,427}（真·旋转变换）', () => {
+  test('screen: playVideoRects 16:9 居中，物理 {0,300,240,426}（真·旋转变换）', () => {
     const r = playVideoRects(640, 360);
     assert.deepStrictEqual(r.logical, { x: 234, y: 0, width: 427, height: 240 });
-    assert.deepStrictEqual(r.physical, { x: 0, y: 299, width: 240, height: 427 });
+    assert.deepStrictEqual(r.physical, { x: 0, y: 300, width: 240, height: 426 });
     assert.strictEqual(BAR_WIDTH, 76);
     assert.strictEqual(BAR_WIDTH + r.logical.width + BAR_WIDTH, 579); // 16:9 只占 427
   });
   test('screen: 竖屏 playVideoRects → 物理竖柱（9:16 不变形）', () => {
     const r = playVideoRects(360, 640);
     assert.deepStrictEqual(r.logical, { x: 380, y: 0, width: 135, height: 240 });
-    assert.deepStrictEqual(r.physical, { x: 0, y: 445, width: 240, height: 135 });
-    // 比例守恒：物理 {w:240,h:135} 是逻辑 {w:135,h:240} 的转置 → h/w = 135/240 ≈ 1080/1920
+    assert.deepStrictEqual(r.physical, { x: 0, y: 446, width: 240, height: 134 });
+    // 比例守恒：物理 {w:240,h:134} 是逻辑 {w:135,h:240} 的转置 → h/w = 134/240 ≈ 1080/1920
     const src = 1080 / 1920;
     const out = r.physical.height / r.physical.width;
     assert.ok(Math.abs(out - src) < 0.02, 'src=' + src + ' out=' + out);
@@ -3561,14 +3740,14 @@ async function main() {
     assert.strictEqual(LIVE_VIDEO_AREA.width, VIDEO_AREA.width);
   });
 
-  test('screen: 直播 playVideoRects 16:9 → 逻辑 469x264、物理 {1,278,264,469}', () => {
+  test('screen: 直播 playVideoRects 16:9 → 逻辑 469x264、物理 {2,278,264,468}', () => {
     const live = playVideoRects(1920, 1080, LIVE_VIDEO_AREA);
     assert.deepStrictEqual(live.logical, { x: 213, y: 1, width: 469, height: 264 });
-    assert.deepStrictEqual(live.physical, { x: 1, y: 278, width: 264, height: 469 });
+    assert.deepStrictEqual(live.physical, { x: 2, y: 278, width: 264, height: 468 });
     // 点播同源视频仍是 240 高（回归防护：不能把默认 box 也改了）
     const vod = playVideoRects(1920, 1080);
     assert.deepStrictEqual(vod.logical, { x: 234, y: 0, width: 427, height: 240 });
-    assert.deepStrictEqual(vod.physical, { x: 0, y: 299, width: 240, height: 427 });
+    assert.deepStrictEqual(vod.physical, { x: 0, y: 300, width: 240, height: 426 });
   });
 
   test('screen: 直播矩形填满 266 列且不越出 LIVE_VIDEO_AREA（各比例）', () => {
@@ -3791,104 +3970,72 @@ async function main() {
   /* ==================== X7 Pro 适配回归 ==================== */
   const dp = await import('../src/services/device_profile.js');
 
-  test('device: X6 Pro 默认 profile 与旧硬编码完全一致（960x266 / 107 / plane 76）', () => {
-    const p = dp.buildProfile({ env: { width: 960, height: 266, model: '' } });
-    assert.strictEqual(p.name, 'x6p');
-    assert.strictEqual(p.cfg.width, 960);
-    assert.strictEqual(p.cfg.height, 266);
-    assert.strictEqual(p.panelXOffset, 107);
-    assert.strictEqual(p.planeId, 76);
-    assert.strictEqual(p.scale, 1);
-    assert.strictEqual(p.physical.height, 960);
-    assert.strictEqual(p.transpose, 2);
-  });
+  test('device: 写死两档 —— X7P 936x280 / X6P 960x266（不读 env / 无覆盖）', () => {
+    /* 【第二十四轮】用户要求「删除所有与自适应分辨率有关的代码，把 x7p 和 x6p
+     * 写死」。这里守两件事：
+     *   ① 两张常量表的取值就是真机定案值（X7 = 936x280/off0/auto/竖帧，
+     *      X6 = 960x266/off107/plane76/硬件缩放）；
+     *   ② 无论传什么 env / override，结果都不变 —— 自适应真的没了。 */
+    const x7 = dp.buildProfile({});
+    assert.strictEqual(x7.name, 'x7p', '缺省机型就是 X7 Pro');
+    assert.strictEqual(x7.source, 'fixed');
+    assert.strictEqual(x7.cfg.width, 936);
+    assert.strictEqual(x7.cfg.height, 280);
+    assert.strictEqual(x7.panelXOffset, 0, 'X7 的列偏移是 0（不是 (480-280)/2=100）');
+    assert.strictEqual(x7.planeId, -1, 'X7 交给 kmssink 自选平面');
+    assert.strictEqual(x7.swScale, 2, 'X7 走 videoscale 竖帧档（横帧档在本机是绿幕）');
+    assert.strictEqual(x7.bufScale, 100);
+    assert.strictEqual(x7.physical.height, 936, '物理面板行数 = 逻辑宽度');
 
-  test('device: 拿不到 env 时回落 X6 Pro，绝不给 X7P 参数', () => {
-    const p = dp.buildProfile({});
-    assert.strictEqual(p.name, 'x6p');
-    assert.strictEqual(p.source, 'default');
-    assert.strictEqual(p.planeId, 76);
-  });
-
-  test('device: X7 Pro 936x280 → 偏移 0 / plane auto+软件缩放 / 面板行 936', () => {
-    const p = dp.buildProfile({ env: { width: 936, height: 280, model: 'X7 Pro' } });
-    assert.strictEqual(p.name, 'x7p');
-    assert.strictEqual(p.cfg.width, 936);
-    assert.strictEqual(p.cfg.height, 280);
-    /*
-     * 【3.5.6 第五轮】列偏移必须是 0，不能用 (480-280)/2=100。
-     * 第三轮 B0 档（off=0）真机画面最大、上方黑边最少；第四轮删掉 0 档后
-     * 四档全用 100，用户「没有正常的，全部靠下」。JS 的 x 已是面板绝对
-     * 列坐标，native 再加 100 会把画面推出 280 宽逻辑带 → 只剩下方一截。
-     */
-    assert.strictEqual(p.panelXOffset, 0);
-    /*
-     * 2026-11-08 真机回归（第三次，四档截图）：A0（硬件缩放）那张是窄条，
-     * C1/D2（videoscale）至少有完整画面。所以 X7 默认走软件缩放，
-     * 并且 buffer 尺寸由 bufScale 控制（自选平面疑似 1:1 贴 buffer）。
-     */
-    assert.strictEqual(p.planeId, -1);
-    assert.strictEqual(p.swScale, 1, 'X7 默认走 videoscale（硬件缩放只出一条窄画面）');
-    assert.strictEqual(p.bufScale, 100, '默认 buffer 与矩形等大');
-    assert.strictEqual(p.physical.height, 936);
-  });
-
-  test('device: swScale 三档语义（0 硬件 / 1 互换 / 2 不互换）', () => {
-    const x6 = dp.buildProfile({ env: { width: 960, height: 266, model: '' } });
-    assert.strictEqual(x6.swScale, 0, 'X6 必须继续走硬件缩放');
-    const x7 = dp.buildProfile({ env: { width: 936, height: 280, model: 'X7 Pro' } });
-    assert.strictEqual(x7.swScale, 1, 'X7 默认走 videoscale 互换档');
-    /* 2 是免打包回退开关：某些固件的 mppvideodec 真的把 buffer 转成竖帧，
-     * 那时不该互换 videoscale 的目标宽高。storage 里写 {"swScale":2} 即可。 */
-    const fb = dp.buildProfile({
-      env: { width: 936, height: 280, model: 'X7 Pro' },
-      override: { swScale: 2 }
+    /* env / override 一律忽略：这是"写死"的硬约束 */
+    const ignored = dp.buildProfile({
+      env: { width: 480, height: 960, model: 'X7 Pro' },
+      override: { width: 1024, height: 600, panelXOffset: 100, swScale: 1 }
     });
-    assert.strictEqual(fb.swScale, 2);
-    const bad = dp.buildProfile({
-      env: { width: 936, height: 280, model: 'X7 Pro' },
-      override: { swScale: 9 }
-    });
-    assert.strictEqual(bad.swScale, 2, '越界值收敛到合法上界');
+    assert.strictEqual(ignored.cfg.width, 936, 'env 报面板尺寸也不能改变视口');
+    assert.strictEqual(ignored.panelXOffset, 0);
+    assert.strictEqual(ignored.swScale, 2, 'storage 覆盖不再生效');
+
+    const x6 = dp.buildProfile({ name: 'x6p' });
+    assert.strictEqual(x6.name, 'x6p');
+    assert.strictEqual(x6.cfg.width, 960);
+    assert.strictEqual(x6.cfg.height, 266);
+    assert.strictEqual(x6.panelXOffset, 107, 'X6 的 107 是 3.5.5 起验证过的硬编码');
+    assert.strictEqual(x6.planeId, 76);
+    assert.strictEqual(x6.swScale, 0, 'X6 保持硬件缩放');
+    assert.strictEqual(x6.barOverlay, false, 'X6 没有 add-borders 兜底，控制条不许浮在画面上');
+    assert.strictEqual(x7.barOverlay, true, 'X7 控制条浮在画面上（矩形不扣 32px）');
+    assert.strictEqual(x6.scale, 1);
+    assert.strictEqual(x6.transpose, 2);
   });
 
-  test('device: 几何四档齐全，每档都真正改变送到平面的像素', () => {
-    /* 3.5.6 第四轮：旧四档只改缩放方式/列偏移，四张真机截图的
-     * `playing out=253x450` 一模一样 —— 「没一个能占满」是必然的。
-     * 新四档必须覆盖「横帧/竖帧」×「原尺寸/放大」，且每档数字都不同。 */
-    assert.strictEqual(dp.RATIO_MODES.length, 4);
-    assert.deepStrictEqual(dp.RATIO_MODES.map((m) => m.label), ['A', 'B', 'C', 'D']);
-    assert.deepStrictEqual(dp.RATIO_MODES.map((m) => m.swScale), [1, 2, 1, 2]);
-    assert.deepStrictEqual(dp.RATIO_MODES.map((m) => m.bufScale), [100, 100, 190, 190]);
-    const combos = new Set(dp.RATIO_MODES.map((m) => m.swScale + '/' + m.bufScale));
-    assert.strictEqual(combos.size, 4, '四档必须是四种不同的几何，不能换汤不换药');
-    assert.strictEqual(dp.currentRatioMode({}), 0);
-    assert.strictEqual(dp.currentRatioMode({ ratioMode: 2 }), 2);
-    assert.strictEqual(dp.currentRatioMode({ ratioMode: 99 }), 0, '越界回落到 A');
+  test('device: 自适应入口已删除（readFalconEnv / 档位 / 覆盖开关都不再导出）', () => {
+    assert.strictEqual(dp.readFalconEnv, undefined, 'env 探测必须删除');
+    assert.strictEqual(dp.normalizeEnvViewport, undefined, '视口归一化必须删除');
+    assert.strictEqual(dp.RATIO_MODES, undefined, 'A/B/C/D 档位必须删除');
+    assert.strictEqual(dp.cycleRatioMode, undefined);
+    assert.strictEqual(dp.currentRatioMode, undefined);
+    /* 档位按钮也必须从自检页消失，否则用户点了没反应 */
     const vue = fsx.readFileSync(
       pathx.join(__dirname, '..', 'src', 'pages', 'diag', 'diag.vue'), 'utf8');
-    assert.ok(/onRatioTap/.test(vue) && /cycleRatioMode/.test(vue),
-      '自检页必须提供档位切换按钮');
-    assert.ok(/geomText/.test(vue) && /loadDeviceInfo\(\)/.test(vue),
-      '切档后必须刷新几何信息，否则四张截图读到的都是第一档');
+    assert.ok(!/onRatioTap/.test(vue), '自检页的档位按钮必须删掉');
+    assert.ok(!/readFalconEnv/.test(vue), '自检页不许再读 env');
   });
 
-  test('device: 列偏移 X7=0 / X6=107，切档不许把旧 offset 带回来', () => {
-    const x7 = dp.buildProfile({ env: { width: 936, height: 280, model: 'X7 Pro' } });
-    const x6 = dp.buildProfile({ env: { width: 960, height: 266, model: '' } });
-    assert.strictEqual(x7.panelXOffset, 0, 'X7 不能再套 (480-280)/2=100');
-    assert.strictEqual(x6.panelXOffset, 107, 'X6 的 107 是 3.5.5 起验证过的硬编码，不能跟着改');
-    const back = dp.buildProfile({
-      env: { width: 936, height: 280, model: 'X7 Pro' },
-      override: { panelXOffset: 100 }
-    });
-    assert.strictEqual(back.panelXOffset, 100, 'storage 覆盖仍能回到旧值做对照');
-    const src = fsx.readFileSync(
-      pathx.join(__dirname, '..', 'src', 'services', 'device_profile.js'), 'utf8');
-    const cycle = src.slice(src.indexOf('export async function cycleRatioMode'),
-                            src.indexOf('// 同步读取'));
-    assert.ok(/delete clean\.panelXOffset/.test(cycle),
-      '切档必须清掉旧档写过的 panelXOffset，否则第四轮四档会全部回落到 100');
+  test('device: swScale / 偏移 / bufScale 只认常量表，override 不再生效', () => {
+    /* 【第二十四轮】自适应删除后，swScale 只有两个合法值：
+     *   X7 = 2（videoscale 竖帧，横帧档在本机是绿幕）
+     *   X6 = 0（硬件缩放，0 拷贝）
+     * 以前 storage 的 bili_device_profile 能改这些值 —— 那正是"这次正常、
+     * 下次变扁"的来源（第十六轮 A/C 档留下 swScale=1 → 整片绿幕）。 */
+    const x7 = dp.buildProfile({ override: { swScale: 3, bufScale: 190, panelXOffset: 100 } });
+    assert.strictEqual(x7.swScale, 2, 'X7 恒为 2，override 无效');
+    assert.strictEqual(x7.bufScale, 100, 'bufScale 恒为 100');
+    assert.strictEqual(x7.panelXOffset, 0, '列偏移恒为 0');
+    const x6 = dp.buildProfile({ name: 'x6p' });
+    assert.strictEqual(x6.swScale, 0, 'X6 恒为硬件缩放');
+    assert.strictEqual(x6.bufScale, 100);
+    assert.strictEqual(x6.panelXOffset, 107);
   });
 
   test('diag: 日志页降噪 + KMS 平面几何置顶（一张截图能定案）', () => {
@@ -3902,16 +4049,65 @@ async function main() {
     assert.ok(/OPEN\|rect:\|video:\|pad-added/.test(vue), '几何关键行必须置顶');
   });
 
-  test('device: bufScale 钳制在 50..400，缺省 100', () => {
-    const mk = (v) => dp.buildProfile({
-      env: { width: 936, height: 280, model: 'X7 Pro' },
-      override: { bufScale: v }
-    });
-    assert.strictEqual(mk(undefined).bufScale, 100);
-    assert.strictEqual(mk(1).bufScale, 50);
-    assert.strictEqual(mk(999).bufScale, 400);
-    assert.strictEqual(mk(190).bufScale, 190);
-    assert.strictEqual(dp.buildProfile({}).bufScale, 100, 'X6 也不能被放大');
+  test('native: 不对源帧做固定裁切（回到原生比例）', () => {
+    /* 用户定案：「为什么要裁切，直接原生比例」。
+     *
+     * v5~v7 用 `videocrop left=16 right=16 top=16 bottom=16` 切掉解码帧最外圈
+     * 那条绿线。它治不了本：裁多少只能猜（8/16/32 视片源而定）、裁多了砍真画面、
+     * 还要在 do_open 里配"建失败去掉裁切重建"（每次起播多赔一次管线构建，
+     * 用户已反馈"打开视频慢了一些"）。绿线在源帧内容里，等比缩放只会把它
+     * 一起缩小，裁剪只是把可见区域往里挪，换个尺寸又从别的边露出来。
+     *
+     * 现在管线回到最朴素的一条：源帧等比缩到窗口，pixel-aspect-ratio 钉 1:1。
+     * 以后谁再想"裁一点消绿边"，先读 docs/player-chrome.md §24.13。 */
+    const src = fsx.readFileSync(
+      pathx.join(__dirname, '..', 'native', 'csrc', 'session', 'session.c'), 'utf8');
+    assert.strictEqual(src.indexOf('videocrop left=16 right=16 top=16 bottom=16'), -1,
+      '不许再对源帧做固定四边裁切');
+    assert.strictEqual(src.indexOf('has_videocrop'), -1, '不许再探测/插入源帧裁切插件');
+    assert.strictEqual(src.indexOf('use_vcrop'), -1, '裁切开关必须整段删除，不能留死代码');
+    assert.strictEqual(src.indexOf('retry WITHOUT crop'), -1,
+      '没有裁切就不该有"去裁切重建"的兜底 —— 那是起播变慢的来源');
+    /* 保留的那条：缩放后比例必须钉死 1:1，不许被源 PAR 拉变形 */
+    assert.ok(src.indexOf('pixel-aspect-ratio=1/1') > 0, '输出必须钉方像素');
+  });
+
+  test('native: 禁止再引入 videobox —— v4 真机管线协商失败、播放失败', () => {
+    /* 2026-11-14 20:45 真机：v4 用 videobox 补黑，结果直接「播放失败」
+     * 且退不出应用。已整段回退，16 网格重新由 JS 收（画面缩一点但能播）。
+     * 这条守卫防止以后又往管线里塞未经真机验证的元素。 */
+    const src = fsx.readFileSync(
+      pathx.join(__dirname, '..', 'native', 'csrc', 'session', 'session.c'), 'utf8');
+    assert.ok(src.indexOf('"videobox"') < 0, '不许再往管线里插 videobox');
+    assert.ok(src.indexOf('videobox left=') < 0, 'line 里不许出现 videobox');
+    assert.ok(src.indexOf('has_videobox') < 0, '探测函数也一并删掉');
+    assert.ok(/rect aligned to even x\/y\/size/.test(src), 'normalize 回到偶数对齐（v3 基线）');
+    assert.ok(src.indexOf('pad_x') < 0 && src.indexOf('pad_y') < 0, 'pad 字段必须删净');
+  });
+
+  test('device: X7 各种比例的物理矩形四边都必须在 16 网格上', () => {
+    /* 真机三版迭代：
+     *   只对齐偶数 → 绿线原样
+     *   只对齐尺寸 16 → 横屏绿线从左侧跑到上下（起点 x=12 被驱动圆整）
+     *   四边全 16 → 消失
+     * 尺寸不能独立取整，否则 4:3 / 21:9 会被拉变形；这里同时守比例。 */
+    const p = dp.buildProfile({});
+    const box = { x: p.videoArea.x, y: 0, width: p.videoArea.width, height: 280 };
+    const cases = [[1920, 1080], [1080, 1920], [2560, 1080], [1440, 1080], [720, 1280], [3840, 2160]];
+    for (const [w, h] of cases) {
+      const r = dp.playVideoRectsFor(w, h, p, false, box).physical;
+      for (const k of ['x', 'y', 'width', 'height']) {
+        assert.strictEqual(r[k] % 16, 0, w + 'x' + h + ' 的 ' + k + '=' + r[k] + ' 不在 16 网格');
+      }
+      const inRatio = Math.min(w, h) / Math.max(w, h);
+      const outRatio = Math.min(r.width, r.height) / Math.max(r.width, r.height);
+      assert.ok(Math.abs(outRatio - inRatio) <= 0.02,
+        w + 'x' + h + ' 比例失真: ' + outRatio + ' vs ' + inRatio);
+    }
+    /* X6 是 kmssink 硬件缩放，不参与 16 收边（否则白白缩小画面） */
+    const p6 = dp.buildProfile({ name: 'x6p' });
+    const r6 = dp.playVideoRectsFor(1920, 1080, p6, false, null).physical;
+    assert.strictEqual(r6.height % 16, 4, 'X6 保持 420，不做 16 收边');
   });
 
   test('device: 16:9 挖洞与下发矩形严格同源（画面必须铺满洞）', () => {
@@ -3921,10 +4117,20 @@ async function main() {
     const r = dp.playVideoRectsFor(640, 360, p, false, box);
     assert.deepStrictEqual(r.logical, { x: 0, y: 0, width: 498, height: 280 },
       '16:9 源适配到 16:9 洞必须零黑边、起点与洞一致');
-    assert.strictEqual(r.physical.width, 280);
-    assert.strictEqual(r.physical.height, 498);
-    assert.strictEqual(r.physical.x, 0);
-    assert.strictEqual(r.physical.y, 936 - 498, '面板行方向必须按逻辑宽度反算');
+    /* 【第二十九轮补】X7 走 videoscale + 自选 overlay 平面：物理矩形的
+     * 四个数必须全部落在 16 网格上（**起点也要**，否则驱动圆整后 plane
+     * 末尾几行没有 buffer 写入 = YUV 0 = 绿边）。
+     * 尺寸不能独立取整 —— 那会把比例拉变形，所以守「四边 16 对齐 +
+     * 比例误差 <=1.2%」。 */
+    for (const k of ['x', 'y', 'width', 'height']) {
+      assert.strictEqual(r.physical[k] % 16, 0,
+        k + ' 必须在 16 网格上: ' + JSON.stringify(r.physical));
+    }
+    const ratioIn = 280 / 498;
+    const ratioOut = r.physical.width / r.physical.height;
+    assert.ok(Math.abs(ratioOut - ratioIn) <= 0.03,
+      '比例不许被取整拉变形（16 网格最多容忍 3%）: ' + ratioOut + ' vs ' + ratioIn);
+    assert.ok(Math.abs(r.physical.y - (936 - 498)) <= 24, '面板行方向按逻辑宽度反算 + 对齐补偿');
     /* 不传 box 时仍是首页播放区，老调用方行为不变 */
     const home = dp.playVideoRectsFor(640, 360, p, false);
     assert.strictEqual(home.logical.x > 200, true);
@@ -3956,37 +4162,15 @@ async function main() {
       pathx.join(__dirname, '..', 'src', 'services', 'player.js'), 'utf8');
     const body = src.slice(src.indexOf('function deviceArgs'),
                            src.indexOf('export async function openSession'));
-    assert.ok(/sw === 1 \|\| sw === 2 \? sw : 0/.test(body),
-      'deviceArgs 不能把 2 压成 1，否则真机上没法免打包回退');
+    assert.ok(/sw >= 1 && sw <= 3 \? sw : 0/.test(body),
+      'deviceArgs 必须放行 1/2/3（2=不互换、3=bilinear 回退），否则真机上没法免打包对照');
     const jsapi = fsx.readFileSync(
       pathx.join(__dirname, '..', 'native', 'csrc', 'jsapi_player2.c'), 'utf8');
-    assert.ok(/req->swScale != 1 && req->swScale != 2/.test(jsapi),
-      'native 解析也必须保留 2 这一档');
+    assert.ok(/req->swScale < 1 \|\| req->swScale > 3/.test(jsapi),
+      'native 解析也必须保留 1/2/3 三档');
   });
 
-  test('device: X6 保持硬件缩放；显式改成自选平面时自动打开软件缩放', () => {
-    const x6 = dp.buildProfile({ env: { width: 960, height: 266, model: '' } });
-    assert.strictEqual(x6.planeId, 76, 'X6 必须继续用验证过的 76，不能跟着 X7 改');
-    assert.strictEqual(x6.swScale, 0, 'X6 走 0 拷贝的硬件缩放');
-
-    /* 用户在 X6 上手动覆盖成 planeId=-1：自选平面可能没有缩放器，
-     * swScale 必须跟着变 1，否则又会出现「画面被裁一条」。 */
-    const o = dp.buildProfile({
-      env: { width: 960, height: 266, model: '' },
-      override: { planeId: -1 }
-    });
-    assert.strictEqual(o.planeId, -1);
-    assert.strictEqual(o.swScale, 1);
-
-    /* 显式要 0 也能关掉（例如确认自选到了 Esmart） */
-    const off = dp.buildProfile({
-      env: { width: 936, height: 280, model: 'X7 Pro' },
-      override: { swScale: 0 }
-    });
-    assert.strictEqual(off.swScale, 0);
-  });
-
-  test('player: open 的第 19/20 位必须是 swScale / bufScale', () => {
+  test('player: open 的第 19~22 位必须是 swScale / bufScale / cropX / cropY', () => {
     /* native: req->swScale = argc>=19 ? arg 18 : 0；
      *         req->bufScale = argc>=20 ? arg 19 : 100。
      * JS 少传一位就会让 native 静默回落到旧几何 —— X7 上又变成一小块画面。 */
@@ -3994,6 +4178,8 @@ async function main() {
     const body = src.slice(src.indexOf('function deviceArgs'), src.indexOf('export async function openSession'));
     assert.ok(/panelOffset/.test(body) && /planeId/.test(body) && /swScale/.test(body) && /bufScale/.test(body),
       'deviceArgs 必须同时下发 panelOffset/planeId/swScale/bufScale');
+    assert.ok(/o\.cropX/.test(body) && /o\.cropY/.test(body),
+      'deviceArgs 必须下发全屏 cover 裁切量 cropX/cropY');
     const m = body.match(/return \[([\s\S]*?)\];/);
     assert.ok(m, 'deviceArgs 必须是一个数组字面量');
     // 按顶层逗号计数：intOr(...) 内部也有逗号，不能数 intOr( 也不能直接 split(',')
@@ -4004,10 +4190,10 @@ async function main() {
       else if (ch === ')') depth--;
       else if (ch === ',' && depth === 0) commas++;
     }
-    assert.strictEqual(commas + 1, 4, 'deviceArgs 必须是 4 个元素（第 17/18/19/20 位）');
+    assert.strictEqual(commas + 1, 6, 'deviceArgs 必须是 6 个元素（第 17~22 位）');
     assert.ok(/\bsw\b/.test(m[1]), '第 19 位必须来自 o.swScale 归一后的 sw 变量');
-    assert.ok(/sw === 1 \|\| sw === 2 \? sw : 0/.test(m[1]),
-      '第 19 位必须原样透传 0/1/2 三档（2 是免打包回退开关）');
+    assert.ok(/sw >= 1 && sw <= 3 \? sw : 0/.test(m[1]),
+      '第 19 位必须原样透传 0/1/2/3 四档（2=不互换、3=bilinear 回退）');
     assert.ok(/buf < 50 \? 50 : buf > 400 \? 400 : buf/.test(m[1]),
       '第 20 位必须把 bufScale 钳到 50..400');
   });
@@ -4056,8 +4242,9 @@ async function main() {
     assert.strictEqual(L.play.left, 213);
     assert.strictEqual(L.play.mid, 469);
     assert.strictEqual(L.play.right, 278);
-    assert.strictEqual(L.play.videoH, 240);
-    assert.strictEqual(L.play.seekH, 26);
+    assert.strictEqual(L.play.videoH, 236);
+    /* 控制条 30（3.5.6 第九轮从 26 抬上来，给 30 的圆键腾地方；画面相应少 4px） */
+    assert.strictEqual(L.play.seekH, 30);
     assert.strictEqual(L.play.infoH, 192);
     assert.strictEqual(L.play.btnsH, 74);
     assert.strictEqual(L.play.rightBodyH, 240);
@@ -4091,18 +4278,9 @@ async function main() {
     }
   });
 
-  test('layout: 网格右侧必须留 4~12px 余量（临界值会整列换行 → 右侧黑边）', () => {
-    for (const [w, h] of [[960, 266], [936, 280], [960, 280]]) {
-      const L = lay.buildLayout(w, h);
-      const slack = L.content.width - L.grid.padLeft - L.grid.width;
-      assert.ok(slack >= 4, w + 'x' + h + ' 网格余量只有 ' + slack + 'px，第 5 列会被挤到下一行');
-      assert.ok(slack <= 14, w + 'x' + h + ' 网格余量 ' + slack + 'px 过大，右侧会留黑边');
-    }
-  });
-
   test('layout: 播放页挖洞尺寸与 native 视频区完全一致', () => {
-    for (const [w, h] of [[960, 266], [936, 280]]) {
-      const p = dp.buildProfile({ env: { width: w, height: h, model: '' } });
+    for (const [w, h, nm] of [[960, 266, 'x6p'], [936, 280, 'x7p']]) {
+      const p = dp.buildProfile({ name: nm });
       const L = lay.buildLayout(w, h);
       assert.strictEqual(p.videoArea.x, L.play.left);
       assert.strictEqual(p.videoArea.width, L.play.videoW);
@@ -4135,9 +4313,12 @@ async function main() {
   });
 
   test('device: X6 Pro 新几何函数与旧 playVideoRects 逐字段相同', () => {
-    const p = dp.buildProfile({ env: { width: 960, height: 266, model: '' } });
+    const p = dp.buildProfile({ name: 'x6p' });
     for (const c of [[640, 360], [1920, 1080], [360, 640], [1280, 720]]) {
-      assert.deepStrictEqual(dp.playVideoRectsFor(c[0], c[1], p, false), playVideoRects(c[0], c[1]));
+      /* 点播盒子高度跟着控制条走（3.5.6 第九轮 26→30 → 236），不再写死 240；
+       * 这里守的是"新旧两套换算对同一个盒子结果完全相同"。 */
+      const vod = { x: p.videoArea.x, y: p.videoArea.y, width: p.videoArea.width, height: p.videoArea.height };
+      assert.deepStrictEqual(dp.playVideoRectsFor(c[0], c[1], p, false), playVideoRects(c[0], c[1], vod));
       assert.deepStrictEqual(
         dp.playVideoRectsFor(c[0], c[1], p, true),
         playVideoRects(c[0], c[1], LIVE_VIDEO_AREA)
@@ -4150,7 +4331,9 @@ async function main() {
     for (const c of [[640, 360], [1920, 1080], [360, 640], [2560, 1080], [720, 1280]]) {
       for (const live of [false, true]) {
         const r = dp.playVideoRectsFor(c[0], c[1], p, live).physical;
-        assert.ok(r.x >= 0 && r.x + r.width <= p.cfg.height,
+        /* 【v5】竖屏为了放大到 288x160，允许超出 280 列最多 8px（画面内容压在
+         * 相邻列边缘上，换来 25% 的画幅）；再多就是算错了。 */
+        assert.ok(r.x >= 0 && r.x + r.width <= p.cfg.height + 8,
           'x 越界 ' + c + ' live=' + live + ' -> ' + JSON.stringify(r));
         assert.ok(r.y >= 0 && r.y + r.height <= p.physical.height,
           'y 越界 ' + c + ' live=' + live + ' -> ' + JSON.stringify(r));
@@ -4159,40 +4342,949 @@ async function main() {
     }
   });
 
-  test('device: env 报面板尺寸（竖屏/近似方屏）时不许当画布宽', () => {
-    /* $falcon.env 的 deviceWidth/Height 文档只写「设备分辨率」。若固件报的是
-     * 旋转前的面板（480x960）而代码直接拿它当画布宽，整页会按 480 宽去排，
-     * 在 936 宽的屏幕上是灾难性错位。宽高比 < 2.2 一律视为不可用视口。 */
-    const a = dp.buildProfile({ env: { width: 480, height: 960, model: 'X7 Pro' } });
-    assert.strictEqual(a.cfg.width, 936);
-    assert.strictEqual(a.cfg.height, 280);
-    const b = dp.buildProfile({ env: { width: 480, height: 280, model: 'X7 Pro' } });
-    assert.strictEqual(b.cfg.width, 936);
-    const c = dp.buildProfile({ env: { width: 960, height: 480, model: 'X7 Pro' } });
-    assert.strictEqual(c.cfg.width, 936);
-    // 正常视口必须照用
-    const d = dp.buildProfile({ env: { width: 936, height: 280, model: '' } });
-    assert.strictEqual(d.cfg.width, 936);
-    assert.strictEqual(d.source, 'env');
+  /* ==================== 播放控件几何（play_chrome） ==================== */
+  const pc = await import('../src/services/play_chrome.js');
+
+  test('play_chrome: 四段恒等（顶栏/视频/字幕/控制条）与拥挤时的压缩顺序', () => {
+    /* 第十四轮：字幕带是单行 18（顶栏已删，字幕回到独立带子）。
+     * 这里测的是 planBands 的分段能力本身，不传 ccH 就用默认值。 */
+    const a = pc.planBands({ totalH: 280, chrome: true, cc: true, barH: 26, topH: 18 });
+    assert.strictEqual(a.top, 18);
+    assert.strictEqual(a.cc, pc.CC_BAND_H);
+    assert.strictEqual(a.cc, 18);
+    assert.strictEqual(a.bar, 26);
+    assert.strictEqual(a.video, 218);
+    assert.strictEqual(a.top + a.video + a.cc + a.bar, 280, '四段之和必须恒等于视口高');
+
+    /* 收起控件：顶栏与控制条归零，视频洞吃掉这两段，字幕带留在最底部
+     * （= 控制条原来的位置）—— 用户要求的「隐藏后字幕下移」。 */
+    const b = pc.planBands({ totalH: 280, chrome: false, cc: true, barH: 26 });
+    assert.strictEqual(b.top, 0);
+    assert.strictEqual(b.bar, 0);
+    assert.strictEqual(b.cc, 18);
+    assert.strictEqual(b.video, 262);
+    assert.strictEqual(b.top + b.video + b.cc + b.bar, 280);
+
+    /* 再点一次（控件出现）：字幕带上移，视频洞让出顶栏与控制条 */
+    const b2 = pc.planBands({ totalH: 280, chrome: true, cc: true, barH: 26 });
+    assert.ok(b2.video < b.video && b2.cc === b.cc, '展开控件只让画面变小，字幕带高度不变');
+
+    /* 直播：没有控件也没有字幕带，整列都是画面 */
+    const c = pc.planBands({ totalH: 280, live: true, cc: true, chrome: true });
+    assert.deepStrictEqual([c.top, c.cc, c.bar, c.video], [0, 0, 0, 280]);
+
+    /* 极小视口：先压字幕带，再压顶栏，控制条最后才让（唯一操作入口） */
+    const d = pc.planBands({ totalH: 130, chrome: true, cc: true, barH: 26, topH: 18 });
+    assert.strictEqual(d.video, 80);
+    assert.strictEqual(d.bar, 26, '控制条最后才让');
+    assert.strictEqual(d.cc, 6, '先压字幕带');
+    assert.strictEqual(d.top, 18);
+    const e = pc.planBands({ totalH: 110, chrome: true, cc: true, barH: 26, topH: 18 });
+    assert.strictEqual(e.cc, 0);
+    assert.strictEqual(e.top, 4);
+    assert.strictEqual(e.video, 80);
+    assert.strictEqual(e.top + e.video + e.cc + e.bar, 110);
   });
 
-  test('device: storage 覆盖能锁定真机实测的偏移与 plane-id', () => {
-    const p = dp.buildProfile({
-      env: { width: 936, height: 280, model: '' },
-      override: { name: 'x7p', planeId: 90, panelXOffset: 98, width: 960, height: 280 }
+  test('play_chrome: bandBox 只扣字幕带，不扣控制条（控制条浮在画面上）', () => {
+    /* 【第二十四轮】参考系统播放器的 bottom-bar 浮在画面上，视频矩形不因
+     * 控制条而缩短。这条断言守的就是"bar 参数不再参与扣减"。 */
+    const box = pc.bandBox({ x: 10, y: 0, width: 457, height: 280 }, { top: 18, cc: 28, bar: 26 });
+    assert.deepStrictEqual(box, { x: 10, y: 18, width: 457, height: 234 },
+      '只扣 top(18) 和 cc(28)，bar(26) 不许扣');
+    const withBar = pc.bandBox({ x: 10, y: 0, width: 457, height: 280 }, { top: 0, cc: 0, bar: 32 });
+    assert.deepStrictEqual(withBar, { x: 10, y: 0, width: 457, height: 280 },
+      '没有字幕时视频矩形就是中列全高（底部交给控制条覆盖）');
+    const full = pc.bandBox({ x: 10, y: 0, width: 457, height: 280 }, { top: 0, cc: 0, bar: 0 });
+    assert.deepStrictEqual(full, { x: 10, y: 0, width: 457, height: 280 });
+    const tiny = pc.bandBox({ x: 0, y: 0, width: 400, height: 120 }, { top: 40, cc: 40, bar: 40 });
+    assert.strictEqual(tiny.height, pc.CHROME_MIN_VIDEO, '再挤也不许压到 80 以下');
+    /* 与 device_profile 串起来：盒子变小 → 物理矩形等比变小，且仍在面板内 */
+    const p = dp.buildProfile({});
+    const big = dp.playFrameFor(p, false, null);
+    const small = dp.playFrameFor(p, false, box);
+    assert.ok(small.physical.width < big.physical.width, '画面必须跟着盒子一起缩小');
+    assert.ok(small.physical.y > big.physical.y, '顶栏让位后矩形整体下移');
+  });
+
+  test('play_chrome: 与 layout.js 串起来后四段仍恒等于视口高（X6/X7）', () => {
+    const cases = [[960, 266], [936, 280]];
+    for (let i = 0; i < cases.length; i++) {
+      const w = cases[i][0];
+      const h = cases[i][1];
+      const num = lay.layoutStyles(lay.buildLayout(w, h)).num;
+      assert.ok(num.seekH > 0, 'num.seekH 必须存在（控制条段高）');
+      const b = pc.planBands({
+        totalH: num.height, chrome: true, cc: true,
+        barH: num.seekH, topH: pc.CHROME_TOP_H, ccH: pc.CC_BAND_H
+      });
+      assert.strictEqual(b.top + b.video + b.cc + b.bar, h, w + 'x' + h + ' 四段必须等于视口高');
+      assert.ok(b.video > 100, '正常视口下画面不能被挤没');
+      /* 【第二十四轮】DOM 的洞（b.video）比 native 的盒子短一条控制条：
+       * 视频平面多画那 b.bar 行到控制条底下，被半透明控制条盖住。
+       * 这正是参考系统播放器"进度条浮在画面上"的几何。 */
+      const box = pc.bandBox({ x: 0, y: 0, width: num.videoW, height: num.height }, b);
+      assert.strictEqual(box.height, b.video + b.bar, '视频矩形 = 洞 + 控制条（覆盖）');
+      assert.strictEqual(box.y, b.top);
+      assert.strictEqual(box.y + box.height + b.cc, h, '视频矩形 + 字幕带必须铺到中列底部');
+    }
+  });
+
+  test('play_chrome: 控制条槽位守恒与轨道命中比例', () => {    const m = pc.barMetrics(469, { cc: true });
+    assert.strictEqual(m.pad * 2 + m.play + m.time * 2 + m.cc + m.track + pc.BAR_GAP * 4, 469);
+    assert.ok(m.track > 200 && m.track < 469);
+    const n = pc.barMetrics(469, { cc: false });
+    assert.ok(n.track > m.track, '没有字幕键时轨道更宽');
+    assert.strictEqual(n.pad * 2 + n.play + n.time * 2 + n.track + pc.BAR_GAP * 3, 469);
+    /* 第十四轮：控制条多了 ±10s（普通态 8 个槽位、全屏态再加返回 = 9 个）。
+     * 宽度守恒必须把它们算进来 —— CSS 里每个子元素都有自己的 width + margin-left，
+     * 少算一格就是「末尾全屏键被挤出可视区」那类事故。 */
+    const p2 = pc.barMetrics(457, { cc: true, fs: true, step: 2 });
+    assert.strictEqual(
+      p2.pad * 2 + p2.play + p2.time * 2 + p2.cc + p2.fs + p2.track +
+        p2.steps * p2.step + pc.BAR_GAP * 7, 457,
+      '普通态 8 槽位 + 7 间距必须正好等于中列宽 457');
+    const p3 = pc.barMetrics(936, { cc: true, fs: true, back: true, step: 2 });
+    assert.strictEqual(
+      p3.pad * 2 + p3.play + p3.time * 2 + p3.cc + p3.fs + p3.back + p3.track +
+        p3.steps * p3.step + pc.BAR_GAP * 8, 936,
+      '全屏态 9 槽位 + 8 间距必须正好等于视口宽 936');
+    assert.strictEqual(pc.trackRatioFromX(0, m.track), 0);
+    assert.strictEqual(pc.trackRatioFromX(m.track, m.track), 1);
+    assert.strictEqual(pc.trackRatioFromX(m.track * 2, m.track), 1, '快速拖动跑出轨道要钳住');
+    assert.strictEqual(pc.trackRatioFromX(-30, m.track), 0);
+    assert.strictEqual(pc.trackRatioFromX(m.track / 2, m.track), 0.5);
+    assert.strictEqual(pc.trackRatioFromX(NaN, m.track), null, '非数字触摸要能被忽略');
+    assert.ok(pc.barMetrics(200, { cc: true }).track >= 40, '窄列也要留出可点的轨道');
+  });
+
+  /* 【第十九轮】全屏四块：左黑边 | 视频列 | 间隙 | 面板。
+   * 这四个宽度是 DOM（.fs-pad / .pmid / .fs-panel）和 native 矩形共用的唯一来源，
+   * 必须满足「和 === 视口宽」且「互不重叠」——第十五~十八轮的 UI 错乱就是
+   * 这里靠 flex-grow + 动态 flex-direction，真机上方向没切、面板被挤出屏幕。 */
+  /* 【第十九轮】全屏 = 用新矩形重开一路流。
+   * 运行期改 render-rectangle 在 X7 上不可靠（videoscale 的 caps 建管线时定死），
+   * 真机表现就是「进出全屏后画面被压扁」。重开走 OPEN，caps 从第一帧就正确。 */
+  test('play_session: reopenSession 复用 open 参数、只换矩形与起点', async () => {
+    const ps = await import('../src/services/play_session.js');
+    const rect0 = { x: 100, y: 274, width: 253, height: 450 };
+    const openArgs = {
+      input: 'https://example.com/v.m4s', input2: 'https://example.com/a.m4s',
+      durationMs: 60000, fps: 30, audio: true, transpose: 2, rect: rect0,
+      panelOffset: 100, planeId: -1, swScale: 2, bufScale: 100,
+      audioDevice: '', userAgent: 'UA', referer: 'https://bilibili.com',
+      fpsCap: 30, isLive: false
+    };
+    let opened = null;
+    let closed = 0;
+    const ctx = {
+      player: {
+        stop: async () => { closed++; return { ok: true }; },
+        release: async () => ({ ok: true }),
+        openSession: async (o) => {
+          opened = o;
+          return { ok: true, outWidth: 1920, outHeight: 1080, fps: 30 };
+        }
+      }
+    };
+    const session = { openArgs: openArgs, rectPhysical: rect0 };
+    const next = { x: 0, y: 243, width: 280, height: 498 };
+    const r = await ps.reopenSession(ctx, session, 42500, next);
+    assert.ok(r.ok, '重开必须成功');
+    assert.strictEqual(closed >= 1, true, '重开前必须先 close（native 有 PLAYER_ALREADY_RUNNING）');
+    assert.strictEqual(opened.startMs, 42500, '必须从当前位置续播，不能从头开始');
+    assert.deepStrictEqual(opened.rect, next, '矩形必须换成新布局的');
+    assert.strictEqual(opened.input, openArgs.input, 'URL 复用，不重新取流');
+    assert.strictEqual(opened.input2, openArgs.input2, '音轨复用');
+    assert.strictEqual(opened.swScale, 2, '设备参数复用');
+    assert.deepStrictEqual(session.rectPhysical, next, '会话里的矩形要跟着更新（键盘避让会用）');
+
+    /* 没有 open 参数（取流中的占位会话）必须明确失败，不能静默当成功 */
+    const bad = await ps.reopenSession(ctx, {}, 0, next);
+    assert.strictEqual(bad.ok, false);
+
+    /* open 失败要带出错误码，调用方据此回滚 */
+    const ctx2 = {
+      player: {
+        stop: async () => ({ ok: true }),
+        release: async () => ({ ok: true }),
+        openSession: async () => ({ ok: false, code: 'PLAYER_BAD_RECT', error: 'x' })
+      }
+    };
+    const r2 = await ps.reopenSession(ctx2, { openArgs: openArgs }, 0, next);
+    assert.strictEqual(r2.ok, false);
+    assert.strictEqual(r2.code, 'PLAYER_BAD_RECT');
+  });
+
+  test('页面接线: 退后台关会话、回前台重开（绝不用 setVideoRect 改矩形）', () => {
+    const vue = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'pages', 'index', 'index.vue'), 'utf8');
+    /* 真机反馈：「上滑打开状态栏 → 随便打开一个界面 → 回退视频以后就变扁了」。
+     * 根因是上一版 onHide 用 setVideoRect(0,0,1,1) 藏平面、onShow 再 setVideoRect
+     * 改回来 —— 两次都是**运行期改矩形**，videoscale 的 caps 只能靠重建管线去追，
+     * 追不上画面就被压扁。
+     *
+     * 现在：onHide 直接关会话（用户最初的要求就是"打开状态栏时关闭视频"），
+     * onShow 用 openArgs + 当前矩形重开一路 —— caps 与矩形从第一帧就一致。 */
+    assert.ok(/onHide[\s\S]{0,1200}this\.hideForBackground\('onHide'\)/.test(vue),
+      'onHide 必须走 hideForBackground');
+    assert.ok(/onShow[\s\S]{0,600}this\.reopenForForeground\('onShow'\)/.test(vue),
+      'onShow 必须走 reopenForForeground（且要在恢复播放之前）');
+    assert.ok(/hideForBackground\(where\)[\s\S]{0,900}closeSession\(/.test(vue),
+      '退后台必须真的关闭会话');
+    assert.ok(/reopenForForeground\(where\)[\s\S]{0,1400}reopenSession\(/.test(vue),
+      '回前台必须用 reopenSession 重开（不是 setVideoRect）');
+    /* 两条老路径必须彻底消失：它们就是"变扁"的来源 */
+    assert.ok(!/hideVideoPlane|restoreVideoPlane/.test(vue),
+      '旧的"藏成 1x1 再恢复"必须删干净');
+    /* 注意：评论输入法那条路径（input.open 前把平面藏成 1x1）暂时保留 ——
+     * 输入法必须遮住视频，否则输入框看不见。它也是"改矩形"，但只在用户
+     * 主动发评论时发生，与本次真机反馈的前后台路径不同，单独留观察。 */
+  });
+
+  test('fullscreen: 纯 UI 换装 + 互斥独立 v-if + 不透明清屏', () => {
+    /* 【第二十八轮】真机截图：点全屏后左列仍是标题/简介/点赞投币收藏，
+     * 右栏评论列表、输入框与「退出全屏 / 播放键 / 进度条」叠成一团。
+     * 根因不是几何，是 falcon 对跨 <div>/<template> 的 v-else-if / v-else
+     * 链接不住（项目第 746 行注释早已记录），评论区那个 v-else 照样渲染；
+     * 第二十六轮又把左右列改成全透明，旧像素不擦除，进一步加重叠加。 */
+    const vue = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'pages', 'index', 'index.vue'), 'utf8');
+    const less = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'styles', 'base.less'), 'utf8');
+
+    // ① 左列 / 右栏一律用显式互斥的独立 v-if，不许再有跨标签 v-else 链
+    assert.ok(/<template v-if="!playFull">/.test(vue), '左列信息栏必须是独立 v-if');
+    assert.ok(/<template v-if="!playFull && interact\.visible">/.test(vue), '互动分支独立');
+    assert.ok(/<template v-if="!playFull && !interact\.visible && favOverlay">/.test(vue), '收藏夹分支独立');
+    assert.ok(/<template v-if="!playFull && !interact\.visible && !favOverlay">/.test(vue), '评论区分支独立');
+    assert.ok(!/<template v-else-if="interact\.visible">/.test(vue), '不许退回 v-else-if 链');
+    assert.ok(!/<template v-else-if="favOverlay">/.test(vue), '不许退回 v-else-if 链');
+    assert.ok(!/<!-- 评论区（默认） -->\s*<template v-else>/.test(vue), '评论区不许用 v-else');
+    assert.ok(/<div v-if="!ui\.chrome" class="fs-clear"/.test(vue), '清屏占位也要独立 v-if');
+
+    // ② 左右列必须真的画不透明黑擦掉上一屏像素（透明 = 残留 = 错乱）
+    assert.ok(/\.pleft-fs\s*\{[\s\S]{0,200}background-color:\s*#000000/.test(less), '.pleft-fs 必须不透明黑底');
+    assert.ok(/\.fsp\s*\{[\s\S]{0,200}background-color:\s*#000000/.test(less), '.fsp 必须不透明黑底');
+    assert.ok(/\.fs-clear\s*\{[\s\S]{0,200}background-color:\s*#000000/.test(less), '.fs-clear 必须不透明黑底');
+    assert.ok(!/leftColStyle|rightColStyle/.test(vue), '不许再用内联透明覆盖容器底色');
+
+    // ③ 全屏不改几何：不重开、不 cover、不参与矩形计算
+    const fsSeg = vue.slice(vue.indexOf('async setFullscreen'), vue.indexOf('onTopBack'));
+    assert.ok(!/await reopenSession\(/.test(fsSeg), '全屏切换不许重开流（真机上那条路径没生效）');
+    assert.ok(/full: false/.test(vue), 'bandPx 的 full 恒 false');
+    const rectSeg = vue.slice(vue.indexOf('async buildVideoRect'), vue.indexOf('async applyVideoGeometry'));
+    assert.ok(!/coverFrameFor/.test(rectSeg) && !/this\.playFull/.test(rectSeg),
+      '矩形计算里不许出现全屏/cover');
+    const ps = fsx.readFileSync(
+      pathx.join(__dirname, '..', 'src', 'services', 'play_session.js'), 'utf8');
+    assert.ok(!/if \(band\.full\)/.test(ps), '起播矩形也不许分全屏两支');
+
+    // ④ 第二十七轮底部 32px 修复不能被回退掉
+    assert.ok(/<hole v-if="!chromeBarVisible" class="bar-hole"/.test(vue), '底部 hole 仍在');
+    assert.ok(/v-if="ui\.chrome" class="fsp"/.test(vue), '全屏唯一进度条仍随点画面显隐');
+    assert.ok(/!this\.playFull/.test(vue), '中列全屏态不许再画第二条进度条');
+  });
+
+  test('device: coverFrameFor 计算正确（能力保留，第二十八轮起全屏不再启用）', () => {
+    const p = dp.buildProfile({});
+    const box = { x: 0, y: 0, width: p.cfg.width, height: p.cfg.height };
+    const c = dp.coverFrameFor(1920, 1080, p, box);
+    /* 全屏 cover 已不启用（§21），函数只作能力保留。矩形会被 v3 的 16 网格
+     * 收到 272x928，这里只守"整屏量级 + 宽高互换"。 */
+    assert.ok(Math.abs(c.physical.width - 280) <= 16, '宽度 = 视口高（物理宽高互换）');
+    assert.ok(Math.abs(c.physical.height - 936) <= 16, '高度 = 视口宽');
+    assert.strictEqual(c.physical.x % 2, 0);
+    assert.strictEqual(c.physical.y % 2, 0);
+    assert.ok(c.cropX > 0 && c.cropX < 200, '16:9 需要裁边且不能裁过头');
+    assert.strictEqual(c.cropX % 2, 0, 'NV12 裁切量必须偶数');
+    const wide = dp.coverFrameFor(3200, 900, p, box);
+    assert.ok(wide.cropY > 0, '超宽片源改为裁上下');
+    const tall = dp.coverFrameFor(1080, 1920, p, box);
+    assert.strictEqual(tall.cropX + tall.cropY, 0, '竖屏片源不 cover（会裁掉 80%）');
+    assert.ok(tall.physical.height < 936, '竖屏回落 contain，画面窄于视口');
+  });
+
+  test('底部黑边: 32px 恒有 DOM，隐藏时用真 <hole> 清掉旧像素', () => {
+    /* 【第二十七轮】用户澄清：「视频下方原先进度条的位置有黑边，左右不用管」。
+     * 根因是第二十四~二十六轮把整条 v-if 掉了 —— falcon 不主动清屏，
+     * 上一次那条半透明黑条的像素一直留在 fb 上。普通 rgba(0,0,0,0) div
+     * （.pmid-tap）也擦不掉旧像素，只有 <hole> 会把这块 fb 交还视频平面。 */
+    const vue = fsx.readFileSync(
+      pathx.join(__dirname, '..', 'src', 'pages', 'index', 'index.vue'), 'utf8');
+    const less = fsx.readFileSync(
+      pathx.join(__dirname, '..', 'src', 'styles', 'base.less'), 'utf8');
+    assert.ok(/<hole v-if="!chromeBarVisible" class="bar-hole"/.test(vue),
+      '控件收起时底部 32px 必须是真 <hole>（不是不渲染、也不是普通透明 div）');
+    assert.ok(/:style="ctrlBarStyle"/.test(vue), '带子与 hole 必须共用同一个 32px 几何');
+    assert.ok(/\.bar-hole\s*\{[\s\S]{0,400}rgba\(0, 0, 0, 0\)/.test(less),
+      '.bar-hole 必须是全透明挖孔');
+    assert.ok(!/class="pmid-tap"/.test(vue), '不许退回普通透明 div 占位');
+
+    /* 几何恒定：videoBoxStyle / stageStyle 不许再跟着 chromeBarVisible 变，
+     * 否则 280 洞 + 32 条 = 312 撑出中列，与 native 的 280 矩形不再同源。 */
+    const getter = vue.slice(vue.indexOf('videoBoxStyle()'), vue.indexOf('ccBarStyle()'));
+    assert.ok(!/chromeBarVisible/.test(getter), '视频洞尺寸不许跟控件显隐联动');
+    assert.ok(/height: this\.bands\.video \+ 'px'/.test(getter), '视频洞恒等于 bands.video');
+    const stage = vue.slice(vue.indexOf('stageStyle()'), vue.indexOf('seekTrackW()'));
+    assert.ok(!/chromeBarVisible/.test(stage), 'stage 高度也不许跟控件显隐联动');
+
+    const p = dp.buildProfile({});
+    const num = lay.layoutStyles(lay.buildLayout(936, 280)).num;
+    const nb = pc.planBands({
+      totalH: num.height, chrome: true, cc: false,
+      barH: num.seekH, topH: 0, ccH: pc.CC_BAND_H
     });
-    assert.strictEqual(p.planeId, 90);
-    assert.strictEqual(p.panelXOffset, 98);
-    assert.strictEqual(p.cfg.width, 960);
-    assert.strictEqual(p.scale, 1);
-    assert.strictEqual(p.source, 'override');
+    assert.strictEqual(nb.video + nb.cc + nb.bar, num.height, '三段恒等式');
+    const box = pc.bandBox(
+      { x: p.videoArea.x, y: p.videoArea.y, width: num.videoW, height: num.height }, nb);
+    assert.strictEqual(box.height, num.height,
+      'native 矩形不扣控制条：画面一直画到那 32px 底下（显示时透 18%，隐藏时全透）');
+    assert.ok(/playVideoRectsFor/.test(vue), '普通态仍 fit 到画面大小（不产生绿边）');
+  });
+
+  test('play_chrome: 全屏键占槽位后轨道宽度与命中测试同源', () => {
+    const fs2 = pc.barMetrics(936, { cc: true, fs: true });
+    assert.strictEqual(fs2.fs, pc.BAR_FS_W);
+    assert.strictEqual(
+      fs2.pad * 2 + fs2.play + fs2.time * 2 + fs2.cc + fs2.fs + fs2.track + pc.BAR_GAP * 5, 936,
+      '六个槽位 + 五个间距必须正好等于中列宽');
+    const noFs = pc.barMetrics(936, { cc: true });
+    assert.strictEqual(noFs.fs, 0);
+    assert.ok(fs2.track < noFs.track, '多一个全屏键，轨道必须让宽');
+    /* 普通态 457 宽：加完全屏键还得留出能点的轨道 */
+    const narrow = pc.barMetrics(457, { cc: true, fs: true });
+    assert.ok(narrow.track >= 40 && narrow.track < 457 - 150);
+    assert.strictEqual(pc.trackRatioFromX(narrow.track / 2, narrow.track), 0.5);
+  });
+
+  test('play_chrome: 全屏静默自动收起只在"真在播 + 控件亮着"时计时', () => {
+    assert.strictEqual(pc.canAutoHide('playing', { full: true, chrome: true }), true);
+    assert.strictEqual(pc.canAutoHide('playing', { full: false, chrome: true }), false,
+      '普通态不自动收（画面会自己变大，像 bug）');
+    assert.strictEqual(pc.canAutoHide('playing', { full: true, chrome: false }), false,
+      '已经收起了没什么可收');
+    assert.strictEqual(pc.canAutoHide('paused', { full: true, chrome: true }), false);
+    assert.strictEqual(pc.canAutoHide('loading', { full: true, chrome: true }), false);
+    assert.strictEqual(
+      pc.canAutoHide('playing', { full: true, chrome: true, busy: true }), false,
+      '拖进度条 / 互动题面期间不许打断');
+    assert.ok(pc.AUTO_HIDE_MS >= 2000 && pc.AUTO_HIDE_MS <= 6000,
+      '3.5s 量级（太短看不清，太长挡画面）');
+  });
+
+  test('play_chrome: 时间码 0 也要出字（进度条卡在开头的半个症状）', () => {
+    /* 控制条左边那格必须一直有字。用 feed.formatDuration 会返回空串 —— 真机上
+     * 视频刚起播/暂停在 00:00 时那格是空白，看起来就是"进度条卡在开头"。 */
+    assert.strictEqual(pc.formatClock(0), '00:00');
+    assert.strictEqual(pc.formatClock(999), '00:00');
+    assert.strictEqual(pc.formatClock(65000), '01:05');
+    assert.strictEqual(pc.formatClock(3671000), '1:01:11');
+    assert.strictEqual(pc.formatClock(-5000), '00:00', '负数（seek 后的黑帧位置）按 0');
+    assert.strictEqual(pc.formatClock(NaN), '00:00');
+    assert.strictEqual(pc.formatClock(60000 * 60), '1:00:00');
+  });
+
+  test('play_chrome: 控制条槽位在 pad=0 下恰好等于中列宽（全屏键不许被挤出去）', () => {
+    /* 真机反馈「没有全屏按钮」。根因是宽度被算两次：.chrome-bar 的 CSS padding
+     * 和 barMetrics 的 BAR_PAD_X 各扣一遍，若 falcon 的 width 含 padding，
+     * 最后那个槽位就落到可视区外。现在约定 pad=0、CSS 也不留 padding，
+     * 于是「子元素之和 === 中列宽」在两种盒模型下都成立。 */
+    assert.strictEqual(pc.BAR_PAD_X, 0, '控制条不许再有额外内边距（会和 CSS padding 双算）');
+    const cases = [457, 469, 936];
+    for (let i = 0; i < cases.length; i++) {
+      const w = cases[i];
+      const a = pc.barMetrics(w, { cc: true, fs: true });
+      assert.strictEqual(
+        a.pad * 2 + a.play + a.time * 2 + a.cc + a.fs + a.track + pc.BAR_GAP * 5, w,
+        w + ' 宽：六个槽位必须用满，一像素都不能多');
+      const b = pc.barMetrics(w, { cc: false, fs: true });
+      assert.strictEqual(
+        b.pad * 2 + b.play + b.time * 2 + b.fs + b.track + pc.BAR_GAP * 4, w,
+        w + ' 宽：没字幕键时同样守恒');
+    }
+    /* 30 的播放键要塞进 30 高的控制条：barH 的下限由 layout 保证，这里只守常量 */
+    assert.ok(pc.BAR_PLAY_W >= 28, '播放键至少 28（真机反馈原来 24 太小）');
+    assert.ok(pc.BAR_TIME_W >= 36 && pc.BAR_CC_W >= 28 && pc.BAR_FS_W >= 28);
+  });
+
+  test('index.vue: tick 里 seekWaiting 必须先声明后使用（TDZ 事故防回归）', () => {
+    /* 3.5.6 第八轮真机事故：tick 里先读了本函数末尾才 let 声明的 seekWaiting，
+     * 同作用域 TDZ → 每个 tick 都抛 ReferenceError，后半段（位置回写 / 字幕锚点 /
+     * 末尾判据）整段不执行。一轮下来四个功能同时哑火，看着像四个独立的 bug。
+     * 这条静态断言守着"声明必须在第一个使用点之前"这一条，以及 tick 的兜底。 */
+    const v = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'pages', 'index', 'index.vue'), 'utf8');
+    const decl = v.indexOf('let seekWaiting');
+    const use = v.indexOf('if (!seekWaiting)');
+    assert.ok(decl > 0, 'tick 里必须有 seekWaiting 的声明点');
+    assert.ok(use > decl, '先声明后使用（let/const 有 TDZ，晚声明会让整段 tick 抛错）');
+    assert.strictEqual(v.split('let seekWaiting').length, 2, '只允许一处声明（重复声明会 shadow）');
+    assert.ok(v.indexOf('poll tick 异常') > 0,
+      'tick() 必须挂 promise 兜底：任何抛错都要打点并让下一轮继续，不能静默吃掉后半段');
+    /* 控制条不能靠 CSS padding 留白（会和 barMetrics 双算，挤掉全屏键） */
+    const less = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'styles', 'base.less'), 'utf8');
+    const i = less.indexOf('.chrome-bar {');
+    assert.ok(i > 0, '.chrome-bar 规则必须存在');
+    const block = less.slice(i, i + 400);
+    assert.ok(!/padding/.test(block), '.chrome-bar 不许有 padding-left/right（宽度会双算）');
+    assert.ok(/background-color:\s*rgba\(0,\s*0,\s*0,\s*0\.8/.test(block),
+      '控制条底色必须是半透明黑（浮在画面上，透出下面的视频）');
+    const bi = less.indexOf('.cb-btn {');
+    const btn = less.slice(bi, bi + 400);
+    assert.ok(!/border-width/.test(btn), '.cb-btn 不许描边（width 是否含边框不可知，会撑爆控制条）');
+  });
+
+  /* ==================== 播放器资源（字幕 / 互动 / player v2） ==================== */
+  const pv2 = await import('../src/services/bili/player_v2.js');
+  const sub = await import('../src/services/bili/subtitle.js');
+  const itv = await import('../src/services/bili/interactive.js');
+
+  test('player/v2: 解析字幕轨道与互动 graph_version', () => {
+    const d = {
+      subtitle: {
+        allow_submit: false, lan: 'zh-Hans',
+        subtitles: [
+          { lan: 'ai-zh', lan_doc: '中文', ai_status: 1, id: 1, subtitle_url: '//aisubtitle.hdslb.com/bfs/a.json' },
+          { lan: 'en-US', lan_doc: 'English', ai_status: 0, id: 2, subtitle_url: 'https://i0.hdslb.com/bfs/b.json' },
+          { lan: '', lan_doc: '', id: 3 } // 无效轨必须丢弃
+        ]
+      },
+      interaction: { graph_version: 155446, id: 42 }
+    };
+    const r = pv2.parsePlayerV2(d);
+    assert.strictEqual(r.subtitles.length, 2);
+    assert.strictEqual(r.subtitles[0].lan, 'ai-zh');
+    assert.strictEqual(r.subtitles[0].ai, true);
+    assert.strictEqual(r.interactive, true);
+    assert.strictEqual(r.graphVersion, 155446);
+    assert.strictEqual(pv2.parsePlayerV2(null).interactive, false);
+    assert.strictEqual(pv2.parsePlayerV2({ subtitle: {} }).subtitles.length, 0);
+  });
+
+  test('player/v2: -352 风控时用 WBI 签名回落 wbi/v2', async () => {
+    const calls = [];
+    const client = {
+      request: async (path, query) => {
+        calls.push({ path: path, query: query });
+        if (path === '/x/player/v2') return { ok: false, stage: 'api', code: -352, message: '风控' };
+        return { ok: true, code: 0, data: { interaction: { graph_version: 155446 } } };
+      }
+    };
+    const r = await pv2.fetchPlayerV2(client, 'BV1UE411y7Wy', 127486603, {
+      mixinKey: 'a'.repeat(32), nowSec: () => 1702204169
+    });
+    assert.ok(r.ok && r.interactive && r.graphVersion === 155446);
+    assert.strictEqual(calls.length, 2);
+    assert.strictEqual(calls[1].path, '/x/player/wbi/v2');
+    assert.ok(/w_rid=/.test(calls[1].query), '签名串必须原样透传');
+    const bad = await pv2.fetchPlayerV2(client, 'nope', 1, {});
+    assert.ok(!bad.ok && bad.stage === 'param');
+  });
+
+  test('subtitle: 协议相对 URL 归一化与域白名单', () => {
+    const a = sub.normalizeSubtitleUrl('//aisubtitle.hdslb.com/bfs/x.json?auth_key=abc');
+    assert.ok(a.ok && a.url.indexOf('https://aisubtitle.hdslb.com/') === 0);
+    const b = sub.normalizeSubtitleUrl('http://i0.hdslb.com/a.json');
+    assert.ok(b.ok && b.url.indexOf('https://i0.hdslb.com/') === 0);
+    assert.ok(!sub.normalizeSubtitleUrl('https://evil.example.com/a.json').ok);
+    assert.ok(!sub.normalizeSubtitleUrl('').ok);
+    assert.ok(!sub.normalizeSubtitleUrl('https://hdslb.com/a b.json').ok);
+  });
+
+  test('subtitle: body 时轴解析、清洗与 cueAt 二分边界', () => {
+    const p = sub.parseSubtitleBody({
+      body: [
+        { from: 2.5, to: 4.0, content: '第二句<br>换行' },
+        { from: 0, to: 2, content: '第一句' },
+        { from: 5, to: 5, content: '零时长' },
+        { from: 8, to: 9, content: '   ' }
+      ]
+    });
+    assert.ok(p.ok && p.count === 3, '空格/空文本必须丢弃');
+    assert.strictEqual(p.cues[0].text, '第一句');
+    assert.strictEqual(p.cues[1].text, '第二句 换行');
+    assert.ok(p.cues[2].toMs >= p.cues[2].fromMs + 1200, 'to<=from 要给最小窗口');
+    assert.strictEqual(sub.cueAt(p.cues, 0), '第一句');
+    assert.strictEqual(sub.cueAt(p.cues, 1999), '第一句');
+    assert.strictEqual(sub.cueAt(p.cues, 2500), '第二句 换行');
+    assert.strictEqual(sub.cueAt(p.cues, 4500), '');
+    assert.strictEqual(sub.cueAt([], 100), '');
+    assert.ok(!sub.parseSubtitleBody({ body: [] }).ok);
+  });
+
+  test('subtitle: 选轨优先指定语言，其次中文，最后第一条', () => {
+    const tracks = [
+      { lan: 'en-US', lanDoc: 'English', url: 'https://i0.hdslb.com/en.json' },
+      { lan: 'ai-zh', lanDoc: '中文', url: 'https://i0.hdslb.com/zh.json' }
+    ];
+    assert.strictEqual(sub.pickSubtitleTrack(tracks, 'en-US').lan, 'en-US');
+    assert.strictEqual(sub.pickSubtitleTrack(tracks, '').lan, 'ai-zh');
+    assert.strictEqual(sub.pickSubtitleTrack(tracks, 'ja-JP').lan, 'ai-zh');
+    assert.strictEqual(sub.pickSubtitleTrack([], ''), null);
+    assert.strictEqual(sub.normalizeSubtitleSettings({ on: true, lan: 'ai-zh' }).on, true);
+  });
+
+  test('subtitle: 下载纯 JSON（无 code 字段）→ cues', async () => {
+    const client = {
+      getRawJson: async () => ({ ok: true, data: { body: [{ from: 1, to: 3, content: '你好' }] } })
+    };
+    const r = await sub.fetchSubtitleCues(client, '//aisubtitle.hdslb.com/bfs/a.json');
+    assert.ok(r.ok && r.count === 1 && r.cues[0].text === '你好');
+    const bad = await sub.fetchSubtitleCues(client, 'https://evil.example.com/a.json');
+    assert.ok(!bad.ok && bad.stage === 'param');
+  });
+
+  test('client: getRawJson 不按 code 判失败（字幕文件没有 code）', async () => {
+    const seen = [];
+    const c = createClient({
+      get: async (url, opts) => {
+        seen.push(url);
+        return { result: '{"font_size":0.4,"body":[{"from":0,"to":1,"content":"x"}]}' };
+      }
+    });
+    const r = await c.getRawJson('https://i0.hdslb.com/bfs/subtitle/a.json');
+    assert.ok(r.ok && Array.isArray(r.data.body) && r.data.body.length === 1);
+    assert.strictEqual(seen.length, 1);
+  });
+
+  test('interact: 解析上游 edgeinfo_v2 节点（含选项/变量/结局）', () => {
+    const node = itv.parseEdgeInfo({
+      title: '4', edge_id: 5556092, is_leaf: 0,
+      story_list: [
+        { node_id: 1, edge_id: 1, title: '片头', cid: 127486603, cursor: 0 },
+        { node_id: 5556092, edge_id: 5556092, title: '4', cid: 125499378, is_current: 1, cursor: 15 }
+      ],
+      edges: {
+        questions: [{
+          type: 2, duration: -1, pause_video: 1,
+          choices: [
+            { id: 5556133, cid: 125499249, option: 'A 砍死萌新', platform_action: 'JUMP 5556133 125499249', condition: '$H7g_64_PG2EVS>=1.00 && $H7g_64_PG2EVS<=80.00', is_default: 1 },
+            { id: 5556135, cid: 0, option: 'C 直接失败', platform_action: 'JUMP 5556135 125502707', condition: '' }
+          ]
+        }]
+      },
+      preload: { video: [{ aid: 73267982, cid: 125499249 }] },
+      hidden_vars: [{ id_v2: '$H7g_64_PG2EVS', value: 97, type: 2 }]
+    }, 0);
+    assert.strictEqual(node.cid, 125499378, '当前片段 cid 取 story_list.is_current');
+    assert.strictEqual(node.edgeId, 5556092);
+    assert.strictEqual(node.choices.length, 2);
+    assert.strictEqual(node.choices[1].cid, 125502707, 'cid 缺失时用 platform_action 的 JUMP 兜底');
+    assert.strictEqual(node.choices[0].isDefault, true);
+    assert.strictEqual(node.choices[0].condition.indexOf('$H7g'), 0);
+    assert.strictEqual(node.preload.length, 1);
+    assert.strictEqual(node.isLeaf, false);
+  });
+
+  test('interact: 真实 edgeinfo_v2 —— story_list 是回溯链，cid 必须听调用方', () => {
+    /* 抓包来源：av73267982 / graph_version=1762245（2026-11-08 匿名请求）。
+     * 用 edge_id=48360986 请求「1 第一循环」时，story_list 仍返回
+     * 「0 片头 / cid=245682070 / is_current=1」—— 拿它当当前 cid 会永远重播上一段。 */
+    const data = {
+      title: '1 第一循环', edge_id: 48360986, is_leaf: 0,
+      story_list: [{
+        node_id: 1, edge_id: 1, title: '0 片头', cid: 245682070,
+        start_pos: 27000, is_current: 1, cursor: 0
+      }],
+      edges: {
+        questions: [{
+          type: 2, duration: -1, pause_video: 1, start_time_r: 300,
+          choices: [
+            { id: 48360987, cid: 125501208, option: 'A 相信告示牌，继续向前', platform_action: 'JUMP 48360987 125501208', is_default: 1 },
+            { id: 48360988, cid: 125502505, option: 'B 有动静？回头看一眼', platform_action: 'JUMP 48360988 125502505', native_action: '$lMQqQ994Sk=3.00;$Zh4JACIiId=$Zh4JACIiId+1.00' }
+          ]
+        }]
+      }
+    };
+    const n = itv.parseEdgeInfo(data, 125501208);
+    assert.strictEqual(n.cid, 125501208, 'cid 必须用正在播的那一段，不能信 story_list');
+    assert.strictEqual(n.edgeId, 48360986);
+    assert.strictEqual(n.question.type, 2);
+    assert.strictEqual(n.question.pauseVideo, true);
+    assert.strictEqual(n.question.autoJump, false);
+    assert.strictEqual(n.question.leadMs, 3000, 'start_time_r=300 → 3.00s');
+    assert.strictEqual(n.question.durationMs, 0, '-1 = 不限时');
+    assert.strictEqual(n.choices[0].auto, false);
+    /* 没有 fallback 时才退回 story_list（旧行为保底） */
+    assert.strictEqual(itv.parseEdgeInfo(data, 0).cid, 245682070);
+  });
+
+  test('interact: type=0 自动跳转片段与题面窗口', () => {
+    const n0 = itv.parseEdgeInfo({
+      title: '12', edge_id: 12, is_leaf: 0,
+      edges: {
+        questions: [{
+          type: 0, duration: -1, pause_video: 0,
+          choices: [{ id: 48361012, cid: 125505222, option: 'A ', platform_action: 'JUMP 48361012 125505222', is_default: 1 }]
+        }]
+      }
+    }, 125505222);
+    assert.strictEqual(n0.question.autoJump, true);
+    assert.strictEqual(n0.question.pauseVideo, false);
+    assert.strictEqual(n0.choices[0].auto, true, '空文本选项不是给人点的');
+    const plan0 = itv.segmentEndPlan(n0, itv.visibleChoices(n0, {}));
+    assert.strictEqual(plan0.kind, 'auto');
+    assert.strictEqual(plan0.choice.cid, 125505222);
+    assert.strictEqual(plan0.delayMs, itv.AUTO_JUMP_DELAY_MS);
+    /* 题面窗口：3s 提前量 / 10s 倒计时 / 单位与钳制 */
+    assert.strictEqual(itv.questionLeadMs(300), 3000);
+    assert.strictEqual(itv.questionLeadMs(0), itv.CHOICE_LEAD_MS);
+    assert.strictEqual(itv.questionDurationMs(10000), 10000);
+    assert.strictEqual(itv.questionDurationMs(10), itv.MIN_CHOICE_COUNTDOWN_MS);
+    assert.strictEqual(itv.questionDurationMs(-1), 0);
+    assert.strictEqual(itv.questionDurationMs(1), itv.MIN_CHOICE_COUNTDOWN_MS);
+    assert.strictEqual(itv.shouldShowChoices(7000, 10000, 3000), true);
+    assert.strictEqual(itv.shouldShowChoices(6999, 10000, 3000), false);
+  });
+
+  test('interact: 片段结束计划（结局 / 自动跳 / 暂停等选择 / 默认项）', () => {
+    const q = (over) => itv.parseEdgeInfo({
+      is_leaf: 0,
+      edges: { questions: [Object.assign({ type: 2, duration: -1, pause_video: 1, start_time_r: 300 }, over || {})] }
+    }, 1);
+    const choice = { id: 2, cid: 22, option: 'B', isDefault: true };
+    assert.deepStrictEqual(itv.segmentEndPlan({ isLeaf: 1 }, [choice]), { kind: 'leaf' });
+    assert.deepStrictEqual(itv.segmentEndPlan(q(), [choice]), { kind: 'wait', choice: choice, countdownMs: 0 });
+    assert.deepStrictEqual(itv.segmentEndPlan(q({ duration: 10000 }), [choice]), { kind: 'wait', choice: choice, countdownMs: 10000 });
+    assert.deepStrictEqual(
+      itv.segmentEndPlan(q({ pause_video: 0 }), [choice]),
+      { kind: 'auto', choice: choice, delayMs: itv.AUTO_CHAIN_DELAY_MS }
+    );
+    assert.deepStrictEqual(itv.segmentEndPlan(q({ type: 0, pause_video: 0 }), [choice]).kind, 'auto');
+    assert.deepStrictEqual(itv.segmentEndPlan(q(), []), { kind: 'wait', choice: null, countdownMs: 0 });
+    /* 复合赋值兼容（真实稿目前只用 $x=$x+1.00） */
+    const v = itv.applyNativeAction('$x+=2;$y*=3', { $x: 1, $y: 2 });
+    assert.strictEqual(v.$x, 3);
+    assert.strictEqual(v.$y, 6);
+  });
+
+  test('interact: 条件表达式（比较 / && / || / 未知变量 / 不可解析）', () => {
+    const vars = { '$a': 50, '$b': 0 };
+    assert.strictEqual(itv.evalCondition('$a>=1.00 && $a<=80.00', vars), true);
+    assert.strictEqual(itv.evalCondition('$a>80 || $b==0', vars), true);
+    assert.strictEqual(itv.evalCondition('$a<10 && $b!=0', vars), false);
+    assert.strictEqual(itv.evalCondition('$missing==0', vars), true, '未知变量按 0 解析');
+    assert.strictEqual(itv.evalCondition('', vars), true);
+    assert.strictEqual(itv.evalCondition('this is not an expression @@', vars), true, '解析不了不能藏选项');
+    assert.strictEqual(itv.evalExpression('2+3*4', {}), 14);
+    assert.strictEqual(itv.evalExpression('(2+3)*4', {}), 20);
+  });
+
+  test('interact: native_action 赋值、累积与随机变量刷新', () => {
+    const v1 = itv.applyNativeAction('$x=1;$y=$x+2', {});
+    assert.strictEqual(v1.$x, 1);
+    assert.strictEqual(v1.$y, 3);
+    const v2 = itv.applyNativeAction('$y=$y+1', v1);
+    assert.strictEqual(v2.$y, 4);
+    assert.strictEqual(v1.$y, 3, '不能改入参');
+    const merged = itv.mergeHiddenVars({ '$x': 9 }, [
+      { id_v2: '$x', value: 0, type: 1 },
+      { id_v2: '$r', value: 97, type: 2 }
+    ]);
+    assert.strictEqual(merged.$x, 9, '普通变量保留本地累积值');
+    assert.strictEqual(merged.$r, 97);
+    const merged2 = itv.mergeHiddenVars(merged, [{ id_v2: '$r', value: 12, type: 2 }]);
+    assert.strictEqual(merged2.$r, 12, '随机值每节点刷新');
+  });
+
+  test('interact: 可见选项条件过滤、默认项、连播窗口与片段 item', () => {
+    const node = {
+      choices: [
+        { id: 1, cid: 11, option: '低', condition: '$v>=1 && $v<=80', isHidden: false },
+        { id: 2, cid: 22, option: '高', condition: '$v>=81', isHidden: false, isDefault: true },
+        { id: 3, cid: 33, option: '隐藏', condition: '', isHidden: true }
+      ]
+    };
+    const low = itv.visibleChoices(node, { $v: 50 });
+    assert.deepStrictEqual(low.map((c) => c.id), [1]);
+    assert.strictEqual(itv.defaultChoice(low), null);
+    const high = itv.visibleChoices(node, { $v: 95 });
+    assert.strictEqual(itv.defaultChoice(high).cid, 22);
+    /* 条件全不满足时退回所有非隐藏项，不能把用户锁死 */
+    assert.strictEqual(itv.visibleChoices({ choices: [node.choices[0]] }, { $v: 999 }).length, 1);
+    assert.strictEqual(itv.shouldShowChoices(2000, 10000, 8000), true);
+    assert.strictEqual(itv.shouldShowChoices(1000, 10000, 8000), false);
+    assert.strictEqual(itv.shouldShowChoices(9999, 0), false);
+    const item = itv.buildSegmentItem({ bvid: 'BV1UE411y7Wy', title: '互动' }, node, high[0]);
+    assert.strictEqual(item.cid, 22);
+    assert.strictEqual(item.useCid, true);
+    assert.strictEqual(item.edgeId, 2);
+  });
+
+  test('interact: edgeinfo_v2 请求参数与失败归一', async () => {
+    const seen = [];
+    const client = {
+      request: async (path, q) => {
+        seen.push({ path: path, q: q });
+        return { ok: true, code: 0, data: { title: '片头', edge_id: 1, edges: { questions: [] } } };
+      }
+    };
+    const r = await itv.fetchEdgeInfo(client, 'BV1UE411y7Wy', 155446, 0);
+    assert.ok(r.ok && r.node.title === '片头');
+    assert.strictEqual(seen[0].path, '/x/stein/edgeinfo_v2');
+    assert.strictEqual(seen[0].q.graph_version, 155446);
+    assert.strictEqual(seen[0].q.edge_id, undefined, '0/留空 = 起始模块');
+    const bad = await itv.fetchEdgeInfo(client, 'BV1UE411y7Wy', 0, 0);
+    assert.ok(!bad.ok && bad.stage === 'param');
+  });
+
+  test('playurl: durl 回退也要带 timelength（互动片段时长）', () => {
+    const r = parseHtml5Response({
+      ok: true, code: 0,
+      data: { timelength: 82000, durl: [{ url: 'https://upos.bilivideo.com/a.flv' }] }
+    });
+    assert.ok(r.ok);
+    assert.strictEqual(r.durationMs, 82000);
+  });
+
+  test('device: 字幕保留带让物理视频矩形同步收窄', () => {
+    const p = dp.buildProfile({ env: { width: 936, height: 280, model: 'X7 Pro' } });
+    const full = dp.playVideoRectsFor(640, 360, p, false, null);
+    const box = {
+      x: p.videoArea.x, y: p.videoArea.y,
+      width: p.videoArea.width, height: p.videoArea.height - sub.CC_BAR_H
+    };
+    const small = dp.playVideoRectsFor(640, 360, p, false, box);
+    assert.ok(small.physical.width < full.physical.width, '矩形必须跟着洞一起缩小');
+    assert.ok(small.physical.height <= full.physical.height, '信箱适配后宽度也不许变大');
+    assert.ok(small.physical.x >= 0 && small.physical.y >= 0, '缩小后仍在面板内');
+  });
+
+  test('页面接线: 字幕带/选项面板/连播入口都必须在主页落地', () => {
+    const vue = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'pages', 'index', 'index.vue'), 'utf8');
+    const less = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'styles', 'base.less'), 'utf8');
+    assert.ok(/planBands\(/.test(vue) && /videoBoxStyle/.test(vue), '中列四段几何必须由 planBands 驱动');
+    assert.ok(/bandPx\(\)/.test(vue) && /applyVideoGeometry/.test(vue), '控件/字幕变化要热更新视频矩形');
+    assert.ok(/handleSegmentEnd\(\)/.test(vue) && /scheduleAutoChain/.test(vue), '末尾要触发连播');
+    assert.ok(/segmentEndPlan/.test(vue) && /startChoiceCountdown/.test(vue), '片尾按题型等选择/自动跳');
+    assert.ok(/it\.visible = false/.test(vue) && /interact\.pending/.test(vue), '新片段不能一进来就抢评论区');
+    assert.ok(/onChoiceTap/.test(vue) && /gotoEdge/.test(vue) && /onInteractBack/.test(vue), '每段选项/回退');
+    assert.ok(/cc-bar/.test(vue) && /\.cc-bar/.test(less) && /\.ip-choice/.test(less));
+    /* 悬浮控件：一条底部控制条（返回/播放/时间/轨道/±10s/字幕/全屏）。
+     * 第十四轮删掉顶端那条 18px 标题带 —— 用户要「视频占满、进度条别占地方」，
+     * 这块屏上省下的每一像素都直接变成画面宽度。标题在左列本来就有，
+     * 暂停标记改由播放键（暂停态实心品牌粉）承载。 */
+    assert.ok(/chrome-bar/.test(vue) && /\.chrome-bar/.test(less), '底部控制条要落地');
+    assert.ok(!/class="chrome-top"/.test(vue), '顶栏不许再回来（它吃掉 18px 画面高度）');
+    assert.ok(/onVideoTap/.test(vue) && /setChrome\(/.test(vue), '单击画面显隐控件');
+    assert.ok(/cb-back/.test(vue) && /\.cb-back/.test(less), '全屏态返回键要在控制条里');
+    assert.ok(/cb-step/.test(vue) && /\.cb-step/.test(less), '±10s 要在控制条里');
+    assert.ok(/cb-play-on/.test(vue) && /\.cb-play-on/.test(less), '暂停标记由播放键承载');
+    assert.ok(/pl-tv/.test(vue) && /\.pl-tv/.test(less) && /startLoadingAnim/.test(vue), '加载动画要落地');
+    const ps = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'services', 'play_session.js'), 'utf8');
+    assert.ok(/item\.useCid/.test(ps), '播放链必须支持互动片段 cid 覆盖');
+    assert.ok(/bandPx/.test(ps) && /bandBox/.test(ps), 'openVideo 必须把顶栏/字幕/控制条算进矩形');
+    assert.ok(/band\.full/.test(ps), '全屏态的信箱盒子必须从视口原点起（左右列让位）');
+  });
+
+  test('页面接线: 全屏（左右列让位 + 自动收起 + 顶栏字幕）+ 六档跳转键', () => {
+    const vue = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'pages', 'index', 'index.vue'), 'utf8');
+    const less = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'styles', 'base.less'), 'utf8');
+    /* 全屏：状态、让位、矩形、退出 —— 少一个就会出现"点了没反应"或"画面和挖洞错位" */
+    assert.ok(/ui\.full/.test(vue) && /playFull\(\)/.test(vue), '全屏状态必须落在页面上');
+    assert.ok(/onToggleFull/.test(vue) && /midStyle/.test(vue), '全屏必须改中列宽度');
+    assert.ok(/!playFull/.test(vue), '左右两列在全屏态必须让位');
+    assert.ok(/full: this\.playFull/.test(vue), '分段几何要把全屏标记带进去');
+    assert.ok(/exitFullForInteract/.test(vue), '互动题面出现必须先退全屏（否则没有可点的地方）');
+    assert.ok(/canAutoHide/.test(vue) && /scheduleAutoHide/.test(vue) && /clearAutoHide/.test(vue),
+      '全屏态控件要能静默自动收起');
+    /* 字幕：独立的 18px 单行带（第十四轮顶栏删掉后回到这里） */
+    assert.ok(/ccBarVisible/.test(vue) && /class="cc-bar"/.test(vue) && /\.cc-bar/.test(less),
+      '字幕必须是独立的一条 18px 带子');
+    /* 【第十九轮】带子"让出的像素"和"画的像素"必须一对一：只要 bands.cc > 0
+     * 就必须渲染这条黑带（没有台词时是空黑），否则那 18px 是透明洞，
+     * 上一屏的控制条会透出来 —— 真机「全屏多出一条进度条」的根因之一。 */
+    assert.ok(/ccBarVisible\(\)\s*\{[\s\S]{0,120}return this\.bands\.cc > 0;/.test(vue),
+      '字幕带的渲染条件只能看几何（bands.cc），不能看"当前有没有台词"');
+    assert.ok(/\.cc-bar\s*\{[\s\S]*?background-color:\s*#000000/.test(less),
+      '字幕带必须铺纯黑（空台词时也是它挡住上一屏）');
+    /* 底栏：返回（全屏态）+ 全屏键；±10s 也从顶栏搬了过来 */
+    assert.ok(/onTopBack/.test(vue) && /\.cb-back/.test(less), '全屏态要有返回键');
+    assert.ok(/onSeekStep\(-10000\)/.test(vue) && /onSeekStep\(10000\)/.test(vue), '±10s 跳转');
+    assert.ok(/cb-fs/.test(vue) && /\.cb-fs/.test(less) && /退出/.test(vue) && /全屏/.test(vue),
+      '控制条要有全屏/退出键');
+    assert.ok(/AUTO_HIDE_MS/.test(vue), '自动收起用统一常量');
+  });
+
+  test('页面接线: 几何恒定 —— 只有字幕带会改矩形，全屏与控件显隐一像素不动', () => {
+    /* 真机第十轮证据：点一下隐藏进度条，画面变宽却被推到下半屏、底部被裁。
+     * 根因不是 native 的 setRect 写得不对，而是 X7 的 videoscale 输出 caps 在
+     * 起播时按 g_w.rect 定死，运行期改 render-rectangle 必然拿旧 buffer 贴新矩形。
+     *
+     * 【第二十一轮】全屏也加入"不许改矩形"的阵营：它只把控件挪到右列，
+     * 中列几何（视频洞 / 字幕带 / 底部条占位）与普通态逐像素相同。
+     * 于是 applyVideoGeometry 只剩唯一一个放行原因：cc（开/关字幕那 18px）。 */
+    const vue = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'pages', 'index', 'index.vue'), 'utf8');
+    const less = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'styles', 'base.less'), 'utf8');
+    assert.ok(/topH: 0/.test(vue), '顶栏高度必须是 0（第十四轮删除）');
+    assert.ok(/cc: this\.ccActive/.test(vue),
+      '字幕带只在真有句子时占 18px（默认 0 高，画面最大）');
+    /* 只查 bands() 函数体：canAutoHide 那处传 ui.chrome 是另一回事（它判要不要
+     * 计时自动收起，跟几何无关）。 */
+    assert.ok(!/bands\(\) \{[\s\S]{0,700}?ui\.chrome/.test(vue),
+      '控件显隐不许进几何（它只换 DOM 内容，不改矩形）');
+    assert.ok(!/bands\(\) \{[\s\S]{0,700}?fsSide/.test(vue),
+      '全屏也不许进几何（唯一几何源是普通态那份）');
+    assert.ok(/barH: this\.L\.num\.seekH/.test(vue),
+      '底部条高度恒定（全屏也不归零）');
+    assert.ok(/class="pstage"/.test(vue) && /\.pstage\s*\{/.test(less),
+      '视频 + 字幕要成一组');
+    /* 全屏只换左右两列的内容：左列纯黑占位、右列控制面板，中列不动。 */
+    assert.ok(/<div v-if="playFull" class="pleft-fs"/.test(vue) && /\.pleft-fs\s*\{/.test(less),
+      '全屏时左列必须保留宽度、只铺纯黑占位（不能 v-if 掉，否则中列会左移）');
+    assert.ok(/v-if="mode === 'play'" class="pleft"/.test(vue),
+      '左列容器在全屏态也要渲染（宽度占位决定中列位置）');
+    assert.ok(/class="chrome-bar"[\s\S]{0,300}?ui\.chrome && !playFull/.test(vue),
+      '全屏时底部条只占位、不画控件');
+    /* 轨道宽 / 填充 / 命中三处同源 */
+    assert.ok(/seekTrackW\(\)[\s\S]{0,160}playFull \? this\.fsTrackW/.test(vue),
+      '全屏时轨道宽必须切到面板宽度');
+    assert.ok(/trackRatioFromX\(x, this\.seekTrackW\)/.test(vue),
+      '命中测试必须用同一个 seekTrackW');
+    assert.ok(/onBarTap/.test(vue) && /class="chrome-bar"[^>]*@click="onBarTap"/.test(vue),
+      '控件收起时点控制条要把控件叫回来');
+    assert.ok(/const isCc = tag === 'cc'/.test(vue),
+      '字幕带出现/消失是唯一允许改矩形的原因');
+    assert.ok(!/isFull/.test(vue.slice(vue.indexOf('async applyVideoGeometry'), vue.indexOf('async applyVideoGeometry') + 1600)),
+      'applyVideoGeometry 里不许再给 full-* 开绿灯');
+  });
+  test('页面接线: 第十轮自检页有进度条与关键日志（用户反馈 diag 无法查 bug）', () => {
+    const vue = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'pages', 'diag', 'diag.vue'), 'utf8');
+    const less = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'styles', 'diag.less'), 'utf8');
+    /* 【第十五轮】进度条从"面板里一条只读的细线"升级成视频列下面的
+     * 真控制条（播放/暂停 + 时间 + 可拖轨道 + 全屏），面板里那条 dg-track
+     * 已经删掉 —— 同一个页面上不需要两条进度条。 */
+    assert.ok(/class="vd-bar"/.test(vue) && /\.vd-bar\s*\{/.test(less) && /\.vd-fill\s*\{/.test(less),
+      '自检页必须有一条可见、可拖的播放进度条');
+    assert.ok(!/dg-track/.test(vue), '面板里那条只读进度条该删（同页不要两条）');
+    assert.ok(/player\.status\(\)/.test(vue) && /startStatusPoll/.test(vue) && /stopStatusPoll/.test(vue),
+      '进度条必须由 native status() 每秒驱动，并在离页时停掉');
+    assert.ok(/onVdTouch/.test(vue) && /onVdRelease/.test(vue) && /player\.seek\(target\)/.test(vue),
+      '进度条必须能拖、能 seek（否则测不了全屏后的定位）');
+    assert.ok(/onVdFull/.test(vue) && /setVideoRect/.test(vue) && /class="vd-fs"/.test(vue),
+      '自检页必须有全屏键，且真的下发 setVideoRect');
+    assert.ok(/vdTrackW/.test(vue) && /vdRatioAt/.test(vue),
+      '轨道宽与命中比例必须同源');
+    assert.ok(/playStateText/.test(vue),
+      '状态行（state / 位置 / 帧 / 生效矩形 / 缩放档）要落地');
+    assert.ok(/onKeyToggle/.test(vue) && /SET_RECT\|OPEN rect\|overlay api/.test(vue),
+      '日志页必须有「关键」过滤，能一次看到矩形/videoscale/chrome 现场');
+    /* 【第十五轮】用户要「同时显示日志」：面板里常驻 3 行关键现场，
+     * 不用退出到日志页也能看到 SET_RECT / rect / videoscale。 */
+    assert.ok(/class="lv-body"/.test(vue) && /\.lv-line\s*\{/.test(less) && /v-for="\(ln, i\) in liveLog"/.test(vue),
+      '关键日志必须常驻在自检页上（不能只藏在日志页里）');
+    assert.ok(/startLogPoll/.test(vue) && /stopLogPoll/.test(vue) && /refreshLiveLog/.test(vue),
+      '同屏日志要自己轮询，并且在离页时停掉');
+  });
+
+  test('页面接线: 第十六轮播放器控件按参考系统播放器数值重做，全屏只剩一个退出入口', () => {
+    const vue = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'pages', 'index', 'index.vue'), 'utf8');
+    const less = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'styles', 'base.less'), 'utf8');
+    const diagVue = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'pages', 'diag', 'diag.vue'), 'utf8');
+    const diagLess = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'styles', 'diag.less'), 'utf8');
+
+    /* ① 真机反馈「全屏模式下有两个退出按钮，左一个右一个」。
+     *    【第二十一轮】之后全屏只剩一个出口：右列面板顶部的 .fsp-exit
+     *    「退出全屏」。底部条在全屏态根本不渲染控件（ui.chrome && !playFull），
+     *    所以也不可能有第二个。 */
+    const exits = (vue.match(/class="fsp-exit"/g) || []).length;
+    assert.strictEqual(exits, 1, '全屏退出口只许一处（右列面板顶部）');
+    assert.ok(!/class="cb-back"/.test(vue),
+      '底部条不许再出现 cb-back（那是第二个「退出」的来源）');
+    assert.ok(/cb-btn cb-fs/.test(vue) && /playFull \? '还原' : '全屏'/.test(vue),
+      '底部条的全屏键在全屏态必须叫「还原」，不能再出现第二个「退出」');
+    assert.ok(!/barMetrics\(this\.midW,\s*\{[^}]*back:/.test(vue),
+      'barMetrics 不许再为返回键预留槽位（否则轨道短 33px、右边留一段点不到的空洞）');
+    assert.ok(pc.BAR_BACK_W === 30 && pc.SEEK_KNOB_W === 12 && pc.BAR_TIME_W === 42,
+      '控件槽位宽度必须与参考系统播放器的 time-current(42) / handle(12) 同值');
+
+    /* ② 进度条逐值对齐参考系统播放器：轨道 4px + 30% 白、填充 #FF6699、滑块 12 白。
+     *    原来是 10px 粗槽 + 16px 大点 + 一层暗白底 —— 真机照片里像"挖出来的槽"。 */
+    assert.ok(/\.cb-line\s*\{[\s\S]*?height:\s*4px;[\s\S]*?rgba\(255,\s*255,\s*255,\s*0\.30\)/.test(less),
+      '控制条轨道必须是 4px + rgba(255,255,255,0.30)（= 参考 seekbar track）');
+    assert.ok(/\.seek-knob\s*\{[\s\S]*?width:\s*12px;[\s\S]*?height:\s*12px;/.test(less),
+      '滑块必须是 12px（= handleSize），且与 SEEK_KNOB_W 一致');
+    assert.ok(/\.seek-fill\s*\{[\s\S]*?height:\s*4px;[\s\S]*?@accent-play/.test(less),
+      '已播放填充必须跟轨道同高，且用参考系统播放器的 activeColor');
+    assert.ok(/\.cb-play\s*\{[\s\S]*?background-color:\s*@accent-play/.test(less),
+      '播放键要恒粉（参考系统播放器的 play-btn 底不随播放状态变）');
+    assert.ok(/\.cb-btn\s*\{[\s\S]*?background-color:\s*rgba\(0,\s*0,\s*0,\s*0\)/.test(less),
+      '字幕/全屏键不要底板（参考系统播放器的 action-btn 是纯文字）');
+    assert.ok(pc.SEEK_KNOB_W === 12 && /seekTrackW - SEEK_KNOB_W/.test(vue),
+      'seekFillW 必须用 SEEK_KNOB_W 扣右端余量');
+
+    /* ③ 字幕带：参考系统播放器没有 CC，对齐它的文字层（纯白、单行、10px 边距） */
+    assert.ok(/\.cc-text\s*\{[\s\S]*?margin-left:\s*10px;[\s\S]*?font-size:\s*13px;/.test(less),
+      '字幕：10px 边距 + 13px 单行（18px 带内不裁字）');
+
+    /* ⑤ 全屏占位块必须不透明：真机「全屏 UI 错乱、多个进度条」里那条多出来的
+     *    进度条就是透明区域露出的上一屏 fb 残留（falcon 不主动清屏）。
+     *    第二十一轮起全屏不再有"没人画"的区域：左列 .pleft-fs 是纯黑占位，
+     *    中列与右列都有人画。 */
+    assert.ok(/\.pleft-fs\s*\{[\s\S]*?background-color:\s*#000000/.test(less),
+      '.pleft-fs 必须铺纯黑，否则普通态的标题/简介残影会留在全屏画面左侧');
+
+    /* ④ 自检页右栏必须「上滚 + 下固定」：X7 上内容约 300px > 266~280px 视口，
+     *    没有滚动容器时底部四个按钮永远点不到；按钮固定在滚动区之外，
+     *    保证任何型号都能点到。 */
+    assert.ok(/<scroller[^>]*class="panel-scroll"/.test(diagVue) && /class="panel-body"/.test(diagVue),
+      '自检页右栏必须有滚动容器 + 内层内容（padding 不能加在滚动区上）');
+    assert.ok(/\.panel-body\s*\{[\s\S]*?padding-left:/.test(diagLess),
+      '右栏 padding 要落在 panel-body 上');
+    assert.ok(/class="panel-foot"/.test(diagVue) && /\.panel-foot\s*\{[\s\S]*?flex-shrink:\s*0/.test(diagLess),
+      '底部按钮行必须在滚动区之外固定（要的是"能点到"，不是"划到底才能点"）');
+    assert.ok(/panelScrollStyle/.test(diagVue) && /H - this\.FOOT_H/.test(diagVue),
+      'scroller 必须拿到确定高度（falcon 没有明确高度不滚）');
+  });
+
+  test('页面接线: 字幕原因放「我的 → CC 字幕」，播放器只留「字幕」', () => {
+    /* 实测（2026-11-09）：同一个稿件 view 接口能列出 12 条字幕轨，但匿名
+     * x/player/v2 返回 subtitle.subtitles=[]，view 里每条的 subtitle_url 也是
+     * 空串 —— 「字幕根本无法显示」断在登录态，不在渲染。
+     * 用户要求：播放器里不要解释，只保留控制条上的「字幕」二字；未登录与
+     * 失败原因统一放到「我的 → CC 字幕」下面。 */
+    const vue = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'pages', 'index', 'index.vue'), 'utf8');
+    const less = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'styles', 'base.less'), 'utf8');
+    /* 播放器：不许再有提示条 */
+    assert.ok(!/ccHint/.test(vue), '播放器里不许再出现字幕提示（ccHint 已移除）');
+    assert.ok(!/cc-hint/.test(vue) && !/\.cc-hint\s*\{/.test(less), '提示样式也必须撤掉');
+    assert.ok(!/onCcHintTap/.test(vue), '提示点击（退出播放去登录）不该再挂着');
+    assert.ok(/>字幕</.test(vue), '控制条只留「字幕」二字');
+    /* 设置页：原因、登录引导都写清楚 */
+    assert.ok(/ccSettingHint\(\)/.test(vue), '「我的」要有字幕状态行');
+    assert.ok(/未登录：B 站匿名接口不返回字幕地址/.test(vue), '未登录必须明说原因');
+    assert.ok(/条字幕轨，但内容没取到/.test(vue), '有轨道但失败时给具体原因');
+    assert.ok(/该稿件暂无 CC 字幕/.test(vue) && /字幕下载失败/.test(vue),
+      '无轨道 / 下载失败两种状态都要落到设置页文案里');
+    assert.ok(/\[cc\] player\/v2 tracks=/.test(vue), '轨道数与登录态必须进日志（真机判案用）');
+  });
+
+  test('play_chrome: 三种点播几何都恒等于视口高（第十轮）', () => {
+    const num = lay.layoutStyles(lay.buildLayout(936, 280)).num;
+    /* 普通态（控件展开/收起都用这一份） */
+    const normal = pc.planBands({
+      totalH: num.height, chrome: true, cc: false, barH: num.seekH
+    });
+    assert.deepStrictEqual([normal.top, normal.cc, normal.bar, normal.video],
+      [18, 0, num.seekH, 280 - 18 - num.seekH]);
+    assert.strictEqual(normal.top + normal.video + normal.cc + normal.bar, 280);
+    /* 控件收起时页面仍然拿同一份几何（只是 DOM 内容换成黑），所以这里不用再算 */
+    const hidden = pc.planBands({
+      totalH: num.height, chrome: true, cc: false, barH: num.seekH
+    });
+    assert.deepStrictEqual(hidden, normal, '显隐前后几何必须逐字段相同');
+    /* 全屏态：控制条让位，画面段变大 */
+    const full = pc.planBands({
+      totalH: num.height, chrome: true, cc: false, barH: 0, full: true
+    });
+    assert.strictEqual(full.bar, 0);
+    assert.ok(full.video > normal.video, '全屏画面段必须更大');
+    assert.strictEqual(full.top + full.video + full.cc + full.bar, 280);
   });
 
   test('device: describeProfile 含机型/偏移/平面/缩放/倍率诊断字段', () => {
     const s = dp.describeProfile(dp.buildProfile({ env: { width: 936, height: 280, model: '' } }));
     assert.ok(/x7p/.test(s) && /panelOffset=0/.test(s) && /planeId=auto/.test(s));
-    assert.ok(/swScale=1/.test(s) && /bufScale=100/.test(s));
+    assert.ok(/swScale=2/.test(s) && /bufScale=100/.test(s));
   });
+
 }
 
 main().then(

@@ -737,6 +737,11 @@
   width: 469px;
   height: 266px;
   flex-direction: column;
+  /* 这里**故意不给底色**。中列左右那两条信箱黑（16:9 画面比列窄时露出来的部分）
+   * 本来就由 fb 兜着：播放态根节点套 .page-live（透明），fb 里那片像素是黑的。
+   * 若给 .pmid 铺一层不透明黑，等于把 hole 的父级也涂掉 —— 一旦某些固件是
+   * 「视频帧 blit 进 fb + hole 打透明」的合成方式，就会把画面整块盖死。
+   * 观感上的"无缝"由三条控件带自己保证（它们都是 #000，见下方播放悬浮控件）。 */
 }
 
 .pvideo {
@@ -785,37 +790,510 @@
   lines: 2;
 }
 
-/* 可拖动进度条：469x26 横条，轨道 453x10（左右各留 8），
- * 填充与圆点同一行排布（falcon 上 position:absolute 不可靠，用 flex 自然排列）。 */
-.seek {
-  width: 469px;
+/* ==================== 播放悬浮控件（控制条 / 字幕带 / 加载动画） ====================
+ * 视频是 KMS overlay 平面（zpos 高于 Falcon UI），控件不能"浮"在画面上，只能占
+ * 中列里真实的 UI 像素：
+ *     [视频洞][(字幕带 18)][控制条]   —— 之和 = 视口高
+ * 段高由 play_chrome.planBands 算好走内联 style，这里只负责配色与排版。
+ *
+ * 【3.5.6 第十四轮：顶栏删除】
+ * 用户要求「把视频放大，占满视频区，本身就没有多大的地方，进度条还占些」。
+ * 这块屏 3.34:1，16:9 永远高度受限，所以那 18px 标题栏是最该省的一段
+ * （标题在左列本来就有）。顶栏的四件事都有了新去处：
+ *   · 标题     → 左列顶部；
+ *   · 暂停标记 → 控制条的播放键（第十六轮起恒为品牌粉，状态只靠图标）；
+ *   · ±10s     → 控制条里的 .cb-step；
+ *   · 返回     → **全屏侧栏面板**的 .cb-back（第十六轮：底部条那份已删，
+ *                全屏只剩一个「退出」入口，见 play_chrome.BAR_BACK_W 注释）。
+ *
+ * 【3.5.6 第九轮 · 让控件"看起来像透明的"】
+ * 用户拿参考系统播放器的照片对比，说「人家的进度条是透明的，你这是挖洞」。
+ * 物理上做不到真透明 —— 视频平面盖在 UI 之上，控件只能占让出来的像素。但观感可以
+ * 骗过去：只要中列（.pmid）和各条控件带的底色**和视频自己的信箱黑完全一致**，
+ * 就看不出"这里是挖出来的一条"。所以这一段里所有背景统一 #000：原来是
+ * #0D1015 / #101318（带蓝的深灰），和视频黑差得一眼就能看出来，正是"挖洞感"的来源。
+ * 也不加边框/圆角容器 —— 参考系统播放器的控制条同样没有边框，控件是直接"长"在黑底上的。
+ * 第十四轮进一步把顶栏也删了：黑带上只剩一条 32px 的进度条，上下都没有"框"。 */
+
+/* 底部控制条：播放键 30 / 当前时间 42 / 轨道（barMetrics 算）/ 总时长 42 / ±10s / 字幕 / 全屏。
+ *
+ * ⚠️ 这里**不能有 padding**：barMetrics 已经把槽位的宽度算到正好等于中列宽，
+ * 再叠左右各 8px 的 padding，最后那个槽位（全屏键）就会被挤出可视区 ——
+ * 真机反馈的「没有全屏按钮」就是这么来的（按钮还在 DOM 里、点得到，只是看不见）。
+ * 子元素之和 === 容器宽，在 content-box / border-box 两种盒模型下都成立。
+ *
+ * 【3.5.6 第二十四轮：背景改成半透明 —— 还原参考系统播放器的"进度条盖住画面"】
+ * 视频矩形现在占满中列全高（不扣这条 32px），所以这条带子下方就是画面。
+ * 参考系统播放器的 bottom-bar 是 `linear-gradient(to top,
+ * rgba(0,0,0,0.8), transparent)`；falcon 没有可靠的 linear-gradient，
+ * 这里用等效的单色半透明近似：0.82 黑，画面透出约 18%。
+ *
+ * 为什么不做到 0.5 那种"明显透"：轨道色是 rgba(255,255,255,0.3)，
+ * 时间字是 #DDDDDD，底太亮会直接看不见（墨水屏只有 16 级灰阶，
+ * 对比度比 LCD 更吃紧）。0.82 是"能看出画面在下面"与"字能读"的折中。
+ */
+.chrome-bar {
+  flex-direction: row;
+  align-items: center;
+  background-color: rgba(0, 0, 0, 0.82);
+}
+
+/* 【第二十七轮】控件收起时底部 32px 的**挖孔占位**。
+ *
+ * 必须是 <hole> 组件（模板里 <hole class="bar-hole">），不能是普通 div：
+ * falcon 不主动清屏，第二十四轮的 .pmid-tap 也是 rgba(0,0,0,0) 的透明 div，
+ * 结果「隐藏进度条后原位置还有一条黑边」—— 透明 div 只表示"这次不画"，
+ * 上一次那条半透明黑条的像素仍留在 framebuffer 上。<hole> 会把这块 fb
+ * 真正交还给底下的视频平面，旧像素随之被视频帧覆盖。
+ *
+ * 宽高由 ctrlBarStyle 内联给（midW x bands.bar），与显示态 .chrome-bar
+ * 逐像素相同，所以切换显隐不改任何几何、不改 native 矩形。 */
+.bar-hole {
+  background-color: rgba(0, 0, 0, 0);
+}
+
+/* 视频 + 字幕那一条竖列（普通态与全屏态共用，宽度恒等于中列宽）。 */
+.pstage {
+  flex-direction: column;
+}
+
+/* 【3.5.6 第二十一轮：全屏只换右列，视频一个像素都不动】
+ *
+ * 用户明确要求「点全屏后不对视频位置做任何改动，把控件挪到右手边」。
+ * 所以这一版把上一轮的 [左黑边][视频列][间隙][面板] 四块全删了：
+ *   · 左列保留原宽度，内容换成 .pleft-fs 纯黑占位；
+ *   · 中列（视频洞 + 字幕带 + 底部条占位）完全不变；
+ *   · 右列换成 .fsp 控制面板（退出 / 播放 / 轨道 / ±10s / 字幕 / 互动选项）。
+ *
+ * 没有任何"全屏专用"的几何类，也就不会出现"面板被挤到屏外"这类事：
+ * 三列的宽度和位置从普通态到全屏态一次都没变过。 */
+/* 【第二十八轮：透明底改回不透明黑】
+ *
+ * 第二十六轮为了「视频铺满左右」把这三块改成 rgba(0,0,0,0)，真机上直接
+ * 导致 UI 错乱：falcon **不主动清屏**，透明容器只是"这次不画"，上一屏的
+ * 信息栏 / 评论区像素原封不动留在 framebuffer 上，新的全屏面板再叠上去，
+ * 用户截图里就是评论列表、输入框、退出全屏、播放键挤成一团。
+ *
+ * 要擦掉旧像素必须**真的画一层不透明黑**。用户已明确「左右的黑色区域
+ * 不用管」，所以这里恢复纯黑，既清屏、又让面板文字有可读的底。
+ * 只有中列底部那 32px 需要透出画面 —— 那里用的是 <hole>（见 .bar-hole）。 */
+.pleft-fs {
+  background-color: #000000;
+}
+
+.fsp {
+  flex-direction: column;
+  align-items: center;
+  background-color: #000000;
+  padding-top: 8px;
+}
+
+/* 控件收起时右栏的清屏占位：同样必须不透明，否则面板像素会残留。 */
+.fs-clear {
+  background-color: #000000;
+}
+
+/* 退出全屏：整行可点。全屏态唯一的退出入口（底部条不画控件）。 */
+.fsp-exit {
+  height: 30px;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background-color: rgba(255, 255, 255, 0.10);
+}
+
+.fsp-exit-t {
+  font-size: 13px;
+  color: @accent-play;
+  text-align: center;
+  lines: 1;
+}
+
+.fsp-row {
+  height: 34px;
+  margin-top: 6px;
+  flex-direction: row;
+  align-items: center;
+}
+
+.fsp-time {
+  margin-left: 8px;
+  font-size: 13px;
+  color: #FFFFFF;
+  lines: 1;
+}
+
+.fsp-time-dim {
+  margin-left: 4px;
+  font-size: 11px;
+  color: #9AA0A6;
+  lines: 1;
+}
+
+/* 轨道：视觉 4px + 滑块 12px，与底部条同一套参考系统播放器的数值。
+ * 命中区 26px（笔尖不用瞄）。宽度由 trackStyle 内联下发。 */
+.fsp-track {
   height: 26px;
+  margin-top: 6px;
   flex-direction: row;
   align-items: center;
-  padding-left: 8px;
-  padding-right: 8px;
 }
 
-.seek-track {
-  width: 453px;
-  height: 10px;
+.fsp-line {
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0px;
+  height: 4px;
   flex-direction: row;
   align-items: center;
-  border-radius: 5px;
-  background-color: @progress-track;
+  border-radius: 2px;
+  background-color: rgba(255, 255, 255, 0.30);
 }
 
+.fsp-fill {
+  height: 4px;
+  border-radius: 2px;
+  background-color: @accent-play;
+}
+
+.fsp-knob {
+  width: 12px;
+  height: 12px;
+  border-radius: 6px;
+  background-color: #FFFFFF;
+}
+
+.fsp-btns {
+  height: 30px;
+}
+
+.fsp-btn {
+  width: 62px;
+  height: 26px;
+  margin-right: 6px;
+  border-radius: 6px;
+  background-color: rgba(255, 255, 255, 0.10);
+  align-items: center;
+  justify-content: center;
+}
+
+.fsp-btn-t {
+  font-size: 11px;
+  color: #E9ECF0;
+  text-align: center;
+  lines: 1;
+}
+
+.fsp-btn-on {
+  color: @accent-play;
+}
+
+/* 互动选项：与普通态右列同源的数据，只是换到面板里。
+ * 高度由 fsInteractH 内联下发，列表在剩余高度里滚动。 */
+.fsp-ip {
+  margin-top: 8px;
+  flex-direction: column;
+}
+
+.fsp-ip-head {
+  height: 22px;
+  flex-direction: row;
+  align-items: center;
+}
+
+.fsp-ip-title {
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0px;
+  font-size: 12px;
+  color: #FFFFFF;
+  lines: 1;
+  text-overflow: ellipsis;
+}
+
+.fsp-ip-count {
+  font-size: 11px;
+  color: @accent-play;
+  lines: 1;
+}
+
+.fsp-ip-list {
+  flex-direction: column;
+}
+
+.fsp-choice {
+  min-height: 34px;
+  margin-top: 4px;
+  padding-left: 6px;
+  padding-right: 6px;
+  padding-top: 4px;
+  padding-bottom: 4px;
+  flex-direction: row;
+  align-items: center;
+  border-radius: 6px;
+  background-color: rgba(255, 255, 255, 0.08);
+}
+
+.fsp-choice-def {
+  background-color: rgba(255, 102, 153, 0.20);
+}
+
+.fsp-choice-idx {
+  width: 16px;
+  font-size: 11px;
+  color: @accent-play;
+  lines: 1;
+}
+
+.fsp-choice-text {
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0px;
+  font-size: 12px;
+  color: #E9ECF0;
+}
+
+.fsp-ip-status {
+  padding-top: 4px;
+  font-size: 11px;
+  color: #9AA0A6;
+}
+
+/* 播放/暂停：粉底圆 + 白图标，**恒亮**。
+ *
+ * 【3.5.6 第十六轮 · 对齐参考系统播放器的播放键】
+ * 参考系统播放器的播放键是「品牌粉圆 + 白色图标」，不随播放状态改底色 —— 状态只由图标
+ * （三角 = 可播、双竖条 = 可停）表达。原来我们做的是"暗底圆，暂停才变粉"，
+ * 真机照片里那颗键比参考系统播放器暗一整档，看着像"没启用"。
+ * 30x30 是控制条（32 高）能给的最大命中区，真机反馈过「暂停按钮太小」。 */
+.cb-play {
+  width: 30px;
+  height: 30px;
+  border-radius: 15px;
+  background-color: @accent-play;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 保留类名：模板按暂停态切换它，视觉上已经恒粉（见上），
+ * 不再做"暂停才高亮"的差异化 —— 那是旧方案的补丁。 */
+.cb-play-on {
+  background-color: @accent-play;
+}
+
+.cb-play-ic {
+  width: 18px;
+  height: 18px;
+}
+
+.cb-play:active {
+  opacity: 0.7;
+}
+
+/* 时间码：#DDDDDD / 11px / 42 宽（=== BAR_TIME_W）。
+ * 参考系统播放器的 bottom-bar 里 `time-current` 是 42 宽、#dddddd；原来我们 40 宽、10px，
+ * 数字挤在一起，且颜色比参考系统播放器白一档（#E9ECF0）。 */
+.cb-time {
+  width: 42px;
+  margin-left: 3px;
+  font-size: 11px;
+  color: #DDDDDD;
+  text-align: center;
+  lines: 1;
+}
+
+/* 命中区撑满控制条高度：轨道视觉只有 4px，但手指要能稳稳按住 */
+.cb-hit {
+  height: 30px;
+  margin-left: 3px;
+  flex-direction: row;
+  align-items: center;
+}
+
+/* 轨道：**4px 细线**，不是 10px 的槽。
+ *
+ * 【3.5.6 第十六轮 · 逐值对齐参考 seekbar】
+ * 参考系统播放器的 seekbar 参数：activeColor=#FF6699、
+ * track=rgba(255,255,255,0.3)、handle=白色。真机放大图量出来轨道 ≈4px、
+ * 滑块 ≈12px。我们原来是 10px 粗槽 + 16px 白点 + 一层 16% 白的底 ——
+ * 在黑底上是一条明显的"凹槽"，这正是用户说的"你这是挖洞，人家是透明的"。
+ * 改成 4px 之后，轨道在黑底上只剩一条淡线，滑块像浮在上面。 */
+.cb-line {
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0px;
+  height: 4px;
+  flex-direction: row;
+  align-items: center;
+  border-radius: 2px;
+  background-color: rgba(255, 255, 255, 0.30);
+}
+
+/* 字幕/全屏键：**无底板**，只有文字。
+ * 参考系统播放器的 action-btn 在渐变顶栏里是纯文字，没有圆角块；
+ * 我们原来给每个键铺 10% 白的圆角底，一排四个方块，比参考系统播放器"重"得多。
+ * 命中区仍是 30x30（比视觉大得多），不牺牲可点性。 */
+.cb-btn {
+  width: 30px;
+  height: 30px;
+  margin-left: 3px;
+  border-radius: 6px;
+  background-color: rgba(0, 0, 0, 0);
+  align-items: center;
+  justify-content: center;
+}
+
+.cb-btn:active {
+  opacity: 0.6;
+}
+
+.cb-btn-t {
+  font-size: 11px;
+  color: #DDDDDD;
+  text-align: center;
+  lines: 1;
+}
+
+/* 选中态用参考系统播放器的 activeColor（#FF6699），不是主色 @accent。 */
+.cb-btn-on {
+  color: @accent-play;
+}
+
+/* 返回键（仅全屏态）：顶栏删掉后它搬进控制条。30x30 与播放键同大，
+ * 真机反馈过「返回按钮太小」，这次不再做成小号文字。
+ * 用 margin-right 而不是给 .cb-play 加 margin —— 普通态没有返回键，
+ * 那样会凭空多出 3px（barMetrics 只在 back=true 时算这个间隙）。 */
+.cb-back {
+  width: 30px;
+  height: 30px;
+  margin-right: 3px;
+  border-radius: 8px;
+  background-color: rgba(255, 255, 255, 0.14);
+  align-items: center;
+  justify-content: center;
+}
+
+.cb-back:active {
+  opacity: 0.7;
+}
+
+.cb-back-t {
+  font-size: 10px;
+  color: #FFFFFF;
+  text-align: center;
+  lines: 1;
+}
+
+/* ±10s（原顶栏的四个跳转键，只留最常用的两个）。24x30 的命中区，
+ * 文字 9px —— 控制条只有 30 高，它靠"整格可点"而不是靠字大。 */
+.cb-step {
+  width: 24px;
+  height: 30px;
+  margin-left: 3px;
+  align-items: center;
+  justify-content: center;
+}
+
+.cb-step:active {
+  opacity: 0.6;
+}
+
+/* ±10s 的文字：9 → 10px、dim → 75% 白。
+ * 参考系统播放器的 jump-btn 是 "-10s / +10s" 这一排，字重比标题轻但仍是可读的白，
+ * 我们原来的 9px + #8A929E 在黑底上几乎看不见。 */
+.cb-step-t {
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.75);
+  text-align: center;
+  lines: 1;
+}
+
+/* 全屏键：与「字幕」同宽同高，同样**无底板**（第十六轮）。
+ * 之前它单独铺 16% 白，一排五个槽位里只有它亮着，反而像"被选中"。
+ * 全屏态文字是「还原」，选中色仍走 @accent-play。 */
+.cb-fs {
+  background-color: rgba(0, 0, 0, 0);
+}
+
+/* 进度条填充与滑块：轨道是 flex 行，填充与滑块自然排列
+ * （falcon 上 position:absolute 不可靠）。
+ * 【第十六轮】填充从 10px 收到 4px，滑块 16 → 12、颜色纯白 ——
+ * 与参考 seekbar 的 track / handle 同值（见 .cb-line 注释）。
+ * 12 也要和 play_chrome.SEEK_KNOB_W 一致，seekFillW 用它扣右端余量。 */
 .seek-fill {
-  height: 6px;
-  border-radius: 3px;
-  background-color: @accent;
+  height: 4px;
+  border-radius: 2px;
+  background-color: @accent-play;
 }
 
 .seek-knob {
-  width: 10px;
-  height: 10px;
+  width: 12px;
+  height: 12px;
+  border-radius: 6px;
+  background-color: #FFFFFF;
+}
+
+/* 加载动画（B 站那套「小电视 + 三个跳动的点」）。
+ * 动画帧由 120ms 的 JS 定时器推进（loadAnim），这里只定外形。 */
+.pl-load {
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.pl-tv {
+  width: 52px;
+  height: 34px;
   border-radius: 5px;
-  background-color: #ffffff;
+  border-width: 2px;
+  border-color: @accent;
+  background-color: #161B23;
+  align-items: center;
+  justify-content: center;
+}
+
+.pl-tv-screen {
+  width: 38px;
+  height: 18px;
+  border-radius: 2px;
+  background-color: #0B0E12;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 屏幕里那条来回扫的蓝条（marginLeft 由 loadingFrame().dx 驱动） */
+.pl-tv-bar {
+  width: 10px;
+  height: 6px;
+  border-radius: 2px;
+  background-color: @accent-blue;
+}
+
+.pl-dots {
+  flex-direction: row;
+  align-items: center;
+  margin-top: 7px;
+}
+
+.pl-dot {
+  width: 5px;
+  height: 5px;
+  margin-left: 3px;
+  margin-right: 3px;
+  border-radius: 3px;
+  background-color: @progress-track;
+}
+
+.pl-dot-on {
+  background-color: @accent-blue;
+}
+
+.pl-load-text {
+  margin-top: 6px;
+  font-size: 11px;
+  color: @text-color-dim;
+  lines: 1;
 }
 
 /* 右列：评论 + 输入框 */
@@ -829,6 +1307,132 @@
 .pright-body {
   width: 278px;
   height: 240px;
+}
+
+/* ==================== 分P / 合集（右栏页签 + 列表） ====================
+ * 右列只有 278x280，没有空间做浮层（falcon 的 position:absolute / z-index 不可靠），
+ * 所以沿用评论区那套「整栏替换」：页签一行 + 列表吃掉整列。
+ *
+ * 高度账（X7：rightBody 253 + 输入框 27 = 280）：
+ *   评论：页签 22 + body 231 + 输入框 27 = 280
+ *   分P/合集：页签 22 + 列表 258 = 280（这两个页签下没有输入框）
+ * 页签高由页面内联下发（EP_TAB_H），这里只管排布与配色。
+ * ==================================================================== */
+.ep-tabs {
+  flex-direction: row;
+  align-items: center;
+  background-color: #15181D;
+}
+
+.ep-tab {
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0px;
+  height: 22px;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 选中态用底色 + 文字色区分，**不加底边线**：
+ * falcon 的盒模型没有保证，多一条 2px 边框可能把三个格撑出 22px，
+ * 结果是输入框被挤到视口外（历史上「全屏键被挤出屏幕」同一类事故）。 */
+.ep-tab-on {
+  background-color: #20242C;
+}
+
+.ep-tab-t {
+  font-size: 10px;
+  color: @text-color-dim;
+  text-align: center;
+  lines: 1;
+}
+
+.ep-tab-t-on {
+  color: @accent;
+}
+
+.ep-list {
+  flex-direction: column;
+  background-color: @nav-background;
+}
+
+.ep-head {
+  margin-left: 8px;
+  margin-top: 4px;
+  margin-bottom: 2px;
+  margin-right: 8px;
+  font-size: 10px;
+  color: @text-color-dim;
+  lines: 1;
+  text-overflow: ellipsis;
+}
+
+/* 多节合集的分节标题（正片 / 花絮 / 预告…） */
+.ep-sec {
+  margin-left: 8px;
+  margin-top: 4px;
+  margin-bottom: 1px;
+  margin-right: 8px;
+  font-size: 10px;
+  color: @accent;
+  lines: 1;
+  text-overflow: ellipsis;
+}
+
+/* 一行一个 P / 一集：26 高 = 280 的右列里能看到 9 行，笔尖好点 */
+.ep-row {
+  height: 26px;
+  flex-direction: row;
+  align-items: center;
+  padding-left: 6px;
+  padding-right: 6px;
+}
+
+.ep-row-on {
+  background-color: #20242C;
+}
+
+.ep-idx {
+  width: 26px;
+  font-size: 10px;
+  color: @text-color-dim;
+  lines: 1;
+}
+
+.ep-idx-on {
+  color: @accent;
+}
+
+.ep-name {
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0px;
+  font-size: 11px;
+  color: @text-color;
+  lines: 1;
+  text-overflow: ellipsis;
+}
+
+.ep-name-on {
+  color: @accent;
+}
+
+.ep-dur {
+  width: 38px;
+  font-size: 9px;
+  color: @text-color-dim;
+  text-align: right;
+  lines: 1;
+}
+
+.ep-note {
+  margin-left: 8px;
+  margin-right: 8px;
+  margin-top: 4px;
+  margin-bottom: 6px;
+  font-size: 10px;
+  color: @text-color-dim;
+  lines: 2;
 }
 
 /* 直播态右列占位：评论区整列隐藏后，用同宽同高同底色的空 div 兜住这 278px。
@@ -1697,4 +2301,179 @@
   width: 960px;
   height: 266px;
   flex-direction: row;
+}
+
+/* ==================== CC 字幕 / 互动视频选项 ====================
+ * 字幕只能占真实的 UI 像素（视频平面在 UI 之上），所以它是一条独立的带子：
+ *   · 3.5.6 第十轮：28px 两行，随字幕出现/消失 → 每次都要改矩形；
+ *   · 第十一轮~十三轮：改成画在顶栏那 18px 里，视频矩形不动；
+ *   · 第十四轮：顶栏删掉，字幕回到独立带子，但只给 **18px 单行** ——
+ *     两行要多占 10px 画面，而这个尺寸下每 10px 都是 18px 宽的画面。
+ * 开/关字幕仍然会改一次矩形（18px 让进让出），这是低频操作、且 native 会
+ * 重建管线让 caps 跟上（见 session.c 的 SET_RECT）。 */
+/* 字幕带：18px 单行，纯黑无缝。
+ * 【为什么不查 padding】falcon 的盒模型没有官方保证：如果 width 含 padding
+ * （border-box），这条带子的可用宽会比 midW 少 20px；如果不含，整条会宽出
+ * 20px 盖到右列上。第九轮的「全屏键消失」就是同一类双算。所以这里 pad 归零，
+ * 左右留白改用 .cc-text 的 margin（margin 一定占 flex 空间，两种盒模型都对）。 */
+.cc-bar {
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  background-color: #000000;
+}
+
+/* 单行 13px / 18：整条带子只有 18 高，两行会裁掉下半截。
+ * 【第十六轮】12 → 13px、左右留白 8 → 10px：参考系统播放器没有 CC，
+ * 它的文字层是弹幕（danmaku-item：12px 纯白、无边框、10px 内边距）。
+ * 我们在 18px 带里取 13px 是为了让笔尖距离下仍能看清整句；
+ * 长句靠省略号收尾，不换行（换行要 28px，等于把画面再压掉 10px）。 */
+.cc-text {
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0px;
+  margin-left: 10px;
+  margin-right: 10px;
+  font-size: 13px;
+  line-height: 18px;
+  color: #FFFFFF;
+  text-align: center;
+  lines: 1;
+  text-overflow: ellipsis;
+}
+
+/* 互动视频：右栏整栏替换（与收藏夹覆盖层同构，不用 z-index / absolute）。 */
+.ip-head {
+  flex-direction: row;
+  align-items: center;
+  padding-left: 8px;
+  padding-right: 8px;
+  border-bottom-width: 1px;
+  border-bottom-color: @card-border-color;
+}
+
+.ip-title {
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0px;
+  font-size: 12px;
+  font-weight: 600;
+  color: @text-color;
+  lines: 1;
+  text-overflow: ellipsis;
+}
+
+.ip-count {
+  width: 54px;
+  font-size: 11px;
+  color: @accent;
+  text-align: right;
+  lines: 1;
+}
+
+.ip-choice {
+  width: 262px;
+  min-height: 36px;
+  margin-left: 8px;
+  margin-top: 6px;
+  flex-direction: row;
+  align-items: center;
+  padding-left: 8px;
+  padding-right: 6px;
+  border-radius: 8px;
+  border-width: 1px;
+  border-color: rgba(255, 255, 255, 0.14);
+  background-color: rgba(255, 255, 255, 0.07);
+}
+
+/* 两条规则各自完整、类名互斥：falcon 的等价特异性靠源码顺序决胜，
+   同时命中两条时后写的会被先写的盖掉（见 .favrow 的长注释）。 */
+.ip-choice-def {
+  width: 262px;
+  min-height: 36px;
+  margin-left: 8px;
+  margin-top: 6px;
+  flex-direction: row;
+  align-items: center;
+  padding-left: 8px;
+  padding-right: 6px;
+  border-radius: 8px;
+  border-width: 1px;
+  border-color: @accent;
+  background-color: rgba(251, 114, 153, 0.16);
+}
+
+.ip-choice:active {
+  opacity: 0.7;
+}
+
+.ip-choice-def:active {
+  opacity: 0.7;
+}
+
+.ip-choice-idx {
+  width: 18px;
+  font-size: 11px;
+  color: @accent;
+  lines: 1;
+}
+
+.ip-choice-text {
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0px;
+  font-size: 12px;
+  color: @text-color;
+  lines: 2;
+  text-overflow: ellipsis;
+}
+
+.ip-choice-tag {
+  width: 28px;
+  font-size: 9px;
+  color: @accent;
+  text-align: right;
+  lines: 1;
+}
+
+.ip-status {
+  width: 262px;
+  margin-left: 8px;
+  margin-top: 8px;
+  font-size: 11px;
+  color: @text-color-dim;
+  lines: 3;
+}
+
+.ip-foot {
+  flex-direction: row;
+  align-items: center;
+  padding-left: 6px;
+  padding-right: 6px;
+}
+
+.ip-btn {
+  height: 22px;
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0px;
+  margin-left: 2px;
+  margin-right: 2px;
+  border-radius: 6px;
+  border-width: 1px;
+  border-color: rgba(255, 255, 255, 0.16);
+  background-color: rgba(255, 255, 255, 0.08);
+  justify-content: center;
+  align-items: center;
+}
+
+.ip-btn:active {
+  opacity: 0.7;
+}
+
+.ip-btn-t {
+  font-size: 10px;
+  color: @text-color;
+  text-align: center;
+  lines: 1;
 }

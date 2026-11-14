@@ -4,7 +4,7 @@
   "appid": "8002026110200001",
   "version": "3.5.6",
   "icon": "app_icon.png",
-  "description": "PenBili（有道 X6 Pro / X7 Pro）：推荐/热门 + 视频/图文/直播三栏搜索 + DASH 播放与直播间直连（MPP 硬解 + KMS overlay，设备参数运行时自适应）+ 图文阅读 + 点赞投币收藏 + 评论区 + 扫码登录",
+  "description": "PenBili（有道 X6 Pro / X7 Pro）：推荐/热门 + 视频/图文/直播三栏搜索 + DASH 播放与直播间直连（MPP 硬解 + KMS overlay，X7P/X6P 参数写死）+ 图文阅读 + 点赞投币收藏 + 评论区 + 扫码登录",
   "quickjs": {
     "version": "20200705",
     "bigNum": false

@@ -307,16 +307,23 @@ function deviceArgs(opts) {
    */
   const sw = intOr(o.swScale, 0);
   const buf = intOr(o.bufScale, 100);
+  /* 第 21/22 位 = 全屏 cover 裁切量（0 = 普通态不裁）。见 session.h 注释。 */
+  const cx = intOr(o.cropX, 0);
+  const cy = intOr(o.cropY, 0);
   return [
     intOr(o.panelOffset, -1),
     intOr(o.planeId, 0),
-    sw === 1 || sw === 2 ? sw : 0,
-    buf < 50 ? 50 : buf > 400 ? 400 : buf
+    /* 1 = videoscale + lanczos（默认）；2 = 不互换（固件真旋转）；
+     * 3 = videoscale + bilinear（画质回退档，用来隔离「变形是否与 lanczos 有关」）。 */
+    sw >= 1 && sw <= 3 ? sw : 0,
+    buf < 50 ? 50 : buf > 400 ? 400 : buf,
+    cx > 0 && cx <= 2048 ? cx : 0,
+    cy > 0 && cy <= 2048 ? cy : 0
   ];
 }
 
 // opts: { input, input2, startMs, durationMs, fps, audio, transpose, rect, audioDevice,
-//         userAgent, referer, fpsCap, isLive, panelOffset, planeId, swScale, bufScale }
+//         userAgent, referer, fpsCap, isLive, panelOffset, planeId, swScale, bufScale, cropX, cropY }
 export async function openSession(opts) {
   const m = await getPlayerModule();
   if (!m) return fail('PLAYER_NATIVE_MISSING', '播放器模块不可用（未随包安装 libjsapi_player2.so / libjsapi_player.so）');

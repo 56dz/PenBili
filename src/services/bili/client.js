@@ -7,7 +7,14 @@
 //   3. 风控码翻译成人话
 // transport 可注入（get），单测不碰网络。
 
-import { httpGet, httpPostForm, httpGetBinary, httpGetTextNative, tryParseJson } from '../net.js';
+import {
+  httpGet, httpPostForm, httpGetBinary, httpGetTextNative,
+  tryParseJson, unwrapResponse
+} from '../net.js';
+/* 分P / 合集解析（纯函数，单测在 test/run.js 的 video_meta 段）。
+ * 放在单独模块是为了能不建 client 就测 —— view 的原始 JSON 里 ugc_season
+ * 嵌套三层，解析写错一个字段名只会表现为"合集列表空"，很难在真机上查。 */
+import { parsePages, parseSeason } from './video_meta.js';
 
 export const BILI_API = 'https://api.bilibili.com';
 export const DEFAULT_UA =
@@ -305,9 +312,18 @@ export function createClient(opts) {
       cid: cid,
       aid: Number(d.aid) || 0,
       title: typeof d.title === 'string' ? d.title : '',
+      /* 简介：分P/合集切换时会换一份稿件，简介必须跟着 view 走，
+       * 不能沿用切之前那条（旧代码只在列表卡片上带 desc，切集后就串了）。 */
+      desc: typeof d.desc === 'string' ? d.desc : '',
       duration: Number(d.duration) || 0,
       width: w,
       height: h,
+      /* 【分P / 合集】同一次 view 响应里就有，不额外发请求。
+       * pages 为空数组 = 单 P 稿件；season 为 null = 不属于任何合集。
+       * 两者都只影响右栏的「分P / 合集」页签是否出现，不影响播出。 */
+      pages: parsePages(d),
+      season: parseSeason(d),
+      videos: Number(d.videos) || 0,
       ms: r.ms
     };
   }
@@ -315,6 +331,34 @@ export function createClient(opts) {
   // 取流：signedQuery 必须是 buildSignedQuery 的产物（字符串原样拼接）
   async function fetchPlayurl(signedQuery) {
     return request('/x/player/wbi/playurl', signedQuery, {});
+  }
+
+  /* 【CC 字幕】没有 code 字段的纯 JSON GET。
+   *
+   * 字幕文件（//aisubtitle.hdslb.com/bfs/.../xxx.json）根对象只有
+   * { font_size, ..., body: [...] }，request() 会走 normalizeJson 的
+   * `parsed.code !== 0` 分支直接判 api 失败，所以必须单独一条通道。
+   * 仍然复用同一份 headers（B 站 CDN 校验 UA/Referer）与可注入 get。 */
+  async function getRawJson(url, reqOpts) {
+    const ro = reqOpts || {};
+    let res;
+    try {
+      res = await get(url, { headers: headers, timeout: ro.timeout || timeout });
+    } catch (e) {
+      return fail('transport', { message: (e && e.message) || String(e) });
+    }
+    const u = unwrapResponse(res);
+    if (u.statusCode && (u.statusCode < 200 || u.statusCode >= 300)) {
+      return fail('http', { status: u.statusCode, message: u.errorMessage || 'HTTP ' + u.statusCode });
+    }
+    if (u.errorMessage && u.body == null) {
+      return fail('http', { message: u.errorMessage });
+    }
+    const parsed = tryParseJson(u.body);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return fail('parse', { message: '响应不是 JSON 对象' });
+    }
+    return { ok: true, data: parsed, httpStatus: u.statusCode };
   }
 
   return {
@@ -326,7 +370,8 @@ export function createClient(opts) {
     fetchWbiKeys: fetchWbiKeys,
     fetchFinger: fetchFinger,
     fetchView: fetchView,
-    fetchPlayurl: fetchPlayurl
+    fetchPlayurl: fetchPlayurl,
+    getRawJson: getRawJson
   };
 }
 

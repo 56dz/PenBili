@@ -22,9 +22,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 TARGET="${PENBILI_TARGET:-aarch64}"
+VARIANT="${PENBILI_VARIANT:-full}"
 
 echo "==> 项目：$ROOT"
-echo "==> 目标：$TARGET"
+echo "==> 目标：$TARGET / 变体：$VARIANT"
 
 # ---------------- 1. 找 zig ----------------
 ZIG="${ZIG_EXE:-}"
@@ -46,6 +47,12 @@ if [ -z "$ZIG" ] || [ ! -x "$ZIG" ]; then
   exit 2
 fi
 echo "==> zig：$("$ZIG" version 2>/dev/null || echo '?') ($ZIG)"
+
+# python3 既用于 ELF 校验也用于打包；必须放在 SKIP_NATIVE 分支外面，
+# 否则「跳过 native 只重打 JS」的第二次构建会 unbound variable。
+PY="${PYTHON_BIN:-python3}"
+
+if [ "${SKIP_NATIVE:-0}" != "1" ]; then
 
 # ---------------- 2. 编译参数 ----------------
 STUB="$ROOT/native/stubs-aarch64"
@@ -100,12 +107,11 @@ if [ "$BUILD_P2" = "1" ]; then
     "$GST_STUB/libgobject-2.0.so.0" \
     "$GST_STUB/libglib-2.0.so.0" \
     "$STUB/libquickjs.so" \
-    -lpthread -Wl,-soname,libjsapi_player2.so \
+    -lpthread -ldl -Wl,-soname,libjsapi_player2.so \
     -o "$LIBS/libjsapi_player2.so"
 fi
 
 # ---------------- 3. ELF 校验 ----------------
-PY="${PYTHON_BIN:-python3}"
 echo "==> ELF 校验"
 for so in libjsapi_player.so libjsapi_httpjson.so libjsapi_player2.so; do
   [ -f "$LIBS/$so" ] || continue
@@ -125,6 +131,8 @@ for d in arm64 arm64-y02_1; do
   done
   echo "  libs/$d/ : $(ls -1 "$LIBS/$d" | tr '\n' ' ')"
 done
+
+fi  # SKIP_NATIVE
 
 if [ "${SKIP_PACK:-0}" = "1" ]; then
   echo "==> SKIP_PACK=1，完成（未打包 AMR）"
@@ -164,14 +172,62 @@ if [ "$("$NODE" -p process.platform 2>/dev/null || echo linux)" = "win32" ] && [
     CLI_ARG="$(wslpath -w "$CLI")"
   fi
 fi
+# ---------------- 5.1 构建变体（diag-only） ----------------
+# 自检包只登记 diag 一页：没有首页、没有播放页，开机直接进链路自检。
+# app.json / build_flags.js 是构建期改的，结束（含失败）必须还原。
+APP_JSON="$ROOT/src/app.json"
+FLAGS_JS="$ROOT/src/build_flags.js"
+APP_BAK="$(mktemp)"
+FLAGS_BAK="$(mktemp)"
+RESTORED=0
+restore_variant() {
+  if [ "$RESTORED" = "1" ]; then return 0; fi
+  cp -f "$APP_BAK" "$APP_JSON"
+  cp -f "$FLAGS_BAK" "$FLAGS_JS"
+  rm -f "$APP_BAK" "$FLAGS_BAK"
+  RESTORED=1
+}
+if [ "$VARIANT" = "diag" ]; then
+  cp -f "$APP_JSON" "$APP_BAK"
+  cp -f "$FLAGS_JS" "$FLAGS_BAK"
+  trap restore_variant EXIT
+  cat > "$APP_JSON" <<'JSON'
+{
+  "pages": {
+    "index": "pages/diag/diag.js",
+    "diag": "pages/diag/diag.js"
+  },
+  "options": {
+    "style": {
+      "lessPaths": ["styles"],
+      "theme": "theme-dark"
+    },
+    "alias": {}
+  }
+}
+JSON
+  sed -i 's/export const DIAG_ONLY = false;/export const DIAG_ONLY = true;/' "$FLAGS_JS"
+  echo "==> 变体 diag-only：index/diag 两个路由都指向 pages/diag（必须两条，\n      单页会触发 CLI 的 single-js-bundle 内联，页面模块没有独立 .js.bin，\n      真机按路径 import 时找不到 → 黑屏）"
+fi
+
 # 阶段 1：rollup + manifest（**不带 -q**）。CLI 的 -q 会调 32 位 Windows
 # qjsc.exe，写 <name>.js.c 时报 Permission denied（本机实测）。
 echo "==> 打包 1/2：$NODE $CLI_ARG -c -p"
+rm -rf "$ROOT/.falcon_"
 "$NODE" "$CLI_ARG" -c -p
 # 阶段 2：用 WSL 里的 Linux 版 qjsc 把 .js 编译成 .js.bin（与官方发布包同形态），
 # 重算 manifest cert 后组包。产物覆盖阶段 1 的源码形态 amr。
-echo "==> 打包 2/2：$PY tools/pack_falcon.py"
-"$PY" "$ROOT/tools/pack_falcon.py" --falcon-dir "$ROOT/.falcon_"
+if [ "$VARIANT" = "diag" ]; then
+  OUT_AMR="$ROOT/8002026110200001.3_5_6_diag.amr"
+else
+  OUT_AMR="$ROOT/8002026110200001.3_5_6.amr"
+fi
+echo "==> 打包 2/2：$PY tools/pack_falcon.py --out $(basename "$OUT_AMR")"
+"$PY" "$ROOT/tools/pack_falcon.py" --falcon-dir "$ROOT/.falcon_" --out "$OUT_AMR"
+if [ "$VARIANT" = "diag" ]; then
+  restore_variant
+  echo "==> 已还原 src/app.json 与 build_flags.js"
+fi
 
 echo "==> 产物："
 ls -lh "$ROOT"/*.amr 2>/dev/null || true

@@ -1,0 +1,82 @@
+    /* ==================== 退后台 / 回前台（第二十三轮重做） ====================
+     *
+     * 【为什么不再"藏成 1x1 再恢复"】
+     * 上一版 onHide 时 setVideoRect(0,0,1,1)、onShow 时再 setVideoRect 回正常
+     * 矩形。两次都是**运行期改矩形**：X7 的管线里有
+     * `videoscale ! video/x-raw,width=<rect>,height=<rect>`，改矩形只能靠 native
+     * 投递一次原地 seek 重建管线去追新 caps；追不上就出现真机照片里的
+     * 「下拉状态栏 → 随便开个界面 → 退回视频，画面变扁」。
+     *
+     * 【现在】退后台就直接把会话关掉 —— 这本来就是用户最初的要求
+     * （「检测到下滑状态栏时关闭视频」）。回前台用 openArgs + 当前矩形重新起
+     * 一路，caps 与矩形从第一帧就一致，不存在"追不上"的中间态，也就不可能变形。
+     *
+     * 代价：回前台有一次 ~0.5~1s 的起播（黑屏）。换来的是**任何一次前后台
+     * 切换都不会改变画面比例**。
+     *
+     * 不关闭会话的情况：直播（没有"停在某一帧"的语义，且 live rebuild 要 1s+
+     * 还会换 CDN），以及还没有 openArgs 的取流中会话。
+     */
+    async hideForBackground(where) {
+      const s = this.play.session;
+      if (!s || this.mode !== 'play' || s.live) return;
+      if (!s.openArgs) return; /* 取流中：会话还不完整，常规 closeSession 会处理 */
+      if (this._bgClosing) return;
+      this._bgClosing = true;
+      this._bgPosMs = Math.max(0, Math.floor(this.play.positionMs || 0));
+      this._bgWasPaused = this.play.state === 'paused';
+      this._bgClosed = false;
+      const myGen = this.gen;
+      try {
+        await closeSession(this.makeCtx(myGen));
+        if (this.gen !== myGen) return;
+        this._bgClosed = true;
+        logWarn('[chrome] 退后台 → 关闭会话（' + where + '）pos=' + this._bgPosMs +
+          (this._bgWasPaused ? ' paused' : ''));
+      } catch (e) {
+        logWarn('[chrome] 退后台关闭会话异常: ' + ((e && e.message) || e));
+      } finally {
+        this._bgClosing = false;
+      }
+    },
+    /* 回前台：用当前矩形重开一路（与全屏切换共用 reopenSession，单一入口）。 */
+    async reopenForForeground(where) {
+      if (!this._bgClosed) return;
+      const s = this.play.session;
+      if (!s || this.mode !== 'play' || !s.openArgs) {
+        this._bgClosed = false;
+        return;
+      }
+      this._bgClosed = false;
+      const myGen = this.gen;
+      const rect = await this.buildVideoRect();
+      if (this.gen !== myGen) return;
+      if (!rect || !rect.physical) {
+        this.play.note = '回到前台后无法恢复画面，请重新打开视频';
+        return;
+      }
+      const pos = this._bgPosMs || 0;
+      const label = rect.physical.x + ',' + rect.physical.y + ',' +
+        rect.physical.width + ',' + rect.physical.height;
+      logWarn('[chrome] 回前台 → 重开（' + where + '）@' + pos + 'ms rect=' + label);
+      const r = await reopenSession(this.makeCtx(myGen), s, pos, rect.physical);
+      if (this.gen !== myGen) return;
+      if (!r.ok) {
+        logWarn('[chrome] 回前台重开失败: ' + (r.message || '') + ' → 等用户重开');
+        this.play.state = 'error';
+        this.play.note = '回到前台后恢复失败：' + (r.message || '未知原因');
+        return;
+      }
+      this._rectKey = label;
+      s.rectPhysical = rect.physical;
+      this.play.state = this._bgWasPaused ? 'paused' : 'playing';
+      this.play.note = '';
+      if (this._bgWasPaused) {
+        const p = await togglePlay(this.makeCtx(myGen), true);
+        if (this.gen !== myGen) return;
+        if (p && p.ok) this.play.state = 'paused';
+      }
+      this.startPoll(myGen);
+      logWarn('[chrome] 回前台重开完成 out=' + r.outWidth + 'x' + r.outHeight +
+        ' state=' + this.play.state);
+    },

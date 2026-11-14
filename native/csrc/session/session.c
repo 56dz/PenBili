@@ -6,6 +6,7 @@
 #include "session.h"
 
 #include <errno.h>
+#include <dlfcn.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdatomic.h>
@@ -410,6 +411,13 @@ typedef struct {
     int sw_scale;
     /* videoscale 输出相对 rect 的百分比（100 = 等大）；见 session.h */
     int buf_scale;
+    /* 全屏 cover 的裁切量（物理像素，左右/上下各裁这么多）；见 session.h */
+    int crop_x;
+    int crop_y;
+    /* 【第二十九轮 v6】首帧时打一次 sink 实际协商到的 caps。
+     * 排查绿边只需要一行：buffer 尺寸与 render-rect 是否相等。
+     * 每次 OPEN 清零。 */
+    int vcaps_logged;
     /*
      * 音频设备被占（alsasink 打不开）时的降级状态：
      *   audio_off        = 本会话**主动**关了音频（不是片源本身没音轨）
@@ -642,6 +650,31 @@ static int rotation_for_transpose(int t) {
     if (t == 1) return 90;
     if (t == 3) return 180;
     return 270; /* t == 2，JS 恒传 */
+}
+
+/*
+ * 【3.5.6 第十八轮：为什么 rotation 仍然交给 decoder】
+ *
+ * 真机反馈「视频被压成一条、周围全是绿幕」，并给出关键对照：
+ * 自检页的 A/B/C/D 四档里 **B 和 D 正常，A 和 C 是绿幕**。
+ * 四档的差别只有 swScale：A/C = 1（横帧，videoscale 输出 rect 互换后的
+ * 448x252），B/D = 2（竖帧，videoscale 输出 rect 本身 252x448）。
+ *
+ * 结论：这台机器的 mppvideodec **真的会把 buffer 转成竖帧**，
+ * 所以 swScale=1 那条「互换」路径等于把已经转正的竖帧再按横帧缩一次，
+ * kmssink 拿到 448x252 的横 buffer 去贴 252x448 的竖窗口 —— 只有一部分行
+ * 被写入，其余是 plane 未初始化内存（YUV 全 0 = 正是用户看到的绿）。
+ *
+ * 因此：
+ *   · 默认档改成 swScale=2（B 档，竖帧），这是真机验证过能用的那条；
+ *   · 这里不再把 rotation 置 0、也不插 videoflip —— 曾尝试用显式
+ *     videoflip 替代 decoder 的旋转意图，但 B 档已经证明现有链路是对的，
+ *     贸然改管线只会让 A 档从"绿幕"变成"黑屏"（videoflip 缺插件时
+ *     parse_bin 直接失败），得不偿失。
+ *   · swScale=0（X6 Pro）照旧：rotation 交给 mppvideodec + kmssink 硬件旋转。
+ */
+static int decoder_rotation(void) {
+    return g_w.rotate;
 }
 
 /*
@@ -1025,15 +1058,68 @@ static void live_rebuild_pipeline(const char *why) {
  * 平面完全不需要缩放能力（1:1 上屏）。
  */
 static void normalize_video_rect(const char *tag) {
-    int x = 0, y = 0, w = 0, h = 0, nw, nh;
+    int x = 0, y = 0, w = 0, h = 0, nx, ny, nw, nh;
     if (!g_w.sw_scale) return;
     if (sscanf(g_w.rect, "<%d,%d,%d,%d>", &x, &y, &w, &h) != 4) return;
+    /* 【3.5.6 第二十九轮】起点也要对齐偶数。
+     * 只对齐宽高不够：y=271（奇）时 UV 相位错位，横屏视频左侧会出现
+     * 一条纯绿细线。向上取偶，最多挪 1px；宽高向下取偶。 */
+    nx = (x + 1) & ~1;
+    ny = (y + 1) & ~1;
     nw = w & ~1;
     nh = h & ~1;
     if (nw < 2 || nh < 2) return;
-    if (nw == w && nh == h) return;
-    snprintf(g_w.rect, sizeof(g_w.rect), "<%d,%d,%d,%d>", x, y, nw, nh);
-    pb2_logf("%s: rect aligned to even size -> %s", tag, g_w.rect);
+    if (nx == x && ny == y && nw == w && nh == h) return;
+    snprintf(g_w.rect, sizeof(g_w.rect), "<%d,%d,%d,%d>", nx, ny, nw, nh);
+    pb2_logf("%s: rect aligned to even x/y/size -> %s", tag, g_w.rect);
+}
+
+/*
+ * ============ 运行时改矩形：优先走 GstVideoOverlay ============
+ *
+ * 【为什么需要它】见 PB2_CMD_SET_RECT 里的棘轮注释：`render-rectangle` 是
+ * write-only 属性，kmssink 只在自己 reconfigure（分配 plane）那一刻读它。
+ * 于是"放大"在运行期根本无效，只能把管线过一次 READY —— 对边下边播的架构
+ * 等价于重新拉流（500ms 黑屏）。用户点一下画面想看大一点，结果是黑一下再回来，
+ * 连点两下就更容易停在中间态（真机反馈「点两下屏幕后视频跑到下方 / 只露半截」）。
+ *
+ * 正道是 GstVideoOverlay 接口的 set_render_rectangle()：它直接调用 sink 的实现，
+ * kmssink 收到后自己重配 plane，不依赖属性重读、不需要重建管线、放大缩小都有效。
+ * 参考系统播放器也是同一套做法（dlopen libgstvideo + dlsym）。
+ *
+ * 这里同样 dlopen/dlsym：libgstvideo 不是链接期依赖（构建只链 libgstreamer 存根），
+ * 运行时它一定在（kmssink 自己就依赖它）。拿不到就返回 0，调用方回落到老的
+ * 属性路径 —— 行为与之前逐字节一致，不会因为一个新 API 把能用的设备搞坏。
+ */
+typedef int (*pb2_overlay_set_rect_fn)(void *overlay, int x, int y, int w, int h);
+static pb2_overlay_set_rect_fn g_overlay_set_rect = NULL;
+static int g_overlay_probed = 0;
+
+static pb2_overlay_set_rect_fn pb2_overlay_fn(void) {
+    if (g_overlay_probed) return g_overlay_set_rect;
+    g_overlay_probed = 1;
+    void *h = dlopen("libgstvideo-1.0.so.0", RTLD_LAZY | RTLD_GLOBAL);
+    if (!h) h = dlopen("libgstvideo-1.0.so", RTLD_LAZY | RTLD_GLOBAL);
+    if (h) {
+        g_overlay_set_rect =
+            (pb2_overlay_set_rect_fn)dlsym(h, "gst_video_overlay_set_render_rectangle");
+    }
+    pb2_logf("overlay api: %s",
+             g_overlay_set_rect ? "gst_video_overlay_set_render_rectangle OK"
+                                : "unavailable (fallback: render-rectangle property)");
+    return g_overlay_set_rect;
+}
+
+/* 把 g_w.rect（"<x,y,w,h>"，已做偶数对齐）交给 overlay 接口。
+ * → 1 = sink 受理（矩形已生效），0 = 没有接口 / sink 拒绝，调用方走老路径。 */
+static int overlay_apply_rect(void) {
+    pb2_overlay_set_rect_fn fn = pb2_overlay_fn();
+    int x = 0, y = 0, w = 0, h = 0;
+    if (!fn) return 0;
+    if (!g_w.vsink_el) return 0;
+    if (sscanf(g_w.rect, "<%d,%d,%d,%d>", &x, &y, &w, &h) != 4) return 0;
+    if (w < 2 || h < 2) return 0;
+    return fn(g_w.vsink_el, x, y, w, h) ? 1 : 0;
 }
 
 /*
@@ -1079,7 +1165,7 @@ static void video_post_rate_desc(char *out, size_t cap) {
     }
     tw = w & ~1;
     th = h & ~1;
-    if (g_w.sw_scale == 1 && (g_w.rotate == 90 || g_w.rotate == 270)) {
+    if ((g_w.sw_scale == 1 || g_w.sw_scale == 3) && (g_w.rotate == 90 || g_w.rotate == 270)) {
         int t = tw;
         tw = th;
         th = t;
@@ -1107,11 +1193,100 @@ static void video_post_rate_desc(char *out, size_t cap) {
         snprintf(out, cap, "video/x-raw,framerate=%s ! ", PB2_PANEL_RATE);
         return;
     }
-    pb2_logf("video: videoscale -> %dx%d (panel rect %dx%d, rotate=%d, mode=%d, buf=%d%%)",
-             tw, th, w, h, g_w.rotate, g_w.sw_scale, bs);
+    /* sw_scale=3 是 3.5.6 第十四轮加的**回退档**：插 videoscale 但用默认
+     * bilinear。真机若发现「画面变形」与 lanczos 相关（同一条流、同一个矩形，
+     * 只换算法就变），storage 覆盖 bili_device_profile = {"swScale":3} 即可，
+     * 不用重装包。 */
+    const char *method = (g_w.sw_scale == 3) ? "" : " method=lanczos";
+    /* 【第十八轮】不再插 videoflip：真机证明 swScale=2（B 档，竖帧）本来就对，
+     * 绿幕只出现在 swScale=1（横帧）档。默认档已改成 2，这条路径保持原样。 */
+    pb2_logf("video: videoscale -> %dx%d%s (panel rect %dx%d, rotate=%d, mode=%d, buf=%d%%)",
+             tw, th, method, w, h, g_w.rotate, g_w.sw_scale, bs);
+    /*
+     * 【3.5.6 第十四轮：为什么必须指定 method】
+     * 真机反馈「视频播放有一些糊，就算是 360p 的也不应该这么糊」。
+     * videoscale 的 method 默认是 **bilinear**，而这里的缩小倍率非常大：
+     * 1080p 源 (1920x1080) → 面板上的 444x250，缩小 4.3 倍。双线性在这种
+     * 倍率下**不做任何抗锯齿预滤波**，每 4.3 个输入像素只取 2x2，等于抽点：
+     * 细节被丢掉，边缘出现锯齿，观感就是"糊"。
+     *
+     * lanczos 是 6-tap 且**按缩放比例扩展 support**（相当于先低通再重采样），
+     * 大倍率缩小时能保住线条和文字边缘。代价是 CPU：每输出像素约 36 次
+     * 采样，444x250@30fps 大约 1.2 亿次/秒 —— RK 这颗 U 跑得动，但如果某台
+     * 固件上出现持续丢帧，把这里换回 "videoscale"（不加 method）即可，
+     * 那是旧行为（bilinear），一像素画质换一点余量。
+     * 日志里打出 method 是为了真机一眼能确认这条改动生效了。
+     */
+    /*
+     * 【pixel-aspect-ratio=1/1 是必须写死的】
+     * caps 里不写 PAR 时，videoscale 会把源 caps 的 PAR 原样带下来；而
+     * kmssink 的 force-aspect-ratio=false 只跳过了"我算信箱"，并不跳过
+     * "按 PAR 拉伸" —— 一旦源带了个非 1:1 的 PAR（部分转码稿是真的有），
+     * 画面就会横向/纵向被拉，而矩形尺寸完全正确、日志里一点异常都看不出。
+     * 这里显式钉成方形像素，把这条路彻底堵掉。
+     */
+    /*
+     * 【3.5.6 第二十五轮：不要 add-borders —— 它补的边是绿色】
+     *
+     * 第二十四轮曾用 `add-borders=true` 把信箱交给 videoscale（等价参考系统播放器的
+     * force-aspect-ratio）。真机上竖屏稿件左右出现大片**绿幕**：videoscale 补边
+     * 时按 YUV 全 0 填充，而 NV12 的 (0,0,0) 是绿色，不是黑色。横屏 16:9 只补
+     * 11px 看不出来，竖屏要补 150px，一眼就是绿。
+     *
+     * 现在信箱重新由 JS 算（playVideoRectsFor 的 fit），矩形 = 画面本身，
+     * plane 窗口与 buffer 等大，**没有边可补**；画面之外的黑色由 Falcon 的
+     * UI 层提供（hole 之外的 fb 黑）。这里回到最朴素的"缩到窗口大小"。
+     *
+     * sw_scale=0（X6 Pro 的硬件缩放路径）不插 videoscale，不受影响。
+     */
+    /*
+     * 【3.5.6 第二十六轮：全屏 cover】
+     * 普通态 crop=0/0，走下面那条逐字节不变的老路径。
+     * 全屏横屏时 JS 算出「等比放大后要裁掉多少」，这里让 videoscale 先输出
+     * 完整的大画面，再用 videocrop 裁到窗口大小 —— 画面填满整个视口，
+     * 比例保持不变，也不依赖 kmssink 的缩放能力（仍 1:1 贴 buffer）。
+     */
+    if ((g_w.crop_x > 0 || g_w.crop_y > 0) && g_w.sw_scale) {
+        int cw = tw + 2 * g_w.crop_x;
+        int ch = th + 2 * g_w.crop_y;
+        cw &= ~1;
+        ch &= ~1;
+        if (cw > 2 && ch > 2 && cw <= 4096 && ch <= 4096) {
+            pb2_logf("video: cover -> videoscale %dx%d, videocrop x=%d y=%d -> %dx%d",
+                     cw, ch, g_w.crop_x, g_w.crop_y, tw, th);
+            snprintf(out, cap,
+                     "videoscale%s ! "
+                     "video/x-raw,width=%d,height=%d,framerate=%s,"
+                     "pixel-aspect-ratio=1/1 ! "
+                     "videocrop left=%d right=%d top=%d bottom=%d ! ",
+                     method, cw, ch, PB2_PANEL_RATE,
+                     g_w.crop_x, g_w.crop_x, g_w.crop_y, g_w.crop_y);
+            return;
+        }
+    }
+    /*
+     * 【3.5.6 第二十九轮 v8：不裁切，画面按原生比例直接缩到窗口】
+     *
+     * v5~v7 曾在这里插 `videocrop left/right/top/bottom=16`，想切掉解码帧
+     * 最外圈那条绿线（H.264 的 1080 按 16 宏块对齐解成 1088，多出的 8 行
+     * 没人写 = YUV 全 0，而 NV12 的 0 是绿色不是黑色）。
+     *
+     * 这条路放弃，理由是它治不了本：
+     *   · 裁多少只能猜（8 / 16 / 32 视片源而定），裁多一刀砍掉真画面；
+     *   · 要在 do_open 里配"建失败就去掉裁切重建"，每起播多赔一次管线构建
+     *     —— 用户已经反馈"打开视频慢了一些"；
+     *   · 绿线来自源帧内容，等比缩放只会把它一起缩小，裁切只是把可见区域
+     *     往里挪，换一个尺寸又会从别的边露出来。
+     *
+     * 现在这里回到最朴素的一条：源帧等比缩到窗口，pixel-aspect-ratio 钉死
+     * 1:1。矩形由 JS 按视频原生宽高比算（playVideoRectsFor 的 fit），
+     * 送进 sink 的 buffer 宽高比 = 片源宽高比 = 窗口宽高比，全程不拉不裁。
+     */
     snprintf(out, cap,
-             "videoscale ! video/x-raw,width=%d,height=%d,framerate=%s ! ",
-             tw, th, PB2_PANEL_RATE);
+             "videoscale%s ! "
+             "video/x-raw,width=%d,height=%d,framerate=%s,"
+             "pixel-aspect-ratio=1/1 ! ",
+             method, tw, th, PB2_PANEL_RATE);
 }
 
 static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
@@ -1243,8 +1418,8 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
          * 逐帧 renegotiate。规格尺寸用旋转后的渲染矩形（mppvideodec 的
          * rotation 已把画面转正，rect 也是按转正后的宽高算出来的）。
          */
-        char vrate[192];
-        char vpost[128];
+        char vrate[320];
+        char vpost[256];
         video_post_rate_desc(vpost, sizeof(vpost));
         snprintf(vrate, sizeof(vrate), " videorate ! %s", vpost);
         if (g_w.sw_scale && g_w.req) {
@@ -1316,7 +1491,7 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
                      "max-lateness=%d qos=%s force-aspect-ratio=false %s %s %s "
                      "render-rectangle=%s",
                      qbufs, qbytes, qns,
-                     g_w.rotate, mpperr, fpscap, vrate, kms_plane_arg(),
+                     decoder_rotation(), mpperr, fpscap, vrate, kms_plane_arg(),
                      late_ms, qos_s, tsoff, skip_s, syncmode, g_w.rect);
         } else if (strstr(cn, "h265") || strstr(cn, "hevc")) {
             snprintf(desc, sizeof(desc),
@@ -1340,7 +1515,7 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
                      "max-lateness=%d qos=%s force-aspect-ratio=false %s %s %s "
                      "render-rectangle=%s",
                      qbufs, qbytes, qns,
-                     g_w.rotate, mpperr, fpscap, vrate, kms_plane_arg(),
+                     decoder_rotation(), mpperr, fpscap, vrate, kms_plane_arg(),
                      late_ms, qos_s, tsoff, skip_s, syncmode, g_w.rect);
         } else {
             pb2_logf("pad-added: unsupported video caps %s", cn);
@@ -1941,9 +2116,26 @@ static int on_video_src_probe(GstPad *pad, GstPadProbeInfo *info, void *ud) {
 }
 
 static int on_video_buffer(GstPad *pad, GstPadProbeInfo *info, void *ud) {
-    (void)pad;
     (void)info;
     (void)ud;
+    /*
+     * 【第二十九轮 v6】首帧打一次 sink 实际协商到的 buffer 尺寸。
+     * 绿边排查唯一缺的就是这一行：如果 caps 与 render-rect 相等，绿必来自
+     * 源帧边缘（裁源即可）；如果不等，就是平面/管线尺寸对不上，得改别处。
+     */
+    if (!g_w.vcaps_logged) {
+        GstCaps *caps = gst_pad_get_current_caps(pad);
+        if (caps) {
+            GstStructure *st = gst_caps_get_structure(caps, 0);
+            int cw = 0, ch = 0;
+            if (st && gst_structure_get_int(st, "width", &cw) &&
+                gst_structure_get_int(st, "height", &ch) && cw > 0 && ch > 0) {
+                g_w.vcaps_logged = 1;
+                pb2_logf("video: sink caps %dx%d, render-rect %s", cw, ch, g_w.rect);
+            }
+            gst_caps_unref(caps);
+        }
+    }
     atomic_fetch_add_explicit(&g_w.probe.frames, 1, memory_order_relaxed);
     atomic_store_explicit(&g_w.probe.lastFrameMs, pb2_now_ms(), memory_order_relaxed);
 
@@ -2590,7 +2782,7 @@ static int build_pipeline(pb2_open_req_t *req, int src_already_open) {
                                   strstr(g_w.src.location, "hevc"))
                                      ? "h265parse"
                                      : "h264parse";
-            char vpost[128];
+            char vpost[256];
             video_post_rate_desc(vpost, sizeof(vpost));
             n = snprintf(desc, sizeof(desc),
                          "filesrc location=\"%s\" ! %s ! mppvideodec rotation=%d ! "
@@ -2598,7 +2790,7 @@ static int build_pipeline(pb2_open_req_t *req, int src_already_open) {
                          "kmssink name=vsink %sdriver-name=rockchip sync=true "
                          "max-lateness=%d qos=true force-aspect-ratio=false "
                          "skip-vsync=true render-rectangle=%s",
-                         loc1, parser, g_w.rotate, vpost, kms_plane_arg(),
+                         loc1, parser, decoder_rotation(), vpost, kms_plane_arg(),
                          PB2_MAX_LATENESS, g_w.rect);
             g_w.vbranch = 1; /* 固定分支，不走 pad-added */
             raw_fixed = 1;
@@ -2907,8 +3099,10 @@ static void do_open(pb2_open_req_t *req) {
      */
     g_w.panel_x_offset = (req->panelOffset >= 0) ? req->panelOffset : PB2_PANEL_X_OFFSET;
     g_w.kms_plane_id = (req->planeId == 0) ? PB2_KMS_PLANE_ID : req->planeId;
-    g_w.sw_scale = (req->swScale == 1 || req->swScale == 2) ? req->swScale : 0;
+    g_w.sw_scale = (req->swScale >= 1 && req->swScale <= 3) ? req->swScale : 0;
     g_w.buf_scale = (req->bufScale >= 50 && req->bufScale <= 400) ? req->bufScale : 100;
+    g_w.crop_x = (req->cropX > 0 && req->cropX <= 2048) ? req->cropX : 0;
+    g_w.crop_y = (req->cropY > 0 && req->cropY <= 2048) ? req->cropY : 0;
     /*
      * 【平面兜底重试】上一次 OPEN 已经判定「显式平面不可用」。这次不再用它，
      * 直接切「自动挑平面 + 软件缩放」。注意必须写在上面两行之后 ——
@@ -2925,6 +3119,7 @@ static void do_open(pb2_open_req_t *req) {
              g_w.buf_scale);
     snprintf(g_w.rect, sizeof(g_w.rect), "<%d,%d,%d,%d>",
              g_w.panel_x_offset + req->x, req->y, req->w, req->h);
+    g_w.vcaps_logged = 0;
     /* videoscale 的输出 caps 必须是偶数宽高（NV12），且与 render-rectangle
      * 严格等大。差 1px 都会让 kmssink 再拉一次，画面比例就毁了。 */
     normalize_video_rect("OPEN");
@@ -3094,7 +3289,8 @@ static void do_open(pb2_open_req_t *req) {
      */
     if (pb2_mute_enabled()) pb2_mixer_pre_mute();
 
-    if (build_pipeline(req, 0) != 0) {
+    int built = build_pipeline(req, 0);
+    if (built != 0) {
         /*
          * 【P0-1】建管线失败也要走 teardown：build_pipeline 内部可能已经
          * 打开了 src（pb2_src_open 成功但 gst_parse_launch 失败），
@@ -4943,21 +5139,103 @@ static void process_cmd(pb2_cmd_t *c) {
                     rect_rebuilt = 1;
                 }
             } else {
-                /* 正常尺寸之间改矩形：直接 set 即可，不会踩棘轮。
-                 * 3.5.6：先写进 g_w.rect 并做偶数对齐，再用**对齐后的**值
-                 * 下发 —— 否则即时 set 与下次 build_pipeline 差 1px，
-                 * kmssink 会多拉一次，画面比例被破坏。 */
+                /* 正常尺寸之间改矩形。
+                 *
+                 * 【3.5.6 第九轮】优先走 GstVideoOverlay.set_render_rectangle()：
+                 * 它是运行期改平面的正道 —— sink 自己重配 plane，放大缩小都生效，
+                 * 也不用把属性写进去等下一次 configure。老路径（写 write-only 属性
+                 * + 暂停态脉冲）保留为回落：拿不到 libgstvideo 的设备行为不变。
+                 *
+                 * 为什么必须换：用户点画面收起/展开控件时矩形要来回变，老路径在
+                 * "放大"方向不可靠，连点两下就会停在中间态 —— 真机表现是
+                 * 「点两下屏幕以后视频跑到下方 / 只露半截」。 */
+                /*
+                 * 【3.5.6 第十四轮：只移动、不缩放时不要重建管线】
+                 *
+                 * videoscale 的输出 caps 只由 width/height 决定，与 x/y 无关。
+                 * 第十四轮把全屏改成"只改位置"（视频段高度普通态与全屏态完全相同），
+                 * 于是进出全屏时 w/h 一模一样，只有 x 变 —— 这种情况重建管线是
+                 * 纯浪费，还会黑一下。这里记住旧尺寸，normalize 之后比较一次。
+                 */
+                int old_w = 0, old_h = 0, new_w = 0, new_h = 0, size_same = 0;
+                sscanf(g_w.rect, "<%*d,%*d,%d,%d>", &old_w, &old_h);
                 snprintf(g_w.rect, sizeof(g_w.rect), "%s", rect);
                 normalize_video_rect("SET_RECT");
-                gst_util_set_object_arg(g_w.vsink_el, "render-rectangle", g_w.rect);
-                if (g_w.paused && g_w.pipe && g_w.pipeline_alive) {
-                    gst_element_set_state(g_w.pipe, GST_STATE_PLAYING);
-                    pb2_sleep_ms(200);
-                    rect_pulsed = 1;
+                sscanf(g_w.rect, "<%*d,%*d,%d,%d>", &new_w, &new_h);
+                size_same = (old_w > 0 && old_h > 0 && old_w == new_w && old_h == new_h);
+                /*
+                 * ============ 【3.5.6 第十轮：sw_scale 档绝不即时改平面】 ============
+                 *
+                 * X7 Pro 的管线里插了
+                 *   videoscale ! video/x-raw,width=<g_w.rect.w>,height=<g_w.rect.h>
+                 * （video_post_rate_desc），caps 是 **OPEN 那一刻**按 g_w.rect 算好的。
+                 * 播放中只改 render-rectangle，kmssink 拿到的是旧尺寸 buffer，
+                 * 却要往新矩形里贴 —— 真机照片里「点一下隐藏进度条，画面变宽
+                 * 却被推到下半屏、底部被裁」就是这么来的。文件里那句
+                 * "X7 自选平面疑似只做 1:1 贴 buffer，改 render-rectangle 对
+                 * 显示尺寸毫无作用" 是同一件事的另一半。
+                 *
+                 * 唯一可靠的「换尺寸」途径是让 build_pipeline 用新 g_w.rect
+                 * 重算 caps 并重建平面。这里只把新矩形记下来，然后投递一次
+                 * 原地 seek（与 1x1 恢复分支同一条已经充分验证过的路径）；
+                 * 直播的 seek 恒被忽略，改走 live_rebuild_pipeline。
+                 *
+                 * 页面侧已经保证**只有进/出全屏**才会发 SET_RECT（第十轮），
+                 * 控件显隐/字幕开关全部改成 DOM 纯黑占位，所以这里一次重建
+                 * 只对应一次用户主动的全屏切换，不会在日常操作里频繁黑屏。
+                 */
+                /*
+                 * 【3.5.6 第十五轮：overlay 拿不到时，连"只移动"也必须重建】
+                 *
+                 * 第十四轮给 size_same 开了一条捷径：x/y 变了、w/h 没变时不重建，
+                 * 直接走 overlay 把平面挪过去。但 overlay 需要 dlopen 到
+                 * libgstvideo；拿不到时旧代码会掉进最后的"写 render-rectangle
+                 * 属性"分支 —— 而 X7 的 kmssink 只在 configure 那一刻读这个属性，
+                 * 播放中写进去**没有任何效果**（文件里反复记过这件事）。
+                 *
+                 * 真机表现就是：点「全屏」，左右两栏确实让位了，但画面停在原地，
+                 * 用户只能说"全屏还是不行"。日志里却是一行"SET_RECT ... took 3ms"，
+                 * 看起来完全正常 —— 这种"成功但无效"比报错更难查。
+                 *
+                 * 现在把判据收紧：sw_scale 档只要没有 overlay 接口，就一律走重建
+                 * （原地 seek，caps 跟着重算），不再赌属性生效。
+                 */
+                int need_rebuild = 0;
+                if (g_w.sw_scale) {
+                    need_rebuild = !size_same || (pb2_overlay_fn() == NULL);
                 }
-                pb2_logf("SET_RECT %s took %lldms%s", rect,
-                         pb2_now_ms() - t0_rect,
-                         rect_pulsed ? " [property first, then pulse PLAYING]" : "");
+                if (need_rebuild) {
+                    if (g_w.is_live) {
+                        live_rebuild_pipeline("SET_RECT deferred");
+                        pb2_logf("SET_RECT %s deferred (sw_scale: live rebuild)", g_w.rect);
+                    } else {
+                        g_w.seek_target = g_w.last_pos_ms > 0 ? g_w.last_pos_ms : 0;
+                        g_w.seek_pending = 1;
+                        g_w.seek_last_ms = pb2_now_ms() - PB2_SEEK_DEBOUNCE_MS - 1;
+                        pb2_stats_patch_seek(&g_w.stats, 1, g_w.seek_target);
+                        pb2_logf("SET_RECT %s deferred (sw_scale: caps fixed at OPEN; rebuild via in-place seek@%lld%s)",
+                                 g_w.rect, g_w.seek_target,
+                                 size_same ? ", move-only but overlay unavailable" : "");
+                    }
+                    rect_rebuilt = 1;
+                } else if (overlay_apply_rect()) {
+                    /* X6（无 videoscale），或 X7 上「只移动不改尺寸」：overlay 是
+                     * 运行期改平面的正道 —— sink 自己重配 plane，buffer 尺寸没变，
+                     * caps 不用重协商，画面不会变形也不会黑。 */
+                    pb2_logf("SET_RECT %s via overlay%s (took %lldms)", g_w.rect,
+                             size_same ? " [move only, no rebuild]" : "",
+                             pb2_now_ms() - t0_rect);
+                } else {
+                    gst_util_set_object_arg(g_w.vsink_el, "render-rectangle", g_w.rect);
+                    if (g_w.paused && g_w.pipe && g_w.pipeline_alive) {
+                        gst_element_set_state(g_w.pipe, GST_STATE_PLAYING);
+                        pb2_sleep_ms(200);
+                        rect_pulsed = 1;
+                    }
+                    pb2_logf("SET_RECT %s took %lldms%s", rect,
+                             pb2_now_ms() - t0_rect,
+                             rect_pulsed ? " [property first, then pulse PLAYING]" : "");
+                }
             }
 
             /*

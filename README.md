@@ -5,7 +5,11 @@
 这是一款跑在有道词典笔上的 B 站客户端，用有道自家的 Falcon 小程序框架（QuickJS + Vue 2 单文件组件）写成。屏幕只有 960×266 点，指甲盖大小，所以我按 iPad 版 B 站的骨架重做了界面，把推荐、搜索、播放、评论、图文、直播全塞进这一个页面里。
 
 当前版本 `3.5.6`，支持 **X6 Pro / X7 Pro**（RK3562，aarch64）。X5 分支已停止维护。
-X7 Pro 的播放器适配（黑屏修复、设备参数运行时自适应）见 [`docs/x7pro-adaptation.md`](docs/x7pro-adaptation.md)。
+X7 Pro 的播放器适配（黑屏修复；3.5.6 第二十四轮起机型参数**写死**，不再运行时自适应）见 [`docs/x7pro-adaptation.md`](docs/x7pro-adaptation.md)；
+播放页悬浮控件（顶栏 / 控制条 / 字幕带 / 全屏四段布局、单击显隐、自动收起、加载动画）见
+[`docs/player-chrome.md`](docs/player-chrome.md)；控制条视觉、"点两下画面画面跑偏"、
+"字幕不出/互动不连播/进度条卡住"这几个真机问题的根因与修法在该文档 §7–§8
+（含 native 运行时改矩形改走 `GstVideoOverlay`，不再依赖 write-only 的 `render-rectangle`）。
 
 ![version](https://img.shields.io/badge/version-3.5.6-blue)
 ![license](https://img.shields.io/badge/license-GPL--3.0-green)
@@ -66,9 +70,46 @@ X7 Pro 的播放器适配（黑屏修复、设备参数运行时自适应）见 
 **播放**
 
 - DASH 分离流按 qn 阶梯取最高可用档（`116`=1080P60 → `80`=1080P → `74`=720P60 → `32`=480P → `16`=360P），同档优先 AVC
-- 点视频区暂停/继续；进度条拖动定位（拖动过程中零请求，松手后 250ms 才下发一次）
+- 播放页控件：顶部悬浮条（返回、标题、−1m/−10s/+10s/+1m、暂停标记）+ 底部控制条（播放键、当前时间、可拖进度条、总时长、字幕开关、全屏）；
+  单击画面空白处收起整套控件（收起后视频洞变大、字幕落到最底部），再点一次恢复；暂停/继续走控制条左侧按钮
+- 全屏：左右两列让位，视频洞占满 936 宽，只换 `render-rectangle` 不重取流；
+  全屏态控件静默 3.5s 自动收起、点画面唤出（顶栏 / 底栏 / 自动收起节拍均按参考系统播放器还原）；
+  在 936×280 这块 3.34:1 的屏上 16:9 画面从 448×252 放大到 498×280（全屏态字幕改由顶栏那条 18px 承载，
+  否则 28px 的字幕带会把这点增益全吃掉 —— 详见 `docs/player-chrome.md` §5）
+- 视频加载时播 B 站那套「小电视 + 三个跳动的点」加载动画（falcon 没有可靠的 CSS 动画，帧由 120ms 定时器驱动）
+- 进度条拖动定位（拖动过程中零请求，松手后 250ms 才下发一次）
 - 画质七档：「我的 → 视频调节」，`auto` / `1080p60` / `1080p30` / `720p60` / `720p30` / `480p30` / `360p30`
 - 播放历史（最近 10 条，在「我的」页）
+
+**分P / 合集**
+
+- 多 P 稿件：右栏顶部出现「分P n」页签，列出每一段与单段时长，点任意一段直接切；
+  当前段高亮，左列标题显示「稿件名 · P2 第二段」
+- 合集：同一位置出现「合集 n」页签，按 UP 主的 `sections` 分组（正片 / 花絮…），
+  每一集是独立的 `bvid`，点一下换集；当前集高亮并显示「第 7 / 42 集」
+- 数据与起播共用同一次 `x/web-interface/view` 响应，**不额外请求**；
+  切换复用完整起播流程（重取流 / 重算矩形 / 重拉字幕与互动），不做"轻量 seek"
+- 单 P 且无合集的稿件不显示页签，右栏与以前逐像素相同
+  （细节与坑见 `docs/video-pages-season.md`）
+
+**CC 字幕**
+
+- 上游 `x/player/v2` 取字幕轨道 → 下载 `body[]` 时轴 JSON → 按播放位置插值取当前句
+- 「我的 → CC 字幕」里开关字幕、点击轮转语言；设置持久化在 `bili_cc_settings`
+- 视频是 KMS overlay 平面盖在 UI 之上，字幕因此**不是浮层**：中列被切成
+  「顶栏 / 视频洞 / 字幕带 / 控制条」四段（`play_chrome.planBands`），字幕占其中 28px，
+  native 的 `render-rectangle` 与洞同源收缩；控件展开时字幕夹在画面与控制条之间，
+  收起时落到最底部（就是控制条原来的位置）
+- 全屏态没有独立的字幕带（那样画面一点都不会变大），字幕改借顶栏那 18px 单行显示
+
+**互动视频**
+
+- 上游 `x/player/v2` 的 `interaction.graph_version` + `x/stein/edgeinfo_v2` 拉每个片段的选项
+- 隐藏变量 `hidden_vars` 与 `condition` 条件表达式求值，只显示当前真正可点分支；
+  点选项后 `native_action` 的变量赋值继续演进到下一片段
+- 题面按上游 `start_time_r` 在片尾前 3 秒出现；`pause_video=1` 的片段播完停住等选择，
+  `type=0` 过渡片段自动连播、不弹空选项；支持「回退上一片段」「重播本段」，结局不自动跳
+- 换片段只重建播放会话（cid 覆盖取流），不回列表、不重进播放页
 
 **互动**
 
@@ -272,6 +313,17 @@ NODE_BIN=$PWD/node_modules/node/bin/node.exe bash tools/build-wsl.sh
 的 PMS 能装载）→ rollup → Linux 版 qjsc 编 `.js.bin` → 重算 cert 组包。
 细节与踩坑见 [`docs/x7pro-adaptation.md`](docs/x7pro-adaptation.md) §5。
 
+同时出**两个包**（X7 全系全量包 + 只含自检页的测试包）：
+
+```bash
+NODE_BIN=... bash tools/build-variants.sh
+#  8002026110200001.3_5_6_x7.amr    完整 UI（X7P 936x280 / X6P 960x266 写死）
+#  8002026110200001.3_5_6_diag.amr  只有链路自检页，逐台验屏幕/平面/解码
+```
+
+两个包共用 appid，安装后者会覆盖前者；说明见
+[`docs/build-variants.md`](docs/build-variants.md)。
+
 `npm run native` 内部是 `powershell -File native/build.ps1`，默认 target 是 `aarch64`。X6 Pro 是 **aarch64 64 位**，装 32 位库会在 `dynamic_load_jsapi` 处直接报 `wrong ELF class: ELFCLASS32`。
 
 打包时出现下面这条告警是**正常的**：
@@ -322,10 +374,14 @@ adb shell "grep -a 'Esmart1-win0' -A9 /sys/kernel/debug/dri/0/summary"
 
 ## 已知限制
 
-- **支持 X6 Pro / X7 Pro**（均为 aarch64）。X7 Pro 的视口、面板列偏移与 DRM
-  plane 由 `src/services/device_profile.js` 运行时探测，必要时用 storage 键
-  `bili_device_profile` 覆盖。X5 的 32 位 arm 分支已停止维护并转移到[PenBili-CVI](https://github.com/56dz/PenBili-CVI)
-- **无弹幕**。v2.7.0 移除，因为弱设备上逐帧文字渲染会拖垮解码
+- **支持 X6 Pro / X7 Pro**（均为 aarch64）。**3.5.6 第二十四轮起不再做运行时
+  自适应**：视口、面板列偏移、DRM plane、缩放档位全部写死在
+  `src/services/device_profile.js` 的 `X7P` / `X6P` 两张常量表里；
+  `$falcon.env` 与 storage 覆盖一律忽略。换机器改常量表。
+  X5 的 32 位 arm 分支已停止维护并转移到[PenBili-CVI](https://github.com/56dz/PenBili-CVI)
+- **无弹幕**。v2.7.0 移除，因为弱设备上逐帧文字渲染会拖垮解码（CC 字幕走 UI 字幕带，不烧帧，不受此限制）
+- **未登录时 B 站字幕列表恒为空**（CC 字幕/AI 字幕需要 `SESSDATA`）；互动视频节点匿名态
+  `story_list` 只有起始模块，登录后才能用服务端进度回溯，本项目改为本地历史快照回退
 - **无倍速播放**
 - **未登录时服务端最高只给 480P**
 - 起播比"直接开播"慢 1.7~2.4 秒，这是缓冲门的代价（换来起播即满帧，不从第 3 秒开始）
