@@ -1392,8 +1392,18 @@ export default {
       if (this.play.state === 'loading') return '…';
       return this.play.state === 'paused' ? '开始' : '暂停';
     },
+    /* 【第三十轮】播完也保留视频洞。
+     * 用户真机截图：「视频播完之后删除这个已播完的遮挡页」。旧逻辑里
+     * holeVisible 只管 playing/paused，一进 ended 就把整块视频区换成
+     * .play-idle（不透明底色 + 居中「已播完」），画面被它整块盖掉。
+     * 现在播完继续挖洞，KMS 平面的末帧留在屏上（参考系统播放器的做法：
+     * 播完停在最后一帧，只在控制条上显示 02:32 / 02:32 与「已播完」）。
+     * 末帧由 kmssink 的 last-sample 保留；万一 native 已经 teardown，
+     * 洞下面是纯黑，同样不会出现遮挡页。 */
     holeVisible() {
-      return this.mode === 'play' && (this.play.state === 'playing' || this.play.state === 'paused');
+      const st = this.play.state;
+      return this.mode === 'play' &&
+        (st === 'playing' || st === 'paused' || st === 'ended');
     },
     idleText() {
       if (this.play.state === 'loading') return '取流中…';

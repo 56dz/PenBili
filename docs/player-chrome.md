@@ -1691,3 +1691,187 @@ video/x-raw,width=W,height=H,framerate=30/1,pixel-aspect-ratio=1/1 ! kmssink
 `videocrop left=16` / `has_videocrop` / `use_vcrop` / `retry WITHOUT crop`
 出现任意一个就红。
 
+
+## 25. 第三十轮：播完的遮挡页 + 绿边（不改几何）
+
+### 25.1 播完不要遮挡页
+
+真机截图：视频播完后整块视频区变成一块黑底 + 居中一行「已播完」，把末帧
+盖掉了。用户要求「视频播完之后删除这个已播完的遮挡页」。
+
+原因在 `holeVisible`：
+
+```js
+// 旧
+return this.mode === 'play' &&
+  (this.play.state === 'playing' || this.play.state === 'paused');
+```
+
+`ended` 不在里面，于是 `holeVisible=false` → `<hole>` 被 `v-else` 换成
+`.play-idle`（不透明层 + `{{ play.note || idleText }}`）。而 `idleText` 对
+`ended` 返回的就是「已播完」。
+
+**改法：`ended` 也挖洞。**
+
+```js
+const st = this.play.state;
+return this.mode === 'play' &&
+  (st === 'playing' || st === 'paused' || st === 'ended');
+```
+
+- 末帧由 kmssink 的 `last-sample` 保留，画面停在最后一帧；
+- 「已播完」这层信息本来就有两处更合适的位置：控制条上的 `02:32 / 02:32`
+  与播放键状态；
+- `loading` / `error` 保持遮挡 —— 那时是真的没有画面，必须用不透明底盖住
+  （falcon 不主动清屏，透明层会透出上一屏残留）。
+
+### 25.2 绿边：从"裁"改成"改颜色"
+
+§24.13 已经把源帧裁切整段删掉了，管线是原生比例。绿边还在，说明它确实来自
+**最外圈像素的颜色值**，不是几何：
+
+- `YUV(0,0,0)` 不是黑。NV12 里 `U=V=0` 是最大色度偏移，转 RGB 是绿色；
+- 两个来源都落在最外圈：编码器按 16 宏块对齐（1080 解成 1088，多出的行没人
+  写，内存是 0）；videoscale 的 lanczos 在边界把越界采样当 0，6-tap 会把这
+  点绿渗进来。
+
+既然不能裁，就只改**颜色**：在缩放后的 ghost sink pad 上加一个 BUFFER probe，
+把最外 `EDGE_SCRUB = 4` 像素里满足
+
+```
+Y < 120 && U < 96 && V < 96     /* 偏暗 + 两个色度都强烈偏负 = 未初始化绿 */
+```
+
+的像素写成 BT.601 的黑 `(Y=16, U=128, V=128)`。
+
+判据为什么安全：真黑的 `U=V=128`，永远不命中；正常画面（包括草地）要在
+边缘 4px 内同时满足"偏暗 + U/V 都 < 96"才会被改，概率极低。即使误命中，
+改的也只是画面最外 4 个像素。
+
+工程约束：
+
+| 项 | 取值 | 理由 |
+| --- | --- | --- |
+| probe 位置 | 分支 bin 的 ghost sink pad | 拿到的是**缩放后**的 buffer（160x272 级），每帧只扫约 3k 像素 |
+| 格式 | 只处理 NV12 | X7 链路就是 NV12；其它格式直接返回 0 |
+| map | `GST_MAP_READWRITE`，失败即返回 0 | dmabuf 只读时绝不能影响播放 |
+| 日志 | 首帧一行 `video: edge scrub N px (green -> black)` | 真机一眼看出改了多少 |
+
+这条和 `videocrop` 的本质区别：裁切移动的是**可见区域**（画面内容少一块、
+比例变），这里只把**没有内容**的像素从绿改成黑，几何与画面内容都不动。
+
+守卫在 `test/run.js`：
+
+- 「播放页: 播完保留视频洞，不弹「已播完」遮挡页」；
+- 「native: 边缘绿改黑，只改没有内容的像素（不裁画面）」。
+
+### 25.3 第三十一轮：真机日志否掉了「按颜色判绿」
+
+用户把诊断页拍回来，关键三行：
+
+```
+[KMS] format: NV12 little-endian ...  dst: pos[0,496] rect[256 x 448]  pitch: 256
+17:20:05.xxx  video: sink caps 256x448, render-rect <0,496,256,448>
+17:20:05.xxx  video: edge scrub 0 px (green -> black)
+17:20:57.51   video: software scale -> 256x448 method=lanczos
+              (panel rect 256x448; rotate=270; mode=2; buf=100%)
+17:20:57.51   pad-added: source=640x360 (encoded) ... swScale=2 buf=100%
+```
+
+结论一：**`caps == render-rect == plane`**（都是 256x448，pitch 256）。平面没有
+比 buffer 大，绿不可能来自平面未覆盖区，只能是 buffer 最外圈的像素值。
+
+结论二：**`edge scrub 0 px`**。§25.2 的判据 `Y<120 && U<96 && V<96` 在这次
+播放里一个像素都没命中。也就是说这条绿**不是** `YUV(0,0,0)` —— 之前从手机
+拍屏照片反推的 `(Y,U,V)≈(103,125,80)` 反而更接近：U 接近中性、只有 V 明显
+偏低，是 videoscale 边界插值 / 色彩空间转换之后的值，不是未初始化内存。
+
+再调阈值就是继续猜。既然绿已经确定在最外圈，就**不判颜色**了。
+
+**v9 改法：边缘 clamp 延伸**
+
+把最外 `EDGE_SCRUB = 8` 像素环整圈替换成「往内第 8 行/列」的像素：
+
+```c
+sr = row < e ? e : (row >= h - e ? h - 1 - e : row);
+sc = col < e ? e : (col >= w - e ? w - 1 - e : col);
+yp[yi] = yp[sr * w + sc];           /* Y */
+uv[ui] = uv[(sr >> 1) * w + (sc & ~1)];  /* 交错的 U/V */
+```
+
+- 源坐标 clamp 到 `[e, w-1-e] × [e, h-1-e]`，**一定落在未被改写的内部区域**，
+  所以按行顺序原地改写是安全的；
+- 没有黑框，画面看起来是自然延伸到边；
+- 不裁切、不改几何、不动比例，只重写最外 8 个像素环（256 宽的 3%）；
+- 每帧执行，extract/fill 全程标量参数，失败返回 0 不影响播放。
+
+首帧日志改成带真实数值的诊断，万一绿还在，下一轮不用再靠拍照颜色反推：
+
+```
+video: edge clamp 256x448 E=8 px=NNNN minY=(y,u,v) minV=(y,u,v)
+```
+
+`minY` / `minV` 是**改写之前**最外圈里 Y 最小 / V 最小的像素原始 YUV。
+
+守卫在 `test/run.js` 的「native: 边缘绿用内侧像素覆盖」：不许再出现颜色
+阈值判定、不许再写 `(16,128,128)` 纯黑、不许用 `GstMapInfo`、不许裁画面。
+
+### 25.4 第三十二轮：probe 挂错层了 —— 改的是源帧，绿线在缩放后
+
+用户把日志页放大拍回来，逐行读清：
+
+```
+[KMS] format: NV12 little-endian (0x3231564e)
+[KMS] dst: pos[0,496] rect[256 x 448]
+[KMS] fb[0]: pitch: 256 offset: 0
+video: sink caps 640x360, render-rect <0,496,256,448>
+video: software scale -> 256x448 method=lanczos (panel rect 256x448; rotate=270; mode=2; buf=100%)
+pad-added: source=640x360 (encoded) ... swScale=2 buf=100%
+```
+
+**两处推翻上一轮的判断：**
+
+1. `video: sink caps 640x360`，**不是** 256x448。`on_video_buffer` 挂在
+   `gst_parse_bin_from_description` 生成的分支 **ghost sink pad** 上，那是分支
+   的**入口**，拿到的是解码器输出的 640x360 源帧。§25.3 里"caps == render-rect
+   == plane"的结论是把 `software scale -> 256x448` 那行看串了。
+2. 日志里**完全没有 `edge clamp` 那一行**。`scrub_edge_green` 里
+   `strcmp(fmt, "NV12")` 不匹配就静默 `return 0` —— 源帧是 MPP 的输出，
+   format 未必是线性 NV12。所以第三十一轮的边缘 clamp **一次都没真正执行**，
+   不是"执行了没效果"。
+
+改 640x360 源帧本来就没用：中间还要过一次 lanczos 缩放，最终上屏的是
+256x448。KMS 的 plane 也是 256x448 / pitch 256。绿线在这一层。
+
+**v10 改法：把 probe 挂到 kmssink 本体。**
+
+分支内部元素在管线描述里命名成 `vsink`（`g_w.vsink_el` 就是它，SET_RECT
+早就在用）。在 `on_pad_added` 拿到 `vsink_el` 之后，给它的 sink pad 再挂一个
+独立的 BUFFER probe：
+
+```c
+g_w.vsink_el = gst_bin_get_by_name((GstBin *)bin, "vsink");
+GstPad *kp = gst_element_get_static_pad(g_w.vsink_el, "sink");
+gst_pad_add_probe(kp, GST_PAD_PROBE_TYPE_BUFFER, on_vsink_buffer, NULL, NULL);
+```
+
+- `on_vsink_buffer` 只做一件事：把 buffer 交给 `scrub_edge_green(pad, buf)`；
+- `on_video_buffer`（ghost pad）保留帧计数与 `sink caps` 诊断，**删掉**边缘处理；
+- 挂得比 ghost pad 那个晚（要先建好 bin 才能 get_by_name），首帧可能漏掉，
+  但绿边每帧都在，第二帧起生效。
+
+**所有静默返回都改成打日志**，避免再出现"一行日志都没有、白跑一轮"：
+
+| 情况 | 日志 |
+| --- | --- |
+| format 不是 NV12 | `video: edge clamp SKIP fmt=... WxH` |
+| buffer 比 NV12 理论尺寸小 | `video: edge clamp SKIP buf too small` |
+| extract 失败 | `video: edge clamp SKIP extract failed` |
+| 正常执行 | `video: edge clamp WxH E=8 px=N minY=(...) minV=(...)` |
+
+真机上只要看 `edge clamp` 后面跟的是 `256x448` 还是 `640x360`，就能一眼确认
+probe 到底挂对没有。
+
+守卫在 `test/run.js` 的边缘用例里：必须有 `on_vsink_buffer`、必须
+`get_static_pad(g_w.vsink_el, "sink")`、ghost pad 的 `on_video_buffer` 里不许再
+出现 `scrub_edge_green`、必须有 SKIP 日志。

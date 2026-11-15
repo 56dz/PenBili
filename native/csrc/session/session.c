@@ -418,6 +418,8 @@ typedef struct {
      * 排查绿边只需要一行：buffer 尺寸与 render-rect 是否相等。
      * 每次 OPEN 清零。 */
     int vcaps_logged;
+    /* 【第三十轮】边缘绿修正：首帧打一次统计，之后不再刷日志。 */
+    int scrub_logged;
     /*
      * 音频设备被占（alsasink 打不开）时的降级状态：
      *   audio_off        = 本会话**主动**关了音频（不是片源本身没音轨）
@@ -818,6 +820,9 @@ static GstElement *parse_bin(const char *desc) {
  */
 static int on_video_buffer(GstPad *pad, GstPadProbeInfo *info, void *ud);
 static int on_video_src_probe(GstPad *pad, GstPadProbeInfo *info, void *ud);
+/* 【第三十二轮】挂在 kmssink **本体**的 sink pad 上：这里才是缩放后的
+ * 256x448 buffer，边缘绿线在这一层。ghost sink pad 上只有 640x360 源帧。 */
+static int on_vsink_buffer(GstPad *pad, GstPadProbeInfo *info, void *ud);
 static int on_audio_buffer(GstPad *pad, GstPadProbeInfo *info, void *ud);
 static int on_audio_list(GstPad *pad, GstPadProbeInfo *info, void *ud);
 /* 起播/seek 后的迟到宽限（实现见 check_plane 之前） */
@@ -1708,6 +1713,28 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
          */
         g_w.vsink_el = gst_bin_get_by_name((GstBin *)bin, "vsink");
         g_w.vsink_el_owned = 1;
+        /*
+         * 【第三十二轮】边缘处理的 probe 必须挂在 **kmssink 本体的 sink pad**。
+         *
+         * 真机日志（2026-11-15 22:49）：
+         *   video: sink caps 640x360, render-rect <0,496,256,448>
+         *   video: software scale -> 256x448 method=lanczos
+         * 挂在分支 ghost sink pad 上的 on_video_buffer 拿到的是**源帧 640x360**，
+         * 前两轮在那里改边缘全白费：videoscale 之后才是绿线所在的 256x448。
+         * 这里拿到内部 "vsink"（kmssink）元素的 sink pad，单独挂一个 probe。
+         *
+         * 挂得比 ghost pad 那个晚（要等 bin 建好才能 get_by_name），首帧可能
+         * 漏掉，但绿边每帧都在，从第二帧起就生效。
+         */
+        if (g_w.vsink_el) {
+            GstPad *kp = gst_element_get_static_pad(g_w.vsink_el, "sink");
+            if (kp) {
+                gst_pad_add_probe(kp, GST_PAD_PROBE_TYPE_BUFFER,
+                                  on_vsink_buffer, NULL, NULL);
+                gst_object_unref(kp);
+                pb2_logf("video: edge probe on kmssink sink pad");
+            }
+        }
         /* 【P0-4】成功连上之后才置位 */
         g_w.vbranch = 1;
         g_w.vbranch_ready_ms = pb2_now_ms();
@@ -2115,9 +2142,160 @@ static int on_video_src_probe(GstPad *pad, GstPadProbeInfo *info, void *ud) {
     return GST_PAD_PROBE_OK;
 }
 
+/*
+ * 【第三十一轮】边缘绿：不判颜色，直接用内侧像素把最外圈盖掉。
+ *
+ * 真机日志（2026-11-15）：
+ *   video: sink caps 256x448, render-rect <0,496,256,448>
+ *   video: edge scrub 0 px (green -> black)
+ *   [KMS] format NV12, dst rect[256 x 448], pitch 256
+ *
+ * 两条结论：
+ *   1) caps == render-rect == plane，平面被 buffer 铺满，绿**不在**平面未覆盖区，
+ *      只能是 buffer 最外圈的像素值。上一版按「YUV 全 0 = 绿」去判色，结果
+ *      0 px —— 说明这圈绿不是 YUV(0,0,0)，而是别的颜色值（可能是 videoscale
+ *      边界插值、色彩空间转换或驱动合成后的结果）。再猜阈值只会再错一次。
+ *   2) 既然绿确定在最外圈，就**不再判颜色**：把最外 EDGE_SCRUB 圈整圈替换成
+ *      往内第 EDGE_SCRUB 行/列的像素（边缘 clamp 延伸）。
+ *
+ * 这样做比「涂黑」更好：没有黑框，画面看起来是自然延伸到边；不裁切、不改
+ * 几何、不动比例，只重写最外 8 个像素环。源片 640x360、缩放后 256x448，
+ * 8px 只占画面宽的 3%。
+ *
+ * 读写走 gst_buffer_extract / gst_buffer_fill（**不用 GstMapInfo**：按
+ * gst_min.h 的铁律，自己抄结构体布局迟早栈越界）。extract 失败就直接跳过，
+ * 这一步永远不能影响播放。
+ *
+ * 首帧打一行诊断：最外圈里 Y 最小 / V 最小的原始 YUV，万一绿还在，下一轮
+ * 就有真实数值可用，不用再靠拍照颜色反推。
+ */
+#define EDGE_SCRUB 8
+
+static int scrub_edge_green(GstPad *pad, void *vbuf) {
+    static unsigned char *scratch = NULL;
+    static size_t scratch_cap = 0;
+    GstCaps *caps;
+    GstStructure *st;
+    const char *fmt;
+    int w = 0, h = 0, e, row, col, fixed = 0;
+    int minY = 256, minV = 256;
+    int minY_u = 0, minY_v = 0, minV_y = 0, minV_u = 0;
+    size_t total;
+    unsigned char *yp;
+    unsigned char *uv;
+
+    if (!vbuf) return 0;
+    caps = gst_pad_get_current_caps(pad);
+    if (!caps) return 0;
+    st = gst_caps_get_structure(caps, 0);
+    if (!st) {
+        gst_caps_unref(caps);
+        return 0;
+    }
+    fmt = gst_structure_get_string(st, "format");
+    gst_structure_get_int(st, "width", &w);
+    gst_structure_get_int(st, "height", &h);
+    gst_caps_unref(caps);
+    if (!fmt || strcmp(fmt, "NV12") != 0 || w < 16 || h < 16) {
+        /* 不能再静默返回：第三十一轮日志里连 `edge clamp` 一行都没有，
+         * 就是因为源帧 format 不是 "NV12" 直接 return 了，白跑一整轮。 */
+        if (!g_w.scrub_logged) {
+            g_w.scrub_logged = 1;
+            pb2_logf("video: edge clamp SKIP fmt=%s %dx%d",
+                     fmt ? fmt : "(null)", w, h);
+        }
+        return 0;
+    }
+
+    /* NV12 = Y(w*h) + 交错 UV(w*h/2) */
+    total = (size_t)w * h * 3 / 2;
+    if (gst_buffer_get_size(vbuf) < total) {
+        if (!g_w.scrub_logged) {
+            g_w.scrub_logged = 1;
+            pb2_logf("video: edge clamp SKIP buf too small (%zu < %zu) %dx%d",
+                     gst_buffer_get_size(vbuf), total, w, h);
+        }
+        return 0;
+    }
+
+    if (scratch_cap < total) {
+        unsigned char *p = (unsigned char *)realloc(scratch, total);
+        if (!p) return 0;
+        scratch = p;
+        scratch_cap = total;
+    }
+    if (gst_buffer_extract(vbuf, 0, scratch, total) != total) {
+        if (!g_w.scrub_logged) {
+            g_w.scrub_logged = 1;
+            pb2_logf("video: edge clamp SKIP extract failed %dx%d", w, h);
+        }
+        return 0;
+    }
+
+    e = EDGE_SCRUB;
+    if (e * 2 >= w) e = w / 4;
+    if (e * 2 >= h) e = h / 4;
+    if (e < 1) return 0;
+
+    yp = scratch;
+    uv = yp + (size_t)w * h;
+    for (row = 0; row < h; row++) {
+        int edge_row = (row < e) || (row >= h - e);
+        /* 取源行：往内 clamp 到 [e, h-1-e]，一定落在未被改写的内部区域 */
+        int sr = row < e ? e : (row >= h - e ? h - 1 - e : row);
+        for (col = 0; col < w; col++) {
+            int yi, ui, syi, sui, sc;
+            unsigned char Y, U, V;
+            if (!edge_row && col >= e && col < w - e) {
+                col = w - e - 1;
+                continue;
+            }
+            yi = row * w + col;
+            /* NV12 的 UV 是 2x2 下采样、U/V 交错，每行 w 字节 */
+            ui = (row >> 1) * w + (col & ~1);
+            Y = yp[yi];
+            U = uv[ui];
+            V = uv[ui + 1];
+            if (Y < minY) { minY = Y; minY_u = U; minY_v = V; }
+            if (V < minV) { minV = V; minV_y = Y; minV_u = U; }
+
+            sc = col < e ? e : (col >= w - e ? w - 1 - e : col);
+            syi = sr * w + sc;
+            sui = (sr >> 1) * w + (sc & ~1);
+            yp[yi] = yp[syi];
+            uv[ui] = uv[sui];
+            uv[ui + 1] = uv[sui + 1];
+            fixed++;
+        }
+    }
+    if (fixed > 0) gst_buffer_fill(vbuf, 0, scratch, total);
+    if (!g_w.scrub_logged) {
+        g_w.scrub_logged = 1;
+        pb2_logf("video: edge clamp %dx%d E=%d px=%d minY=(%d,%d,%d) minV=(%d,%d,%d)",
+                 w, h, e, fixed, minY, minY_u, minY_v, minV_y, minV_u, minV);
+    }
+    return fixed;
+}
+
+/*
+ * 【第三十二轮】kmssink **本体** sink pad 上的 probe。
+ *
+ * 这里拿到的才是 videoscale 之后、与 render-rectangle 等大的最终 buffer
+ * （真机 256x448 NV12，KMS plane 也是 256x448 / pitch 256）。边缘绿线在
+ * 这一层。前两轮把处理挂在分支 ghost sink pad 上，那里是 640x360 源帧，
+ * 改完还要过一次 lanczos 缩放，等于白改。
+ */
+static int on_vsink_buffer(GstPad *pad, GstPadProbeInfo *info, void *ud) {
+    void *vb = gst_pad_probe_info_get_buffer(info);
+    (void)ud;
+    if (vb) scrub_edge_green(pad, vb);
+    return GST_PAD_PROBE_OK;
+}
+
 static int on_video_buffer(GstPad *pad, GstPadProbeInfo *info, void *ud) {
     (void)info;
     (void)ud;
+
     /*
      * 【第二十九轮 v6】首帧打一次 sink 实际协商到的 buffer 尺寸。
      * 绿边排查唯一缺的就是这一行：如果 caps 与 render-rect 相等，绿必来自
@@ -2136,6 +2314,8 @@ static int on_video_buffer(GstPad *pad, GstPadProbeInfo *info, void *ud) {
             gst_caps_unref(caps);
         }
     }
+    /* 【第三十二轮】这里**不再**做边缘处理：这个 pad 上是 640x360 源帧，
+     * 改它没用。见 on_vsink_buffer（挂在 kmssink 本体 sink pad）。 */
     atomic_fetch_add_explicit(&g_w.probe.frames, 1, memory_order_relaxed);
     atomic_store_explicit(&g_w.probe.lastFrameMs, pb2_now_ms(), memory_order_relaxed);
 
@@ -3120,6 +3300,7 @@ static void do_open(pb2_open_req_t *req) {
     snprintf(g_w.rect, sizeof(g_w.rect), "<%d,%d,%d,%d>",
              g_w.panel_x_offset + req->x, req->y, req->w, req->h);
     g_w.vcaps_logged = 0;
+    g_w.scrub_logged = 0;
     /* videoscale 的输出 caps 必须是偶数宽高（NV12），且与 render-rectangle
      * 严格等大。差 1px 都会让 kmssink 再拉一次，画面比例就毁了。 */
     normalize_video_rect("OPEN");

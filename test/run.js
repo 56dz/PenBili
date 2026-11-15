@@ -4072,6 +4072,65 @@ async function main() {
     assert.ok(src.indexOf('pixel-aspect-ratio=1/1') > 0, '输出必须钉方像素');
   });
 
+  test('播放页: 播完保留视频洞，不弹「已播完」遮挡页', () => {
+    /* 用户真机截图（2026-11-14 22:25）：「视频播完之后删除这个已播完的遮挡页」。
+     * 旧 holeVisible 只管 playing/paused，一进 ended 就换成 .play-idle
+     * （不透明底 + 居中「已播完」），整块画面被它盖掉。
+     * 现在播完继续挖洞，KMS 平面的末帧留在屏上，进度条自己会显示 02:32/02:32。 */
+    const vue = fsx.readFileSync(
+      pathx.join(__dirname, '..', 'src', 'pages', 'index', 'index.vue'), 'utf8');
+    const m = vue.match(/holeVisible\(\)\s*\{([\s\S]*?)\n    \},/);
+    assert.ok(m, '必须能找到 holeVisible');
+    const body = m[1];
+    assert.ok(body.indexOf("'ended'") > 0, 'ended 必须继续挖洞，让末帧留在屏上');
+    assert.ok(body.indexOf("'playing'") > 0 && body.indexOf("'paused'") > 0,
+      '播放/暂停态照旧挖洞');
+    /* loading / error 仍要盖住（那是真的没有画面） */
+    assert.strictEqual(body.indexOf("'loading'"), -1, 'loading 不许挖洞');
+    assert.strictEqual(body.indexOf("'error'"), -1, 'error 不许挖洞');
+  });
+
+  test('native: 边缘绿用内侧像素覆盖（不判颜色、不裁画面）', () => {
+    /* 真机 2026-11-15 日志：
+     *   video: sink caps 256x448, render-rect <0,496,256,448>   ← 平面被 buffer 铺满
+     *   video: edge scrub 0 px (green -> black)                  ← 判色一个都没命中
+     * 说明绿在最外圈，但**不是** YUV(0,0,0)。再猜阈值只会再错一次，所以改成
+     * 不判颜色：把最外 8 像素环整圈替换成往内第 8 行/列的像素（clamp 延伸）。
+     * 无黑框、不裁切、几何与比例都不动。 */
+    const src = fsx.readFileSync(
+      pathx.join(__dirname, '..', 'native', 'csrc', 'session', 'session.c'), 'utf8');
+    assert.ok(src.indexOf('scrub_edge_green') > 0, '必须有边缘处理');
+    assert.ok(src.indexOf('#define EDGE_SCRUB 8') > 0, '覆盖最外 8 像素环');
+    assert.ok(src.indexOf('yp[yi] = yp[syi]') > 0,
+      '必须用内侧 Y 覆盖边缘，而不是涂黑');
+    assert.ok(src.indexOf('uv[ui] = uv[sui]') > 0, 'UV 也要一起延伸');
+    /* 不许再回到「按 YUV 判绿」——真机 0 px 已经证明那条路无效 */
+    assert.strictEqual(src.indexOf('Y < 120 && U < 96 && V < 96'), -1,
+      '不许再用颜色阈值判定绿边');
+    assert.strictEqual(src.indexOf('yp[yi] = 16;'), -1, '不许再涂纯黑（会有黑框）');
+    /* 不许用 GstMapInfo：gst_min.h 的铁律是「不透明类型不许自己抄布局」，
+     * map/unmap 要传结构体，字段抄错就是栈越界；extract/fill 只有标量参数。 */
+    assert.ok(src.indexOf('gst_buffer_extract(') > 0 && src.indexOf('gst_buffer_fill(') > 0,
+      '读写 buffer 必须走 extract/fill');
+    assert.strictEqual(src.indexOf('GstMapInfo map;'), -1,
+      '不许声明 GstMapInfo（结构体布局不可自抄）');
+    assert.strictEqual(src.indexOf('gst_buffer_map('), -1, '不许用需要结构体的 map');
+    assert.ok(src.indexOf('edge clamp') > 0, '首帧必须打真实 YUV 诊断');
+    /* 【第三十二轮】真机 `sink caps 640x360` 证明 ghost sink pad 上是**源帧**，
+     * 而绿线在 videoscale 之后的 256x448 上。处理必须挂在 kmssink 本体。 */
+    assert.ok(src.indexOf('on_vsink_buffer') > 0, '必须有 kmssink sink pad 上的独立 probe');
+    assert.ok(src.indexOf('gst_element_get_static_pad(g_w.vsink_el, "sink")') > 0,
+      '必须挂在内部 vsink(kmssink) 元素的 sink pad，不是分支 ghost pad');
+    assert.ok(src.indexOf('edge probe on kmssink sink pad') > 0, '必须打挂载确认日志');
+    const ghost = src.match(/static int on_video_buffer\([\s\S]*?\n\}/);
+    assert.ok(ghost, '必须能找到 ghost pad 的 on_video_buffer');
+    assert.strictEqual(ghost[0].indexOf('scrub_edge_green'), -1,
+      '源帧 probe 不许再做边缘处理（改 640x360 没用）');
+    assert.ok(src.indexOf('edge clamp SKIP fmt=') > 0,
+      'format 不匹配必须打日志，不许静默返回');
+    assert.strictEqual(src.indexOf('videocrop left=16'), -1, '仍然不许裁画面');
+  });
+
   test('native: 禁止再引入 videobox —— v4 真机管线协商失败、播放失败', () => {
     /* 2026-11-14 20:45 真机：v4 用 videobox 补黑，结果直接「播放失败」
      * 且退不出应用。已整段回退，16 网格重新由 JS 收（画面缩一点但能播）。
