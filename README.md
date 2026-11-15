@@ -4,10 +4,10 @@
 
 这是一款跑在有道词典笔上的 B 站客户端，用有道自家的 Falcon 小程序框架（QuickJS + Vue 2 单文件组件）写成。屏幕只有 960×266 点，指甲盖大小，所以我按 iPad 版 B 站的骨架重做了界面，把推荐、搜索、播放、评论、图文、直播全塞进这一个页面里。
 
-当前版本 `3.5.7`，支持 **X6 Pro / X7 Pro**（RK3562，aarch64）。X5 分支已停止维护。
+当前版本 `3.5.8`，支持 **X6 Pro / X7 Pro**（RK3562，aarch64）。X5 分支已停止维护。
 X7 Pro 的播放器适配（黑屏修复、设备参数运行时自适应）见 [`docs/x7pro-adaptation.md`](docs/x7pro-adaptation.md)。
 
-![version](https://img.shields.io/badge/version-3.5.7-blue)
+![version](https://img.shields.io/badge/version-3.5.8-blue)
 ![license](https://img.shields.io/badge/license-GPL--3.0-green)
 
 代码与安装包双仓同步：[GitCode](https://gitcode.com/dz56dz/PenBili)（国内推荐）· [GitHub](https://github.com/56dz/PenBili)。
@@ -215,6 +215,36 @@ ignore-error=false（丢弃坏帧）             → 40 秒内 0 组 / 0 组闪�
 
 自动弹窗有四个按钮：`立即更新（直连 GitCode）` / `立即更新（直连 GitHub）` / `跳过此版本` / `今天内不提示`。第一个按钮的括号里是**本次命中的源名**，第二个是另一个源——两个平台的可达性互补，一个挂了还能换另一个，但**都走直连**。手动弹窗只给「立即更新」和「暂不更新」，源的选择交给内部自动回退：先试当前源，失败换另一个再试一次。换源时会重新向目标平台取同一个 tag，且**只接受不旧于当前包的版本**——两个平台发布顺序不同步时宁可下载失败，也不能把用户降级回旧包。
 
+### 自适应单位
+
+PStore 的开发者规范要求用 `vw` / `vh` 而不是固定 `px`，理由是不同词典笔的视口大小
+不一致（X6 Pro 960×266，X7 Pro 936×280），写死 px 的界面在别的机型上必然溢出或缩得
+看不清。本项目已按这条规范整改完：
+
+- **字号零 px**：`grep -rn "font-size:[^;]*px" src/` 与 `line-height` 同理，现在都是 0 处
+  （整改前 76 处）。换算基准 `1vw = 9.6px`、`1vh = 2.66px`。
+- **布局 354 处 px → vw/vh**：`width` / `margin` / `padding` / `border-radius` 走 vw，
+  竖直方向（`height` / `margin-top` / `padding-top`）走 vh。
+- **刻意保留 px 159 处**，每一类都有不能改的物理原因：
+
+  | 类别 | 处数 | 为什么必须保留 |
+  | --- | --- | --- |
+  | 与 KMS 硬件平面逐像素重合的矩形 | 17 | 视频走 DRM 叠加平面，矩形与 UI 的挖洞必须精确对齐；改成 vw 会亚像素偏移，出现一圈彩边 |
+  | 二维码点阵（`.qr-l-*` / `.aq-l-*`） | 102 | 单格 2~4px 是扫描单元，非整数会糊成一团扫不出来 |
+  | 零值 / 1px hairline | 28 | `flex-basis: 0px` 是零值；1px 描边转 vw 会抖成 0 或 2px |
+
+- **近正方形元素两个方向都用 vw**。混用 `vw` + `vh` 在 960:266 与 936:280 两种视口之间
+  会算成椭圆（例如返回按钮 30×30，宽用 vw 高用 vh，X7 上就变成 29×31）。涉及
+  `.bar-logo` / `.ibtn-icon` / `.avatar` / `.pbtn` / `.pbtn-icon` / `.pback-icon` 等。
+
+设计画布宽本身不是写死的：`src/app.js` 从 `$falcon.env` 读真实视口，交给
+`App.setViewPort(w)`，所以 vw/vh 是相对**当前机型**的视口换算，不是相对 960。
+
+换算细则、保留清单（带 `file:line`）、验收命令见 [`docs/units.md`](docs/units.md)。
+PStore 六条规范的逐条自述见 [`docs/ai-policy.md`](docs/ai-policy.md)（文案）、
+[`docs/device-matrix.md`](docs/device-matrix.md)（兼容性）、
+[`docs/evidence.md`](docs/evidence.md)（真机证据）。
+
 ### 代码结构
 
 ```
@@ -227,7 +257,7 @@ src/
     bili/                 接口层：client / wbi / playurl / live / article / reply / action / qrlogin
   styles/base.less        全站样式
 native/csrc/              交叉编译的 JSAPI 原生模块（20 个 .c/.h，约 13.5k 行）
-test/run.js               单测（191 条）
+test/run.js               单测（245 条）
 ```
 
 页面只有两个（`index` 和 `diag`）。单页应用的理由是 falcon 页面切换开销大，浏览/播放/图文全用 `mode` 状态机在一个页面内切换。
@@ -263,7 +293,7 @@ npm ci
 # 交叉编译 native（产出三个 .so 到 libs/）
 npm run native
 
-# 打 AMR 包（产出 8002026110200001.3_5_7.amr，约 232 KB）
+# 打 AMR 包（产出 8002026110200001.3_5_8.amr，约 241 KB）
 npm run build
 
 # 单测
@@ -294,8 +324,8 @@ NODE_BIN=$PWD/node_modules/node/bin/node.exe bash tools/build-wsl.sh
 ## 安装
 
 ```bash
-adb push 8002026110200001.3_5_7.amr /tmp/
-adb shell "miniapp_cli install /tmp/8002026110200001.3_5_7.amr"   # 必须返回 "ret":0
+adb push 8002026110200001.3_5_8.amr /tmp/
+adb shell "miniapp_cli install /tmp/8002026110200001.3_5_8.amr"   # 必须返回 "ret":0
 
 # 冷启动：先切桌面再起目标页，保证重建页面实例
 adb shell "miniapp_cli start 8080222437664451"

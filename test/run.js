@@ -678,11 +678,26 @@ async function main() {
     assert.ok(updCss.length > 200, '检查更新样式块不能是空的');
     assert.ok(!/position:\s*absolute/.test(updCss), 'falcon 上 position:absolute 不可靠，弹窗不能用');
     assert.ok(!/z-index/.test(updCss), '全仓没有可用的 z-index，弹窗不能用');
-    assert.ok(/\.upd-scroll\s*\{[^}]*height:\s*150px/.test(l), '更新说明 scroller 必须有固定高度');
-    assert.ok(/\.upd-scroll\s*\{[^}]*width:\s*432px/.test(l), '更新说明 scroller 必须有固定宽度');
+    // 3.5.8 起样式改自适应单位：断言按「折回 960x266 设计画布后的 px」比较，
+    // 这样既能守住「scroller 有确定高度」这个语义，又不钉死具体单位。
+    const pxOf = (css, sel, prop) => {
+      // 用 \\n\\s* 锚定属性行首，否则 'width:' 会匹配到 'border-width:'
+      const m = css.match(new RegExp('\\' + sel + '\\s*\\{[^}]*\\n\\s*' + prop + ':\\s*([0-9.]+)(px|vw|vh)'));
+      if (!m) return null;
+      const n = parseFloat(m[1]);
+      return m[2] === 'px' ? n : (m[2] === 'vw' ? n * 9.6 : n * 2.66);
+    };
+    const scrollH = pxOf(updCss, '.upd-scroll', 'height');
+    const scrollW = pxOf(updCss, '.upd-scroll', 'width');
+    assert.ok(scrollH !== null && Math.abs(scrollH - 150) < 1.5,
+      '更新说明 scroller 必须有固定高度（约 150px，实测 ' + scrollH + '）');
+    assert.ok(scrollW !== null && Math.abs(scrollW - 432) < 1.5,
+      '更新说明 scroller 必须有固定宽度（约 432px，实测 ' + scrollW + '）');
     // 弹窗是居中卡片而不是铺满全屏（用户明确要求「弹在中间就行」）
     assert.ok(/\.upd\s*\{[^}]*justify-content:\s*center/.test(l), '弹窗容器必须居中');
-    assert.ok(/\.upd-card\s*\{[^}]*width:\s*760px/.test(l), '卡片必须有固定宽度（不能铺满 960）');
+    const cardW = pxOf(updCss, '.upd-card', 'width');
+    assert.ok(cardW !== null && Math.abs(cardW - 760) < 1.5,
+      '卡片必须有固定宽度（约 760px，不能铺满 960；实测 ' + cardW + '）');
     assert.ok(/\.upd-card\s*\{[^}]*border-radius/.test(l), '卡片必须有圆角（与软件风格一致）');
   });
 

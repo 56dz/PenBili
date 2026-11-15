@@ -4,47 +4,48 @@
 // 尺寸一律由 diag.vue 的 :style（profile + 16:9 洞）内联覆盖，这里的值只是兜底：
 // 3.5.6 第四轮起洞宽 = 视口高 * 16/9（X7 Pro = 498），右侧面板 = 视口宽 - 洞宽。
 .page {
-  width: 960px;
-  height: 266px;
+  width: 100vw;
+  height: 100vh;
   flex-direction: row;
   background-color: @background-color;
 }
 
 .video-col {
-  width: 608px;
-  height: 266px;
+  width: 63.3333vw;
+  height: 100vh;
 }
 
 .video-hole {
-  width: 608px;
-  height: 266px;
+  /* px-keep: 兜底值；实际尺寸由 diag.vue 的 :style 内联覆盖 */
+  width: 63.3333vw;  /* 608px，与 .video-col 同宽兜底 */
+  height: 100vh;     /* 266px；实际高度由 diag.vue 的 :style 覆盖，这里只保证不溢出 */
   background-color: rgba(0, 0, 0, 0);
 }
 
 .video-idle {
-  width: 608px;
-  height: 266px;
+  width: 63.3333vw;
+  height: 100vh;
   justify-content: center;
   align-items: center;
 }
 
 .video-idle-text {
-  font-size: 14px;
+  font-size: 1.4583vw;
   color: @text-color-dim;
 }
 
 .panel {
-  width: 352px;
-  height: 266px;
+  width: 36.6667vw;
+  height: 100vh;
   flex-direction: column;
-  padding-left: 10px;
-  padding-right: 8px;
-  padding-top: 6px;
-  padding-bottom: 6px;
+  padding-left: 1.0417vw;
+  padding-right: 0.8333vw;
+  padding-top: 2.2556vh;
+  padding-bottom: 2.2556vh;
 }
 
 .head {
-  height: 22px;
+  height: 8.2707vh;
   flex-direction: row;
   align-items: center;
 }
@@ -53,14 +54,14 @@
   flex-grow: 1;
   flex-shrink: 1;
   flex-basis: 0px;
-  font-size: 15px;
+  font-size: 1.5625vw;
   color: @text-color;
   lines: 1;
   text-overflow: ellipsis;
 }
 
 .head-meta {
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: @text-color-dim;
 }
 
@@ -70,20 +71,20 @@
 
 /* 20px：8 行步骤 + 设备行 + 几何行 + 底部按钮正好塞进 266/280 高的视口 */
 .row {
-  height: 20px;
+  height: 7.5188vh;
   flex-direction: row;
   align-items: center;
 }
 
 .glyph {
-  width: 16px;
-  font-size: 13px;
+  width: 1.6667vw;
+  font-size: 1.3542vw;
   color: @text-color-dim;
 }
 
 .label {
-  width: 74px;
-  font-size: 13px;
+  width: 7.7083vw;
+  font-size: 1.3542vw;
   color: @text-color;
   lines: 1;
   text-overflow: ellipsis;
@@ -93,7 +94,7 @@
   flex-grow: 1;
   flex-shrink: 1;
   flex-basis: 0px;
-  font-size: 12px;
+  font-size: 1.25vw;
   color: @text-color-dim;
   lines: 1;
   text-overflow: ellipsis;
@@ -133,8 +134,8 @@
 }
 
 .foot {
-  margin-top: 4px;
-  height: 30px;
+  margin-top: 1.5038vh;
+  height: 11.2782vh;
   flex-direction: row;
   align-items: center;
 }
@@ -143,17 +144,17 @@
   flex-grow: 1;
   flex-shrink: 1;
   flex-basis: 0px;
-  font-size: 12px;
+  font-size: 1.25vw;
   color: @text-color;
   lines: 2;
   text-overflow: ellipsis;
 }
 
 .btn {
-  width: 72px;
-  height: 28px;
-  margin-left: 8px;
-  border-radius: 6px;
+  width: 7.5vw;
+  height: 10.5263vh;
+  margin-left: 0.8333vw;
+  border-radius: 0.625vw;
   background-color: @accent-dim;
   align-items: center;
   justify-content: center;
@@ -164,8 +165,8 @@
 }
 
 .btn-text {
-  width: 72px;
-  font-size: 14px;
+  width: 7.5vw;
+  font-size: 1.4583vw;
   color: #ffffff;
   text-align: center;
 }
@@ -177,20 +178,20 @@
 /* ---------- 3.6.2：窄按钮 + 日志页 ---------- */
 /* 底部要塞三个按钮（日志/重跑/返回）+ 两行摘要，72 宽放不下 */
 .btn-sm {
-  width: 46px;
-  margin-left: 5px;
+  width: 4.7917vw;
+  margin-left: 0.5208vw;
 }
 
 .btn-text-sm {
-  width: 46px;
-  font-size: 11px;
+  width: 4.7917vw;
+  font-size: 1.1458vw;
   color: #ffffff;
   text-align: center;
 }
 
 /* 设备信息行：10px 才能在 352px 面板里放下 60 个字符 */
 .dev {
-  font-size: 10px;
+  font-size: 1.0417vw;
 }
 
 .logpage {
@@ -201,15 +202,15 @@
 .log-head {
   flex-direction: row;
   align-items: center;
-  padding-left: 8px;
-  padding-right: 8px;
+  padding-left: 0.8333vw;
+  padding-right: 0.8333vw;
 }
 
 .log-title {
   flex-grow: 1;
   flex-shrink: 1;
   flex-basis: 0px;
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: @text-color-dim;
   lines: 1;
   text-overflow: ellipsis;
@@ -220,13 +221,13 @@
 }
 
 .log-row {
-  height: 11px;
+  height: 4.1353vh;
   flex-direction: row;
 }
 
 /* 9px + 单行：一行日志最长约 200 字符（bus error 原文），936 宽刚好放得下 */
 .log-line {
-  font-size: 9px;
+  font-size: 0.9375vw;
   color: #9fb0c0;
   lines: 1;
 }

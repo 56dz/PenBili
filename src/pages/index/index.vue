@@ -251,7 +251,7 @@
           <text class="mine-value">›</text>
         </div>
         <!-- 未登录说明（收官文案）：视频显示风险 + 行动引导 -->
-        <text v-if="!profile" class="mine-notice" :style="L.wide">未登录时视频可能无法正常显示，登录后体验更完整</text>
+        <text v-if="!profile" class="mine-notice" :style="L.wide">未登录 · 部分视频可能看不到</text>
         <div v-else class="mine-row" :style="L.wide" @click="onLogout">
           <text class="mine-label">退出登录</text>
           <text class="mine-value">{{ profile.uname }}</text>
@@ -960,7 +960,7 @@ export default {
       const r = this.upd.release;
       if (this.upd.stage === 'ready' && r && !r.assetUrl) return '该版本没有可用安装包';
       if (this.upd.stage === 'ready') {
-        return '当前 v' + APP_VERSION + ' · 两个按钮都是直连：' +
+        return '当前 v' + APP_VERSION + ' · 直连 ' +
                this.updSourceLabel + ' / ' + this.updAltLabel;
       }
       if (this.upd.stage === 'done') return '重新打开软件即可使用新版本';
@@ -2187,10 +2187,9 @@ export default {
     },
     async onTogglePlay() {
       const st = this.play.state;
-      if (st !== 'playing' && st !== 'paused') {
-        this.play.note = '当前不可控制（' + (STATE_LABELS[st] || st) + '）';
-        return;
-      }
+      // 未起播时点视频区没有意义动作 —— 以前会写一条「当前不可控制（取流中…）」，
+      // 属于用户已经能从画面看出来的多余状态说明（PStore 规则 4），现在静默忽略。
+      if (st !== 'playing' && st !== 'paused') return;
       const myGen = this.gen;
       const wasPlaying = st === 'playing';
       const r = await togglePlay(this.makeCtx(myGen), wasPlaying);
