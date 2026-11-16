@@ -116,6 +116,18 @@ typedef struct {
      * 缺省 100，范围由 native 钳到 50..400。
      */
     int bufScale;
+
+    /*
+     * 【3.5.6 第二十六轮：全屏铺满（cover）】
+     * 全屏时视频矩形给的是**整个视口**（936x280 逻辑 / 280x936 物理），
+     * 而 16:9 片源按比例只能占到 498x280。要真正铺满必须放大后裁掉上下：
+     *   videoscale 输出 (tw+2*cropX) x (th+2*cropY)   ← 等比放大的完整画面
+     *   videocrop   left/right=cropX, top/bottom=cropY ← 裁到窗口大小
+     *   kmssink     render-rectangle = tw x th          ← 1:1 贴，不拉伸
+     * 0/0 = 不启用（普通态、竖屏片源、老调用方），行为逐字节不变。
+     */
+    int cropX;
+    int cropY;
 } pb2_open_req_t;
 
 void pb2_open_req_free(pb2_open_req_t *req);
@@ -166,7 +178,9 @@ int pb2_session_audio_off(void);
  * 返回的指针指向 GStreamer 内部常量，**不要 free**。
  */
 const char *pb2_session_gst_version(void);
-/* 最后一次下发的 render-rectangle（"<x,y,w,h>"），排障用 */
+/* 最后一次下发的 render-rectangle（"<x,y,w,h>"），排障用。
+ * 3.5.6 第十四轮：真机「起播就变形」时，JS 算的矩形、OPEN 日志里的矩形、
+ * 这里生效的矩形，三者一比就知道问题在页面还是在 native。 */
 const char *pb2_session_rect(void);
 
 /* 已渲染帧数（原子读，status 用） */

@@ -25,6 +25,10 @@ export const GRID_GAP = 8;
 export const GRID_PAD_LEFT = 7;
 export const CARD_BASE_W = 166;
 export const CARD_BASE_H = 93;
+/* 大屏上限：X6/X7 的 166 只是基准，不是天花板。X7 家族里 1024/1280 宽的机型
+ * 如果还把卡片卡在 166，右侧会空出 70~200px（真机看上去就是「内容没铺满」）。
+ * 220 是 16:9 封面在 280 高的屏上仍然不压过视频区的经验上限。 */
+export const CARD_MAX_W = 220;
 
 function round(v) {
   return Math.round(Number(v) || 0);
@@ -41,7 +45,9 @@ function clamp(v, lo, hi) {
  */
 export function gridColumns(contentWidth) {
   const raw = (Number(contentWidth) - GRID_PAD_LEFT + GRID_GAP) / (CARD_BASE_W + GRID_GAP);
-  return clamp(Math.round(raw), 3, 6);
+  /* 上限从 6 抬到 10：1024/1280 宽的 X7 机型若只给 6 列，右侧会空出一大块。
+   * X6/X7 的 960/936 仍算出 5 列（单测守着）。 */
+  return clamp(Math.round(raw), 3, 10);
 }
 
 /*
@@ -60,7 +66,7 @@ export function cardWidth(contentWidth, cols) {
   const n = clamp(round(cols) || 1, 1, 12);
   const safe = 6;
   const fit = Math.floor((Number(contentWidth) - GRID_PAD_LEFT - GRID_GAP * n - safe) / n);
-  return Math.max(96, Math.min(CARD_BASE_W, fit));
+  return Math.max(96, Math.min(CARD_MAX_W, fit));
 }
 
 /*
@@ -82,8 +88,11 @@ export function buildLayout(width, height) {
   const left = round((213 * W) / BASE.width);
   const mid = round((469 * W) / BASE.width);
   const right = W - left - mid;
-  // 高度：底部进度条 26 / 左列上下 192+74 / 右列 240+26，全部按 H 等比
-  const seekH = Math.max(18, round((26 * H) / BASE.height));
+  // 高度：底部控制条 30 / 左列上下 192+74 / 右列 240+26，全部按 H 等比
+  /* 控制条高度：266 上 30（30 的圆键 + 上下刚好贴边）。
+   * 按 H 等比，但要留上下限：X7 家族里 280 高 → 32、320 高 → 36；
+   * 480 高的机型若跟着比例走会变成 54px（一条巨大的黑带），所以封顶 40。 */
+  const seekH = clamp(round((30 * H) / BASE.height), 24, 40);
   const videoH = Math.max(80, H - seekH);
   const infoH = round((192 * H) / BASE.height);
   const btnsH = Math.max(40, H - infoH);
@@ -160,7 +169,13 @@ export function layoutStyles(L) {
       mid: L.play.mid,
       left: L.play.left,
       right: L.play.right,
+      /* 底部控制条的基础高度（点播态 = 原来的进度条行高）。play_chrome.planBands
+       * 用它当 bar 段高，页面据此摆 DOM 与算 render-rectangle。 */
+      seekH: L.play.seekH,
       seekTrackW: L.play.seekTrackW,
+      /* 【分P / 合集】右栏评论体高度：页面要在它上面扣掉 22px 的切换栏，
+       * 内联样式里是 '253px' 字符串，JS 算不了，所以这里出一份数字。 */
+      rightBodyH: L.play.rightBodyH,
       cover: L.article.coverW
     },
     page: page,

@@ -668,3 +668,97 @@ adb shell "gst-launch-1.0 -q kmssrc plane-id=<id> num-buffers=1 ! videoconvert !
   `tools_GITHUB_GPU_TWITCH_20261006.md`（480x960、H.264 MPP、alpha-zero hole）
 - 仓库内 `docs/x6pro-adaptation.md`、`docs/x6pro-video-playback.md`、`README.md`
   （X6 Pro 基线与所有真机踩坑）
+
+---
+
+## 9. 第十八轮：绿幕条 = 默认档选错了横帧
+
+### 9.1 现象与判据
+
+真机照片：视频被压成一条横带，上下全是**亮绿**，全屏后更明显。
+绿色不是"背景没铺"，是 KMS plane 未初始化内存的颜色（NV12 的 Y/U/V 全 0
+在 RGB 下就是绿）——**只有一部分行被写入**才会这样。
+
+用户给了一句决定性的对照：**「B 和 D 正常」**。
+自检页的四档正好是：
+
+| 档 | swScale | bufScale | 含义 | 本机结果 |
+| --- | --- | --- | --- | --- |
+| A | 1 | 100 | 横帧 ×1.0 | **绿幕** |
+| B | 2 | 100 | 竖帧 ×1.0 | 正常 |
+| C | 1 | 190 | 横帧 ×1.9 | **绿幕** |
+| D | 2 | 190 | 竖帧 ×1.9 | 正常 |
+
+差别只在 swScale，而 swScale 只控制一件事：videoscale 的目标宽高**是否按
+rotate 互换**。
+
+### 9.2 根因
+
+`mppvideodec rotation=270` 只是把旋转意图写进 frame 的
+`GstVideoOrientationMeta`，但**这台机器的 decoder 实际上把 buffer 转成了竖帧**
+（252x448）。于是：
+
+```
+swScale=1（互换，旧默认）
+  decoder 出 252x448 竖帧 → videoscale 目标是 448x252（横）
+  → kmssink 拿到 448x252 的 buffer 去贴 252x448 的窗口
+  → 只有一部分行写入，其余是 plane 未初始化内存 = 绿
+
+swScale=2（不互换，新默认）
+  decoder 出 252x448 → videoscale 目标也是 252x448
+  → 1:1 贴图，完整
+```
+
+历史包袱：第十三轮修「起播就扁」时，当时的现象确实是"横帧被塞进竖矩形"，
+所以加了"互换"。后来 decoder 的行为变了（或换了板级固件），这条就成了
+反向的错误。A/C 两档一直没人用，所以没暴露。
+
+### 9.3 改了什么
+
+1. `X7P_DEFAULTS.swScale: 1 → 2`（默认竖帧档）。
+2. `RATIO_MODES` 的 A/C 描述补上「本机绿幕，仅诊断」——保留是为了让这个
+   现象随时可复现（换固件/换机型时能一眼对照）。
+3. **老存档迁移**：`buildProfile` 引入 `ratioVersion`，没有这个字段的
+   storage 覆盖（用户点过 A/C 留下的 `swScale:1`）一律忽略，回落到 preset。
+   否则重装包之后画面照样是绿的 —— 这是最容易漏的一步。
+   `cycleRatioMode` 写入时打 `ratioVersion: 2`。
+4. `currentRatioMode` 同步：老存档显示 B（实际生效的档），不让自检页
+   写着 A、画面却是 B。
+
+### 9.4 顺手修的全屏残影
+
+用户报「全屏 UI 错乱、有多个进度条」。那条"多出来的进度条"是**上一屏的
+fb 残留**：全屏时左右列被 `v-if` 掉，`.fs-gap` 是唯一没有底色的区域
+（`.pstage` 被 KMS 平面盖住、`.fs-panel` 已是纯黑），falcon 不主动清屏，
+普通态的评论区像素就留在了那里。
+
+- `.fs-gap` 铺纯黑；
+- `chrome-bar` 的 v-if 再加 `&& !fsSide`（侧栏全屏时底部条完全不渲染，
+  双保险，防止真出现第二条进度条）；
+- 删掉 `.fs-panel` 顶部的「全屏」文字（它挨着「退出」，看着像第二个按钮）。
+
+### 9.5 验证
+
+- 单测：默认 `swScale=2`、老存档被忽略、`currentRatioMode` 回落 B、
+  `.fs-gap` 必须不透明、侧栏全屏时不得渲染底部条。
+- 真机：进任意视频，画面应完整无绿边；再进自检页点一次档位，
+  确认 A/C 仍然复现绿幕（说明这不是"碰巧好了"）。
+
+---
+
+## 附：3.5.6 第二十四轮 —— 自适应已删除
+
+本文档上面记录的 `$falcon.env` 探测、`bili_device_profile` 覆盖、
+A/B/C/D 四档、`swScale` 运行时切换，**全部在第二十四轮删除**。
+现在的实现只有 `src/services/device_profile.js` 里的两张常量表：
+
+```
+X7P  936x280  面板 480x960  偏移 0    plane auto  swScale 2  barOverlay true
+X6P  960x266  面板 480x960  偏移 107  plane 76    swScale 0  barOverlay false
+```
+
+`buildProfile({})` 恒等 X7 Pro，`{ name: 'x6p' }` 拿 X6 基线。
+`env` / `override` 传进来会被忽略。
+
+保留本文档的目的是**留下这些值是怎么定下来的证据**（哪一轮、哪张真机截图、
+为什么是 0 不是 100、为什么 swScale 是 2 不是 1）。改常量之前先读对应小节。

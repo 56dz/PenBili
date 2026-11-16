@@ -30,10 +30,9 @@ mkdir -p "$OUT"
 # adb：优先环境变量，其次常见的 Windows 路径（WSL 可直接执行 .exe）
 if [ -z "${ADB:-}" ]; then
   for c in \
-    "/mnt/c/Users/lenovo/Desktop/8520/PenADB工具箱/PenADB工具箱1/bin/adb.exe" \
-    "/mnt/c/Users/lenovo/Desktop/direct/123/adb.exe" \
-    "/c/Users/lenovo/Desktop/8520/PenADB工具箱/PenADB工具箱1/bin/adb.exe" \
-    "/c/Users/lenovo/Desktop/direct/123/adb.exe"; do
+    "$ROOT/../env/adb/adb.exe" \
+    "$ROOT/../env/adb/adb" \
+    "$(command -v adb 2>/dev/null || true)"; do
     if [ -x "$c" ]; then ADB="$c"; break; fi
   done
   ADB="${ADB:-adb}"

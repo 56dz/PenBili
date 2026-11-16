@@ -144,6 +144,10 @@ export function parseHtml5Response(res) {
     ok: true,
     url: url,
     sizeBytes: typeof d.length === 'number' ? d.length : 0,
+    /* 【互动视频】view 对 stein 稿件常返回 duration=0，只能靠 playurl 的
+     * timelength（毫秒）拿到每个片段的真实时长，否则「末尾判据」永远不触发、
+     * 下一个片段不会连播。 */
+    durationMs: Math.max(0, Math.floor(Number(data.timelength) || 0)),
     quality: typeof data.quality === 'number' ? data.quality : 0,
     acceptQuality: Array.isArray(data.accept_quality) ? data.accept_quality : []
   };

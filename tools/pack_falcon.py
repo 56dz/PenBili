@@ -36,13 +36,12 @@ import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEF_FALCON = os.path.join(ROOT, '.falcon_')
+_QJSC_REL = os.path.join('aiot-vue-cli', 'cli-libs', 'aiot-qjsc-tool',
+                         'assets', 'bin', 'linux', 'qjsc20200705')
 DEF_QJSC_CANDIDATES = [
-    os.path.join(ROOT, 'node_modules', 'aiot-vue-cli', 'cli-libs',
-                 'aiot-qjsc-tool', 'assets', 'bin', 'linux', 'qjsc20200705'),
-    '/mnt/c/Users/lenovo/Desktop/direct/undertale-pen/node_modules/aiot-vue-cli/'
-    'cli-libs/aiot-qjsc-tool/assets/bin/linux/qjsc20200705',
-    '/c/Users/lenovo/Desktop/direct/undertale-pen/node_modules/aiot-vue-cli/'
-    'cli-libs/aiot-qjsc-tool/assets/bin/linux/qjsc20200705',
+    os.path.join(ROOT, 'node_modules', _QJSC_REL),
+    os.path.join(ROOT, '..', 'env', 'node_modules', _QJSC_REL),
+    os.path.join(os.path.expanduser('~'), 'node_modules', _QJSC_REL),
 ]
 
 # 这些文件**不登记 cert**（与 CLI 的 manifest.generate 行为一致），但

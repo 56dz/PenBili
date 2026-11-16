@@ -173,11 +173,22 @@ export function logicalRectToPhysicalRect(rect, logical, physical) {
   const y = Math.round(typeof rect.y === 'number' ? rect.y : 0);
   const w = Math.round(num(rect.width, box.height));
   const h = Math.round(num(rect.height, box.width));
+  /*
+   * 【3.5.6 第二十九轮】输出必须对齐到偶数 —— NV12 的 UV 平面按 2x2 采样。
+   *
+   * 真机横屏视频**左侧那条纯绿细线**就是这里来的：中列 457x280 里 fit 出
+   * 逻辑 457x257，物理变成 {x:12, y:271, w:257, h:457}。native 的
+   * normalize_video_rect 只把宽高改成了 256/456，**起点 y=271 仍是奇数**，
+   * 色度相位错位，最边缘那一列取到 YUV 全 0（= 绿）。
+   *
+   * x/y 向上取偶（不把上一列无效 chroma 包进来），宽高向下取偶；
+   * 最多挪 1px，肉眼无感，但色度相位一定对齐。
+   */
   return {
-    x: y,
-    y: panel.height - (x + w),
-    width: h,
-    height: w
+    x: (y + 1) & ~1,
+    y: (panel.height - (x + w) + 1) & ~1,
+    width: Math.max(2, h & ~1),
+    height: Math.max(2, w & ~1)
   };
 }
 

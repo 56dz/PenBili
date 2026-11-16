@@ -63,7 +63,13 @@ export const PANEL = { width: 480, height: 960 };
 // 横向帧；直接缩到物理竖矩形会把 16:9 拉成 9:16（真机「视频被压扁，不同
 // 比例压扁程度不一样」）。若某固件真的把输出 buffer 转成了竖帧，设 2 关掉
 // 互换即可，不用重新打包。
-export const X6P_DEFAULTS = { width: 960, height: 266, planeId: 76, swScale: 0 };
+export const X6P_DEFAULTS = {
+  width: 960, height: 266, planeId: 76, swScale: 0,
+  /* 【PR #5】控制条是否浮在画面上。X6 必须 false：它走 swScale=0 的 kmssink
+   * 硬件缩放，没有 videoscale 的 add-borders 兜底，视频矩形一变就可能被拉
+   * 伸。X7 走 videoscale，可以浮。 */
+  barOverlay: false
+};
 /*
  * 【3.5.6 第四轮：四档截图定案】
  *
@@ -104,7 +110,12 @@ export const X6P_DEFAULTS = { width: 960, height: 266, planeId: 76, swScale: 0 }
  * 起 native 就硬编码它），X7 不能跟着套公式。
  */
 export const X7P_DEFAULTS = {
-  width: 936, height: 280, planeId: -1, swScale: 1, panelXOffset: 0
+  /* 【PR #5】swScale 从 1 改为 2：X7 的 mppvideodec 会把 buffer 真的转成竖
+   * 帧，swScale=1 的「互换宽高」路线会拿横 buffer 去贴竖窗口，只剩一部分
+   * 行、其余是未初始化 YUV = 绿幕（作者三十多轮真机定案）。 */
+  width: 936, height: 280, planeId: -1, swScale: 2, panelXOffset: 0,
+  /* X7 走 videoscale + 自选平面，控制条可以浮在画面上（不占矩形）。 */
+  barOverlay: true
 };
 
 function num(v, fallback) {
@@ -167,15 +178,30 @@ export function buildProfile(input) {
   const modelText = String((env && env.model) || '');
   const modelX7 = /x7/i.test(modelText);
 
+  /*
+   * 【合并时的取舍】PR #5 把 buildProfile 改成「写死两档、DEFAULT_DEVICE='x7p'」，
+   * 我们保留运行时探测（一个包同时支持 X6 Pro / X7 Pro 是发布模型）。
+   * 但 PR 的调用方与单测都习惯 buildProfile({ name: 'x6p' })，所以这里显式
+   * 认 name：给了就用，不给才走 env/模型名探测。
+   */
+  const nameSel = String(o.name || ov.name || '').toLowerCase();
+  const namedX7 = nameSel === 'x7p';
+  const namedX6 = nameSel === 'x6p';
+
   // 视口：override > env（可信时） > 机型预设（认不出机型时按 X6 Pro）
   const height = clampInt(
     ov.height,
-    envUsable ? envH : (modelX7 ? X7P_DEFAULTS.height : X6P_DEFAULTS.height),
+    envUsable ? envH
+      : namedX7 ? X7P_DEFAULTS.height
+      : namedX6 ? X6P_DEFAULTS.height
+      : modelX7 ? X7P_DEFAULTS.height : X6P_DEFAULTS.height,
     120,
     1200
   );
-  const isX7 = envUsable ? height >= 272 : modelX7 ||
-    String(ov.name || '').toLowerCase() === 'x7p';
+  const isX7 = namedX7 ? true
+    : namedX6 ? false
+    : envUsable ? height >= 272
+    : modelX7;
   const preset = isX7 ? X7P_DEFAULTS : X6P_DEFAULTS;
   const width = clampInt(ov.width, envUsable ? envW : preset.width, 320, 1920);
 
@@ -236,7 +262,7 @@ export function buildProfile(input) {
   const layout = buildLayout(width, height);
 
   return {
-    name: String(ov.name || (isX7 ? 'x7p' : 'x6p')),
+    name: String(nameSel || (isX7 ? 'x7p' : 'x6p')),
     source: ov.width || ov.height ? 'override' : envUsable ? 'env' : 'default',
     env: env ? { width: env.width, height: env.height, model: env.model } : null,
     design: { width: DESIGN.width, height: DESIGN.height },
@@ -258,6 +284,8 @@ export function buildProfile(input) {
     planeId: planeId,
     swScale: swScale,
     bufScale: bufScale,
+    /* 【PR #5】控制条是否浮在画面上，见 play_session.js 的 reserveBottom。 */
+    barOverlay: preset.barOverlay !== false,
     videoArea: { x: layout.play.left, y: 0, width: layout.play.videoW, height: layout.play.videoH },
     liveVideoArea: { x: layout.play.left, y: 0, width: layout.play.videoW, height: height }
   };
@@ -292,10 +320,119 @@ export function playVideoRectsFor(videoWidth, videoHeight, profile, live, box) {
     width: fit.width,
     height: fit.height
   };
-  const physical = logicalRectToPhysicalRect(logical, p.logical, p.physical);
+  let physical = logicalRectToPhysicalRect(logical, p.logical, p.physical);
   /* 行方向原点补偿（见 buildProfile 里 rowOffset 的注释）。默认 0。 */
   physical.y += Math.round(p.rowOffset || 0);
+  /* 【PR #5】X7 走 videoscale + 自选 overlay 平面，驱动会把 render-rectangle
+   * 的 x/y/w/h 一起圆整到 16 边界，圆整多出来的区域没有 buffer 写入 =
+   * YUV 全 0 = 绿线。四边都落到 16 网格才消得掉。X6 是 kmssink 硬件缩放，
+   * alignPlane16 内部按 profile.swScale 短路，不参与收边（否则白缩画面）。 */
+  physical = alignPlane16(physical, p);
   return { logical: logical, physical: physical };
+}
+
+/*
+ * ==================== 【PR #5】几何工具（信箱交给 sink） ====================
+ * 以下 4 个函数从 PR #5 并入。它们的共同思想：
+ *   「JS 只决定窗口矩形，比例交给 videoscale/kmssink 的 force-aspect-ratio」
+ * 这样矩形短几像素、源尺寸报错、切字幕改了高度，都不会把画面拉变形。
+ */
+
+/*
+ * 把物理矩形整体落到 16 网格上。
+ *
+ * 驱动（VOP2）会把 render-rectangle 的 x/y/w/h 一起圆整到 16 边界，圆整多出
+ * 来的区域没有 buffer 写入 = YUV 全 0 = 绿线。作者真机三版迭代结论：
+ *   只对齐偶数      -> 绿线原样（456 仍是 16 的半格）
+ *   只对齐尺寸 16   -> 横屏绿线从左侧跑到上下（起点 x=12 也被驱动圆整）
+ *   四边全落 16 网格 -> 横屏竖屏都消失
+ *
+ * 只对 swScale != 0（走 videoscale 的机型，即 X7）生效；X6 是 kmssink 硬件
+ * 缩放，rect 给多大填多大，收边只会白缩画面。
+ * 代价：竖屏画面缩到 91%、横屏高度 -1.8%。
+ */
+function alignPlane16(physical, profile) {
+  if (!(profile && profile.swScale)) return physical;
+  if (!(physical && physical.width > 0 && physical.height > 0)) return physical;
+  const snap = (v) => Math.round(v / 16) * 16;
+  const size = fit16Size(physical.width, physical.height);
+  const dx = Math.round((physical.width - size.width) / 2);
+  const dy = Math.round((physical.height - size.height) / 2);
+  return {
+    x: Math.max(0, snap(physical.x + dx)),
+    y: Math.max(0, snap(physical.y + dy)),
+    width: size.width,
+    height: size.height
+  };
+}
+
+/*
+ * 找一对都是 16 倍数、比例与原尺寸接近的尺寸。
+ * 起点规则：原高度离「上一个 16 倍数」只差 <=4px 时向上取整，否则向下
+ * （竖屏放大 25%，横屏不多顶出洞）。从大往小试，第一个比例误差 <=3% 的即用。
+ */
+function fit16Size(w, h) {
+  const ratio = w / h;
+  const up = Math.ceil(h / 16) * 16;
+  const start = (up - h) <= 4 ? up : (h & ~15);
+  for (let hh = start; hh >= 16; hh -= 16) {
+    const ww = Math.round((hh * ratio) / 16) * 16;
+    if (ww < 16) continue;
+    if (Math.abs(ww / hh - ratio) <= 0.03) return { width: ww, height: hh };
+  }
+  return { width: Math.max(16, w & ~15), height: Math.max(16, h & ~15) };
+}
+
+/*
+ * 只换坐标系、**不做信箱适配**的矩形：传进来的 box 原样当作视频平面窗口。
+ * 与 playVideoRectsFor 的区别就是少一次 fitLogicalRect。
+ */
+export function playFrameFor(profile, live, box) {
+  const p = profile || buildProfile({});
+  const area = box || (live ? p.liveVideoArea : p.videoArea);
+  const logical = {
+    x: Math.round(Number(area.x) || 0),
+    y: Math.round(Number(area.y) || 0),
+    width: Math.max(2, Math.round(Number(area.width) || 16)),
+    height: Math.max(2, Math.round(Number(area.height) || 16))
+  };
+  let physical = logicalRectToPhysicalRect(logical, p.logical, p.physical);
+  physical.y += Math.round(p.rowOffset || 0);
+  physical = alignPlane16(physical, p);
+  return { logical: logical, physical: physical };
+}
+
+/*
+ * 全屏 cover：画面等比放大到铺满整个视口，再裁掉多余部分（videocrop）。
+ * tw/th < r -> 按高度铺满，左右各裁 (th*r-tw)/2；否则按宽度铺满，上下各裁。
+ * 竖屏片源不启用（裁掉 80% 太惨），退回 contain。
+ */
+export function coverFrameFor(videoWidth, videoHeight, profile, box) {
+  const p = profile || buildProfile({});
+  const b = box || { x: 0, y: 0, width: p.cfg.width, height: p.cfg.height };
+  const vw = Math.max(1, Number(videoWidth) || 640);
+  const vh = Math.max(1, Number(videoHeight) || 360);
+  const contain = () => ({
+    physical: playVideoRectsFor(vw, vh, p, false, b).physical,
+    cropX: 0, cropY: 0
+  });
+  if (!(vw > vh)) return contain();
+
+  const frame = playFrameFor(p, false, b);
+  const tw = frame.physical.width;
+  const th = frame.physical.height;
+  const r = vh / vw;
+  let cropX = 0;
+  let cropY = 0;
+  if (tw / th < r) {
+    cropX = Math.max(0, (th * r - tw) / 2);
+  } else {
+    cropY = Math.max(0, (tw / r - th) / 2);
+  }
+  cropX = Math.round(cropX) & ~1;
+  cropY = Math.round(cropY) & ~1;
+  if (cropX + cropY < 2) return contain();
+  return { physical: frame.physical, cropX: cropX, cropY: cropY };
 }
 
 // 只读摘要，日志/诊断页用（不泄露无关字段）
@@ -311,6 +448,7 @@ export function describeProfile(p) {
     ' planeId=' + (p.planeId < 0 ? 'auto' : p.planeId) +
     ' swScale=' + (p.swScale || 0) +
     ' bufScale=' + (p.bufScale || 100) +
+    ' barOverlay=' + (p.barOverlay === false ? 0 : 1) +
     ' transpose=' + p.transpose;
 }
 
@@ -345,59 +483,6 @@ export function ensureProfile() {
       });
   }
   return loading;
-}
-
-/*
- * 【3.5.6 第四轮】自检页「比例」按钮 = **几何档**。
- *
- * 旧四档（A0/B0/C1/D2）只改缩放方式与列偏移，四张真机截图里
- * `playing out=253x450` 一模一样 —— 所以「没一个能占满」是必然的：
- * 矩形和 buffer 尺寸从没变过。这一轮四档全部真正改变送到平面的像素：
- *   A 横帧 ×1.0   videoscale 按 rect 互换，基准尺寸
- *   B 竖帧 ×1.0   videoscale 不互换（解码器真转了 buffer 的固件）
- *   C 横帧 ×1.9   buffer 放大 → 1:1 平面也能铺满窗口
- *   D 竖帧 ×1.9   同上 + 不互换
- *
- * bufScale 只放大 **buffer**，render-rectangle 保持与挖洞区等大且不出面板；
- * 所以放大档不会让 kmssink 因为矩形越界而拒绝上屏。
- */
-export const RATIO_MODES = [
-  { label: 'A', swScale: 1, bufScale: 100, desc: '横帧 x1.0' },
-  { label: 'B', swScale: 2, bufScale: 100, desc: '竖帧 x1.0' },
-  { label: 'C', swScale: 1, bufScale: 190, desc: '横帧 x1.9' },
-  { label: 'D', swScale: 2, bufScale: 190, desc: '竖帧 x1.9' }
-];
-
-export function currentRatioMode(override) {
-  const i = Number(override && override.ratioMode);
-  return Number.isInteger(i) && i >= 0 && i < RATIO_MODES.length ? i : 0;
-}
-
-export async function cycleRatioMode() {
-  let ov = {};
-  try {
-    const raw = await getString(PROFILE_KEY, '');
-    if (raw) ov = JSON.parse(raw) || {};
-  } catch (e) { /* 解析失败就当空覆盖 */ }
-  const next = (currentRatioMode(ov) + 1) % RATIO_MODES.length;
-  /* 清掉上一档（含旧版四档）写过的字段，避免 B0 的 panelXOffset=0、旧
-   * A0 的 swScale=0 之类的残留跨档污染。 */
-  const clean = Object.assign({}, ov);
-  delete clean.swScale;
-  delete clean.bufScale;
-  delete clean.panelXOffset;
-  delete clean.label;
-  delete clean.desc;
-  const m = RATIO_MODES[next];
-  clean.ratioMode = next;
-  clean.swScale = m.swScale;
-  clean.bufScale = m.bufScale;
-  setString(PROFILE_KEY, JSON.stringify(clean));
-  /* 让下次 ensureProfile() 重新读，不要复用缓存 */
-  cached = null;
-  loading = null;
-  logWarn('[device] ratio mode -> ' + m.label + ' ' + JSON.stringify(clean));
-  return m;
 }
 
 // 同步读取（ensureProfile 尚未完成时返回 X6 Pro 默认，绝不抛异常）

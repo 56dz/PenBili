@@ -31,6 +31,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>   /* access() —— installAmr 先查文件是否真存在 */
+#include <dirent.h>   /* listFiles —— 「本地」栏列目录 */
+#include <sys/stat.h> /* listFiles —— 只收普通文件、带 size/mtime */
+
+#define PB2_MAX_LIST 200 /* 一次最多列 200 个文件，防止异常目录把 JS 堆撑爆 */
 
 #include "core/clock.h"
 #include "core/log.h"
@@ -309,7 +313,7 @@ static JSValue js_open(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
     req->swScale = (argc >= 19) ? (int)arg_int(ctx, argc, argv, 18, 0) : 0;
     /* 0=硬件缩放 / 1=videoscale 且按 rotate 互换目标 / 2=videoscale 不互换。
      * 2 是给「mppvideodec 真的把 buffer 转成竖帧」的固件留的免打包回退开关。 */
-    if (req->swScale != 1 && req->swScale != 2) req->swScale = 0;
+    if (req->swScale < 1 || req->swScale > 3) req->swScale = 0;
     /*
      * 【3.5.6 第四轮】第 20 个参数 = videoscale 输出倍率（百分比）。
      * X7 Pro 自选平面疑似只做 1:1 贴 buffer，改 render-rectangle 不影响画面
@@ -318,6 +322,12 @@ static JSValue js_open(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
      */
     req->bufScale = (argc >= 20) ? (int)arg_int(ctx, argc, argv, 19, 100) : 100;
     if (req->bufScale < 50 || req->bufScale > 400) req->bufScale = 100;
+    /* 【第二十六轮】第 21/22 位 = 全屏 cover 的左右/上下裁切量（物理像素）。
+     * 0 = 不裁（普通态）。钳到 0..2048，避免异常值把管线撑爆。 */
+    req->cropX = (argc >= 21) ? (int)arg_int(ctx, argc, argv, 20, 0) : 0;
+    req->cropY = (argc >= 22) ? (int)arg_int(ctx, argc, argv, 21, 0) : 0;
+    if (req->cropX < 0 || req->cropX > 2048) req->cropX = 0;
+    if (req->cropY < 0 || req->cropY > 2048) req->cropY = 0;
 
     JS_FreeCString(ctx, input);
     if (audio_dev) JS_FreeCString(ctx, audio_dev);
@@ -877,6 +887,81 @@ static JSValue js_log_tail(JSContext *ctx, JSValueConst this_val, int argc, JSVa
  *     布局变化请重新 open（或将来加 setRect）。
  *   - 新增 info 里的 gstVersion / registryReady / logOn / rssKb 便于诊断。
  */
+/* ==================== 目录读取（3.5.6 第二十二轮，当前 JS 未使用） ====================
+ *
+ * 平台没有给 JS 任何文件系统接口（$falcon.jsapi 里没有 file/list），所以这里
+ * 补了一个通用的 listFiles。它最初是为「本地」栏（播放
+ * /userdisk/Favourite:bili 下的视频）写的；**该功能已按用户反馈移除**
+ * （2026-11-13），JS 侧不再调用，保留这个导出作为通用能力 —— 它不影响
+ * 任何现有行为（不被调用就没有开销），将来要做文件浏览也不用再改 native。
+ *
+ * 为什么允许它同步执行（本文件其余接口都是非阻塞的）：
+ *   · 目录条目数是个位到几十个（用户自己存的视频），opendir/stat 是纯内存
+ *     级的元数据操作，实测单次 < 2ms；
+ *   · 它不在播放路径上，只在用户点「本地」页签时调一次；
+ *   · 走 worker 线程要新增命令类型 + 结果回传缓冲，收益远小于复杂度。
+ * 为此加了两道闸：最多返回 PB2_MAX_LIST 条、只接受 / 开头且不含 .. 的目录。
+ */
+static JSValue js_list_files(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    const char *dir;
+    DIR *d;
+    struct dirent *e;
+    JSValue res;
+    JSValue arr;
+    int n = 0;
+    (void)this_val;
+
+    dir = arg_str(ctx, argc, argv, 0);
+    if (!dir || !dir[0]) {
+        if (dir) JS_FreeCString(ctx, dir);
+        return mk_fail(ctx, "PLAYER_BAD_ARG", "listFiles(dir) 需要目录路径");
+    }
+    if (strlen(dir) > 512 || dir[0] != '/' || strstr(dir, "..")) {
+        JS_FreeCString(ctx, dir);
+        return mk_fail(ctx, "PLAYER_BAD_INPUT", "目录必须是绝对路径且不含 ..");
+    }
+    d = opendir(dir);
+    if (!d) {
+        res = mk_fail(ctx, "PLAYER_OPENDIR", "目录不存在或不可读");
+        JS_FreeCString(ctx, dir);
+        return res;
+    }
+    arr = JS_NewArray(ctx);
+    while ((e = readdir(d)) != NULL) {
+        char full[1024];
+        struct stat st;
+        JSValue o;
+        if (e->d_name[0] == '.') continue;
+        if (n >= PB2_MAX_LIST) break;
+        snprintf(full, sizeof(full), "%s/%s", dir, e->d_name);
+        if (stat(full, &st) != 0) continue;
+        /* 两种都收：普通文件 = 视频；目录 = B 站下载器常见的
+         * `<BV号>/video.mp4` 结构。JS 侧只对「名字含 BV 号的目录」再进一层
+         * （见 local_media.listLocalVideos），所以这里给个 dir 标记就够，
+         * 不在 C 里做递归。 */
+        if (!S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode)) continue;
+        o = JS_NewObject(ctx);
+        mk_str(ctx, "name", e->d_name, o);
+        mk_str(ctx, "path", full, o);
+        if (S_ISDIR(st.st_mode)) {
+            mk_bool(ctx, "dir", 1, o);
+        } else {
+            mk_int(ctx, "size", (long long)st.st_size, o);
+        }
+        mk_int(ctx, "mtime", (long long)st.st_mtime, o);
+        JS_SetPropertyUint32(ctx, arr, (uint32_t)n, o);
+        n++;
+    }
+    closedir(d);
+    JS_FreeCString(ctx, dir);
+
+    res = JS_NewObject(ctx);
+    mk_bool(ctx, "ok", 1, res);
+    mk_int(ctx, "count", n, res);
+    JS_SetPropertyStr(ctx, res, "files", arr);
+    return res;
+}
+
 #define PB2_EXPORTS(X) \
     X("open", js_open, 15) \
     X("pause", js_pause, 0) \
@@ -891,7 +976,8 @@ static JSValue js_log_tail(JSContext *ctx, JSValueConst this_val, int argc, JSVa
     X("info", js_info, 0) \
     X("setSound", js_set_sound, 1) \
     X("kmsProbe", js_kms_probe, 0) \
-    X("logTail", js_log_tail, 1)
+    X("logTail", js_log_tail, 1) \
+    X("listFiles", js_list_files, 1)
 
 static int player2_module_init(JSContext *ctx, JSModuleDef *m) {
     JSValue def = JS_NewObject(ctx);
