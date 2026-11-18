@@ -532,13 +532,20 @@ export async function openVideo(ctx, item) {
   /* 【3.5.10】口径收进 play_chrome.videoReserve()：页面 buildVideoRect 调同一个
    * 函数，两条路径必须逐像素一致（以前这里扣 bar、那里不扣，X6 上差 48 物理像素）。 */
   const reserveBottom = videoReserve({ cc: band.bottom, bar: band.bar }, profile.barOverlay);
-  /* 【第二十八轮】全屏不改几何：band.full 恒 false，只有中列一种盒子。 */
-  const areaBox = {
-    x: profile.videoArea.x,
-    y: profile.videoArea.y,
-    width: profile.videoArea.width,
-    height: colH
-  };
+  /* 【3.5.13】沉浸态（band.full = 页面 ui.side）把盒子从「中列」换成「整个视口」。
+   *
+   * 16:9 在 960x266 上永远高度受限，所以换盒子**不改尺寸**，只是让画面在视口里
+   * 重新居中（physical y 差 30 像素）。这种「尺寸不变、只平移」的 SET_RECT 在
+   * native 走 overlay 快路径（session.c 的 size_same 分支），毫秒级、不重建管线。
+   * 必须与页面 buildVideoRect 里的 area 逐像素同源，否则开关侧栏后画面会跳。 */
+  const areaBox = band.full
+    ? { x: 0, y: 0, width: profile.logical.width, height: colH }
+    : {
+      x: profile.videoArea.x,
+      y: profile.videoArea.y,
+      width: profile.videoArea.width,
+      height: colH
+    };
   rectBox = bandBox(areaBox, { top: band.top, cc: reserveBottom, bar: 0 });
   /* 【第二十五轮：绿幕修复】重新做 fit —— 矩形 = 画面本身。
    *

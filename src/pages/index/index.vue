@@ -93,15 +93,18 @@
          不能 v-if 掉这一列：它一旦消失，中列会左移，视频洞的位置就变了 ——
          而 KMS 平面按固定矩形出画，洞和画面对不上就是"画面跑到左边"。 -->
     <div v-if="mode === 'play'" class="pleft" :style="L.playLeft">
-      <!-- 全屏占位：同宽同高、纯黑。用户要的是"视频位置不动"，所以这列必须
-           继续占着像素，只是不画任何内容。
+      <!-- 【3.5.13】沉浸占位：单击画面隐藏左右侧栏时，这一列换成同宽同高的
+           纯黑。**必须继续占着像素**，不能 v-if 掉：它一旦消失，中列会左移，
+           而 KMS 平面按固定矩形出画，洞和画面对不上就是"画面跑到左边"。
 
-           【第二十八轮】这里原来是 <div v-if="playFull"> + <template v-else>：
-           falcon 对**跨标签名**的 v-else 链接不住（项目第 746 行注释早已记录），
-           结果信息栏没被卸掉，真机截图里左列仍是标题/简介/点赞投币收藏，
-           与全屏态叠在一起。现在两条都写独立互斥的 v-if。 -->
-      <div v-if="playFull" class="pleft-fs" :style="L.playLeft"></div>
-      <template v-if="!playFull">
+           为什么必须是**不透明黑**而不是透明：falcon 不主动清屏，透明容器
+           只表示"这次不画"，上一屏的信息栏像素会原封不动留在 framebuffer 上
+           （第二十六轮真机事故就是这么来的，见 base.less .pmid 一带注释）。
+
+           两条走独立互斥的 v-if，不用 v-else —— falcon 对**跨标签名**的
+           v-else 链接不住（项目第 746 行注释早已记录）。 -->
+      <div v-if="ui.side" class="pside-fill" :style="L.playLeft"></div>
+      <template v-if="!ui.side">
       <div class="pleft-info" :style="L.playInfo">
         <div class="pback" @click="onIbarBack">
           <image class="pback-icon" :src="ic.back" :width="22" :height="22"></image>
@@ -124,6 +127,33 @@
              这一行**恒定渲染**（无提示时是空串），不改几何尺寸，避免提示出现/消失时布局抖动；
              代价是简介从 7 行缩到 5 行（192px 高度是固定预算，见 base.less .pleft-info）。 -->
         <text class="pnote">{{ pnoteText }}</text>
+      </div>
+      <!-- 【3.5.11】左列控制条：播放 / -10s / +10s / 字幕。
+           用户要求「暂停、+-10、字幕、全屏移动到点赞投币收藏上方，简介下方」，
+           同时「视频下方只保留进度条本体」—— 底部那条带子就从 5 个槽降到只剩
+           时间+轨道，高度 30 → 24，省下来的像素直接给画面。
+           直播态不渲染（直播没有 seek/字幕，播放键在中列点画面即可暂停）。
+           沉浸态（ui.side）也不渲染：那时整列被 .pside-fill 占掉。
+
+           【3.5.13】全屏键移除 —— 用户 m20514：「我测试完了，认为可以把
+           '全屏'移除了，因为主播放界面已经填充满了」。主界面中列已经按
+           16:9 反算成 473×266 吃满全高，全屏那套「左列让位 + 右列控制面板」
+           既不会让画面变大（16:9 在这块 3.61:1 的屏上永远高度受限），
+           又白搭一整套面板。剩下的 4 颗键靠 .pctrl-btn 的 flex-grow:1
+           自动等分补位，不需要改任何数值。 -->
+      <div v-if="!isLivePlay" class="pleft-ctrl" :style="L.playCtrl">
+        <div :class="play.state === 'paused' ? 'pctrl-btn pctrl-play pctrl-on' : 'pctrl-btn pctrl-play'" @click="onTogglePlay">
+          <image class="pctrl-ic" :src="play.state === 'playing' ? ic.pause : ic.play" :width="16" :height="16"></image>
+        </div>
+        <div class="pctrl-btn" @click="onSeekStep(-10000)">
+          <text class="pctrl-t">-10s</text>
+        </div>
+        <div class="pctrl-btn" @click="onSeekStep(10000)">
+          <text class="pctrl-t">+10s</text>
+        </div>
+        <div class="pctrl-btn" @click="onCcToggle">
+          <text :class="cc.on ? 'pctrl-t pctrl-t-on' : 'pctrl-t'">字幕</text>
+        </div>
       </div>
       <!-- 三个按钮（点赞/投币/收藏）直播态隐藏（用户反馈 m07570-3）。
            直播没有「收藏夹」语义，点赞/投币对房间也不适用，留着只会占掉 74px
@@ -461,75 +491,11 @@
         <text class="cc-text">{{ subtitleText }}</text>
       </div>
       </div>
-      <!-- 底部 32px：**永远有 DOM**。
-           【第二十七轮】用户明确「视频下方原先进度条的位置有黑边」。根因不是
-           视频矩形，而是 falcon 不主动清屏：第二十四轮起控件收起时把整条
-           v-if 掉了，那 32px 没人画，上一次那条半透明黑条的像素就一直留在
-           framebuffer 上 —— 看着就是"隐藏了但黑边还在"。第二十四轮用普通
-           rgba(0,0,0,0) 的 .pmid-tap 也失败，透明 div 只是"这次不画"，擦不掉旧像素。
-           第十九轮字幕带的正确解法是**必须有个真 <hole>**：它把这块 fb 交还给
-           视频平面，旧像素一并清掉。所以这里二选一，永远占满 32px：
-             显示控件 → .chrome-bar（半透明黑盖在画面上，还原参考系统播放器的效果）
-             隐藏控件 → <hole>（真挖孔，画面完整透出，无黑带、无残影）
-           两者高度相同，DOM 几何 video + cc + bar = 280 恒定，与 native 的
-           bandBox（不扣 bar）严格同源 —— 隐藏前后视频矩形一个像素都不变。
-           槽位顺序（参考系统播放器）：播放键 / 当前时间 / 轨道 / 总时长 /
-           字幕开关（恒可见）/ 全屏。轨道宽由 barMetrics 算，DOM 与命中同源。 -->
-      <div v-if="chromeBarVisible" class="chrome-bar" :style="ctrlBarStyle" @click="onBarTap">
-        <!-- 【第二十一轮】全屏时这条带子**仍然占 32px**（不然视频洞高度变了，
-             又要改矩形），但内容不画 —— 控件全部搬到右列面板。 -->
-        <template v-if="ui.chrome && !playFull">
-        <!-- 【第十六轮删掉底部条最左的「退出」；第二十一轮起整条在全屏态不画控件】
-             真机曾报「全屏模式下有两个退出按钮，左一个，右一个」—— 左边是
-             原来的 cb-back，右边是 cb-fs。现在全屏退出只剩右列面板顶部的
-             .fsp-exit 一个；底部条在全屏态整条不渲染内容，物理上不可能再冒出
-             第二个。barMetrics 也不再为返回键预留 30+3px（否则轨道短 33px、
-             右边留一段点不到的空洞）。 -->
-        <!-- 播放/暂停键：粉底圆 + 白图标，恒亮。
-             参考系统播放器的播放键（42px）：不管在播还是暂停，底都是品牌粉，状态只由
-             图标（三角/双竖条）表达。我们原来是"暗底圆、暂停才变粉"，真机照片里
-             那颗键比参考系统播放器暗一档。 -->
-        <div :class="play.state === 'paused' ? 'cb-play cb-play-on' : 'cb-play'" @click="onTogglePlay">
-          <image class="cb-play-ic" :src="play.state === 'playing' ? ic.pause : ic.play" :width="18" :height="18"></image>
-        </div>
-        <text class="cb-time">{{ playCurText }}</text>
-        <div
-          class="cb-hit"
-          :style="trackStyle"
-          @touchstart="onSeekTouch"
-          @touchmove="onSeekTouch"
-          @touchend="onSeekRelease"
-        >
-          <div class="cb-line">
-            <div class="seek-fill" :style="{ width: seekFillW + 'px' }"></div>
-            <div class="seek-knob"></div>
-          </div>
-        </div>
-        <text class="cb-time">{{ playDurText }}</text>
-        <!-- 快退/快进 10 秒：原来在顶栏那 18px 里，顶栏删掉后搬到这里。
-             只留 ±10s 两个（-1m/+1m 去掉）—— 拖进度条比连点六次快，且控制条
-             只有 457 宽，多两个键轨道就要再短 50px。 -->
-        <div class="cb-step" @click="onSeekStep(-10000)">
-          <text class="cb-step-t">-10s</text>
-        </div>
-        <div class="cb-step" @click="onSeekStep(10000)">
-          <text class="cb-step-t">+10s</text>
-        </div>
-        <div v-if="ccBtnVisible" class="cb-btn" @click="onCcToggle">
-          <text :class="cc.on ? 'cb-btn-t cb-btn-on' : 'cb-btn-t'">字幕</text>
-        </div>
-        <div class="cb-btn cb-fs" @click="onToggleFull">
-          <!-- 全屏态文字从「退出」改成「还原」：底部条与侧栏面板不会同时出现，
-               但两个入口都叫「退出」时，用户会以为按错了（真机就是这么反馈的）。
-               「还原」= 回到普通布局，语义比「退出」更准，也不和面板那个撞名。 -->
-          <text :class="playFull ? 'cb-btn-t cb-btn-on' : 'cb-btn-t'">{{ playFull ? '还原' : '全屏' }}</text>
-        </div>
-        </template>
-      </div>
-      <!-- 控件收起（含全屏态）：这 32px 必须是 <hole>，不能是不渲染、
-           也不能是普通透明 div —— 否则上一屏的黑条像素会一直留在这儿。
-           顺带绑点击，点下方也能把控件叫回来（第十九轮真机反馈）。 -->
-      <hole v-if="!chromeBarVisible" class="bar-hole" :style="ctrlBarStyle" @click="onVideoTap"></hole>
+      <!-- 【3.5.12】中列不再有底部条：进度条搬去右列评论区顶部（.pright-bar）。
+           用户 m19885：「把进度条移至评论区的最上方，固定在上方，不随评论区滑动」
+           + 「视频画面尽量覆盖整个播放区」。两件事是同一件事 —— 那 24px 一离开
+           中列，中列整条高度都还给画面，16:9 画面正好铺满，左右黑边自己消失。
+           中列现在只有「视频洞 + 字幕带」两段，bands.bar 恒为 0。 -->
     </div>
 
     <!-- 播放态右列（用户手绘稿 m11950）：上=评论区(240)，下=输入框+发送按钮(26)。
@@ -543,91 +509,16 @@
            用户要求：点全屏后不对视频位置做任何改动，把进度条 / 播放 / 退出全屏 /
            互动选项挪到右手边。所以这一列在任何状态下都占着同样的像素，
            全屏时内容换成控制面板，中列和视频洞完全不受影响。 -->
-      <template v-if="playFull">
-        <!-- 【第二十六轮】全屏唯一进度条在这里，且随点画面显隐。
-             收起时整栏换成透明占位：视频铺满整屏，右栏不再有面板，
-             也不会留下上一屏的像素（「全屏有两个进度条」）。 -->
-        <div v-if="ui.chrome" class="fsp" :style="fsPanelStyle">
-          <div class="fsp-exit" :style="{ width: fsInnerW + 'px' }" @click="onToggleFull">
-            <text class="fsp-exit-t">‹ 退出全屏</text>
-          </div>
-          <div class="fsp-row" :style="{ width: fsInnerW + 'px' }">
-            <div :class="play.state === 'paused' ? 'cb-play cb-play-on' : 'cb-play'" @click="onTogglePlay">
-              <image class="cb-play-ic" :src="play.state === 'playing' ? ic.pause : ic.play" :width="20" :height="20"></image>
-            </div>
-            <text class="fsp-time">{{ playCurText }}</text>
-            <text class="fsp-time-dim">{{ '/ ' + playDurText }}</text>
-          </div>
-          <!-- 轨道宽 = seekTrackW（playFull 时它返回 fsTrackW），
-               DOM、填充、命中三处同源。 -->
-          <div
-            class="fsp-track"
-            :style="trackStyle"
-            @touchstart="onSeekTouch"
-            @touchmove="onSeekTouch"
-            @touchend="onSeekRelease"
-          >
-            <div class="fsp-line">
-              <div class="fsp-fill" :style="{ width: seekFillW + 'px' }"></div>
-              <div class="fsp-knob"></div>
-            </div>
-          </div>
-          <div class="fsp-row fsp-btns" :style="{ width: fsInnerW + 'px' }">
-            <div class="fsp-btn" @click="onSeekStep(-10000)">
-              <text class="fsp-btn-t">-10s</text>
-            </div>
-            <div class="fsp-btn" @click="onSeekStep(10000)">
-              <text class="fsp-btn-t">+10s</text>
-            </div>
-            <div class="fsp-btn" @click="onCcToggle">
-              <text :class="cc.on ? 'fsp-btn-t fsp-btn-on' : 'fsp-btn-t'">字幕</text>
-            </div>
-          </div>
-          <!-- 互动选项：与普通态右列同一份数据（interactChoices / onChoiceTap），
-               只是换了个位置。全屏时它是**唯一**能点选项的地方。 -->
-          <div
-            v-if="interact.visible || (interact.active && interact.pending)"
-            class="fsp-ip"
-            :style="{ width: fsInnerW + 'px', height: fsInteractH + 'px' }"
-          >
-            <div class="fsp-ip-head">
-              <text class="fsp-ip-title">{{ interactTitle }}</text>
-              <text class="fsp-ip-count">{{ interact.leaf ? '结局' : (interact.countdown > 0 ? interact.countdown + 's' : '选择') }}</text>
-            </div>
-            <scroller class="fsp-ip-list" :style="{ height: (fsInteractH - 30) + 'px' }">
-              <!-- 用户收起了选项（visible=false）时给一个回入口：全屏态没有
-                   普通态那个「‹ 显示本段互动选项」输入框行，少了它就没路回去。 -->
-              <div
-                v-if="interact.active && !interact.visible && interact.pending"
-                class="fsp-choice"
-                @click="onInteractOpen"
-              >
-                <text class="fsp-choice-text">‹ 显示本段互动选项</text>
-              </div>
-              <div
-                v-for="(ch, ci) in interactChoices"
-                :key="'fc' + ch.id + '_' + ci"
-                :class="ch.isDefault ? 'fsp-choice fsp-choice-def' : 'fsp-choice'"
-                @click="onChoiceTap(ch)"
-              >
-                <text class="fsp-choice-idx">{{ ci + 1 }}</text>
-                <text class="fsp-choice-text">{{ ch.option }}</text>
-              </div>
-              <text v-if="!interactChoices.length && !interact.leaf" class="fsp-ip-status">{{ interact.autoJump ? '本段结束自动进入下一段' : '等待自动连播…' }}</text>
-              <text v-if="interact.status" class="fsp-ip-status">{{ interact.status }}</text>
-            </scroller>
-          </div>
-        </div>
-        <div v-if="!ui.chrome" class="fs-clear" :style="L.playRight"></div>
-      </template>
+      <!-- 【3.5.13】沉浸占位：同宽同高纯黑，理由同左列 .pside-fill。 -->
+      <div v-if="ui.side" class="pside-fill" :style="L.playRight"></div>
       <!-- 【互动视频】每段选项面板。falcon 没有可靠 z-index，所以与收藏夹一样
            采用「整栏替换」而不是浮层：选项可见时评论区让位，点「收起」再换回。 -->
       <!-- 【第二十八轮】四条分支改成显式互斥的独立 v-if。
            falcon 对跨 <template>/<div> 的 v-else-if / v-else 链支持不稳：
-           真机上 playFull=true 时评论区这个 v-else 分支**照样渲染**，
-           于是评论列表/输入框和全屏控制面板叠成一团（用户截图）。
+           真机上「沉浸态 = true」时评论区这个 v-else 分支**照样渲染**，
+           于是评论列表/输入框和另一块面板叠成一团（用户截图）。
            条件写全、互不依赖，反正它们本来就互斥。 -->
-      <template v-if="!playFull && interact.visible">
+      <template v-if="!ui.side && interact.visible">
         <div class="ip-head" :style="ipHeadStyle">
           <text class="ip-title">{{ interactTitle }}</text>
           <text class="ip-count">{{ interact.leaf ? '结局' : (interact.countdown > 0 ? interact.countdown + 's' : '选择') }}</text>
@@ -664,7 +555,7 @@
         </div>
       </template>
       <!-- 收藏夹覆盖层 -->
-      <template v-if="!playFull && !interact.visible && favOverlay">
+      <template v-if="!ui.side && !interact.visible && favOverlay">
         <div class="fav-head">
           <div class="fav-exit" @click="closeFavOverlay">
             <text class="fav-exit-text">‹ 退出</text>
@@ -687,18 +578,41 @@
         </div>
       </template>
       <!-- 评论区（默认） -->
-      <template v-if="!playFull && !interact.visible && !favOverlay">
+      <template v-if="!ui.side && !interact.visible && !favOverlay">
+        <!-- 【3.5.12】常驻进度条：压在评论区最上方，**不随评论滚动**。
+             用户 m19885 三点合一：进度条从视频下方搬到这里；顺势把中列那
+             24~30px 还给画面（16:9 正好铺满，左右黑边一起消失）。
+             它不属于 bands / 不跟 ui.chrome 联动 —— 从前那条会 5 秒后收起，
+             这里的定位是「固定在评论区顶上」，收起反而让高度跳变、评论跳动。
+             轨道宽走 barSlots（= seekMetrics(右列宽)），DOM 与命中同源。 -->
+        <div v-if="!isLivePlay" class="pright-bar" :style="rightBarStyle">
+          <text class="cb-time cb-time-lead">{{ playCurText }}</text>
+          <div
+            class="cb-hit"
+            :style="trackStyle"
+            @touchstart="onSeekTouch"
+            @touchmove="onSeekTouch"
+            @touchend="onSeekRelease"
+          >
+            <div class="cb-line">
+              <div class="seek-fill" :style="{ width: seekFillW + 'px' }"></div>
+              <div class="seek-knob"></div>
+            </div>
+          </div>
+          <text class="cb-time">{{ playDurText }}</text>
+        </div>
         <!-- 【分P / 合集】切换栏。只在"真的有得选"时出现（单 P 且无合集 → 不渲染，
              右栏一个像素都不变）。三格等宽：评论 / 分P n / 合集 n。
-             高度 22 从评论体里扣（replyBodyStyle），总高仍然 = 视口高。 -->
+             高度 22 从评论体里扣（replyBodyStyle），再加上面那条进度条，
+             总高仍然 = 视口高。 -->
         <div v-if="epTabsVisible" class="ep-tabs" :style="epTabsStyle">
-          <div :class="epTabNow === 'reply' ? 'ep-tab ep-tab-on' : 'ep-tab'" @click="onEpTab('reply')">
+          <div :class="epTabNow === 'reply' ? 'ep-tab-on' : 'ep-tab'" @click="onEpTab('reply')">
             <text :class="epTabNow === 'reply' ? 'ep-tab-t ep-tab-t-on' : 'ep-tab-t'">评论{{ replyCount ? ' ' + replyCount : '' }}</text>
           </div>
-          <div v-if="epHasPages" :class="epTabNow === 'pages' ? 'ep-tab ep-tab-on' : 'ep-tab'" @click="onEpTab('pages')">
+          <div v-if="epHasPages" :class="epTabNow === 'pages' ? 'ep-tab-on' : 'ep-tab'" @click="onEpTab('pages')">
             <text :class="epTabNow === 'pages' ? 'ep-tab-t ep-tab-t-on' : 'ep-tab-t'">{{ epPageLabel }}</text>
           </div>
-          <div v-if="epHasSeason" :class="epTabNow === 'season' ? 'ep-tab ep-tab-on' : 'ep-tab'" @click="onEpTab('season')">
+          <div v-if="epHasSeason" :class="epTabNow === 'season' ? 'ep-tab-on' : 'ep-tab'" @click="onEpTab('season')">
             <text :class="epTabNow === 'season' ? 'ep-tab-t ep-tab-t-on' : 'ep-tab-t'">{{ epSeasonLabel }}</text>
           </div>
         </div>
@@ -762,7 +676,7 @@
           <div
             v-for="(p, i) in ep.pages"
             :key="'pg' + p.cid"
-            :class="i === ep.pageIndex ? 'ep-row ep-row-on' : 'ep-row'"
+            :class="i === ep.pageIndex ? 'ep-row-on' : 'ep-row'"
             @click="switchEp('page', p)"
           >
             <text :class="i === ep.pageIndex ? 'ep-idx ep-idx-on' : 'ep-idx'">P{{ p.page }}</text>
@@ -781,7 +695,7 @@
             <div
               v-if="r.kind === 'ep'"
               :key="r.key"
-              :class="r.on ? 'ep-row ep-row-on' : 'ep-row'"
+              :class="r.on ? 'ep-row-on' : 'ep-row'"
               @click="switchEp('season', r.row)"
             >
               <text :class="r.on ? 'ep-idx ep-idx-on' : 'ep-idx'">{{ r.on ? '▶' : r.no }}</text>
@@ -1041,7 +955,7 @@ import {
  * 四段之和恒等于视口高；native 的 render-rectangle 用同一份数字收缩。
  * 单击画面收起控件、隐藏后字幕贴底，全靠这套分段（见 play_chrome.js 的注释）。 */
 import {
-  planBands, bandBox, barMetrics, trackRatioFromX, seekGoal, videoReserve,
+  planBands, bandBox, barMetrics, seekMetrics, trackRatioFromX, seekGoal, videoReserve,
   loadingFrame, chromeForState, canAutoHide, formatClock,
   CC_BAND_H, CHROME_LOAD_MS, AUTO_HIDE_MS, SEEK_KNOB_W
 } from '../../services/play_chrome.js';
@@ -1075,6 +989,10 @@ const QR_QUIET = 4;
  * 右列总高 253（body）+ 27（输入框），这条 22 从 body 里扣 —— 评论少看一行，
  * 换来「分P / 合集」永远在视线里。不加高整列：那 22px 会从视频区抢。 */
 const EP_TAB_H = 22;
+/* 单击/双击仲裁窗口：第一击挂起，到期才切沉浸态；期间来第二击则改为暂停/播放。
+ * 太短（<150ms）会把耐心的用户误伤成双击，太长（>350ms）每次单击都要等、手感粘滞；
+ * 260 是经典取值。 */
+const TAP_DELAY_MS = 260;
 
 // grid → 交替段行（白/暗首尾 quiet 补齐；宽度全部映射 qr-l-N 静态 class，零 inline style，
 // 相邻同类段自动合并；每行总宽恒 = size + 2*quiet）
@@ -1219,7 +1137,7 @@ export default {
        * chrome=true → 中列让出 top/bar 两段给控件；单击画面取反（用户要求）。
        * frame 由 120ms 的定时器推进，驱动 B 站那套「小电视 + 跳动圆点」加载动画
        * （falcon 上没有可靠的 @keyframes，动画只能靠 JS 改样式）。 */
-      ui: { chrome: true, frame: 0, full: false },
+      ui: { chrome: true, frame: 0, side: false },
       // 登录 / 扫码
       mineView: 'info',
       profile: null,
@@ -1465,13 +1383,10 @@ export default {
     ccActive() {
       return this.cc.on && this.cc.cues.length > 0 && !this.isLivePlay && this.mode === 'play';
     },
-    /* 全屏态（参考系统播放器的「全屏」动作）：左右列让位，视频洞占满视口宽。
-     * 只改布局与矩形，不重取流 —— native 只换 render-rectangle。
-     * 直播不进全屏：直播本来就没有控制条（无时长、seek 无意义），
-     * 也就没有「全屏」按钮的落点；硬塞一个入口会和"点画面=暂停/继续"打架。 */
-    playFull() {
-      return this.mode === 'play' && this.ui.full === true && !this.isLivePlay;
-    },
+    /* 【已下线】全屏态。用户 m20514：主播放界面已经填充满了，全屏按钮与
+     * 整块面板都拆了。现在的沉浸态是 ui.side（点画面藏/显左右两列），
+     * 它不改中列宽高，只把字幕盒子按整个视口居中（见 bandPx / buildVideoRect）。
+     */
     /* 视频区/控件带的宽度。**【3.5.6 第二十一轮：恒等于中列宽】**
      *
      * 用户明确要求：点全屏后**不对视频位置做任何改动**，只把控件挪到右手边。
@@ -1518,72 +1433,35 @@ export default {
          * 开字幕才让出 18px（232 → 412x232）。顶栏已删除（topH=0）。 */
         cc: this.ccActive,
         live: this.isLivePlay,
-        full: this.playFull,
+        /* 沉浸态不改分段：中列始终是「视频段 + 字幕带」，
+         * 只有字幕开关会真的改矩形。 */
+        full: false,
         /* 全屏也要自己的字幕带（顶栏已删，没有"借顶栏"这条路了）。
          * 这样全屏/普通态在同样的字幕状态下视频段高度一致，进出全屏不改尺寸。 */
         ccFull: true,
         topH: 0,
         ccH: CC_BAND_H,
-        /* 【第二十一轮】控制条那 32px **永远**算在几何里，全屏也不让出去。
-         * 它是"视频洞高度"的组成部分：一旦归零，视频段就长 32px、宽也跟着变，
-         * 必须改矩形 —— 而运行期改矩形正是画面被压扁的来源。现在全屏时这条
-         * 带子仍然占位（内容清空、纯黑），控件改画在右列面板上。 */
-        barH: this.L.num.seekH
+        /* 【3.5.12】中列底部条已删除 —— 进度条搬去右列评论区顶部（.pright-bar）。
+         * 这里恒传 0，中列只剩「视频洞 + 字幕带」两段，整条高度都归画面。
+         * 好处是顺带治好了左右黑边：中列宽度按 16:9 反算（见 layout.js），
+         * 画面正好铺满，不再有信箱黑。
+         * 注意这可不像从前那样"bar 段永远让出来"了 —— 现在视频矩形真的会变
+         * （视频洞长高了 24~30px），所以起播时的矩形与以前不同，但**运行期
+         * 仍然不变**：字幕开关是唯一的例外（低频、且必须重建）。 */
+        barH: 0
       });
-    },
-    /* ---------------- 全屏右侧控制面板（第二十一轮） ----------------
-     * 全屏 = **纯 UI 换装**：视频洞、字幕带、底部条占位一个像素都不动，
-     * 只把右列内容换成控制面板（退出 / 播放 / 进度条 / ±10s / 字幕 / 互动选项），
-     * 左列内容换成纯黑占位。全程没有任何 setVideoRect、也不重开 —— 平面自始至终
-     * 没被碰过，所以不可能出现"方形被压成扁方形"。
-     *
-     * 面板宽度直接用右列宽（L.playRight，X7 上约 278）；轨道再扣掉左右各 12
-     * 的留白。命中测试（seekRatioAt）读的是同一个出口，两者不会错开。
-     */
-    fsPanelW() {
-      const w = parseInt(String(this.L.playRight.width), 10);
-      return Math.max(120, isFinite(w) ? w : 240);
-    },
-    /* 面板高度跟右列容器同源（L.playRight.height），不是视口高：
-     * .pright 自己有设计高（X6 266 / X7 280），面板一旦比容器高就会被裁掉底部，
-     * 而底部正好是互动选项区。 */
-    fsPanelH() {
-      const h = parseInt(String(this.L.playRight.height), 10);
-      return isFinite(h) && h > 0 ? h : this.L.num.height;
-    },
-    fsPanelStyle() {
-      return { width: this.fsPanelW + 'px', height: this.fsPanelH + 'px' };
-    },
-    /* 面板内可用宽：面板宽 − 左右各 12。
-     * **所有子元素都用显式像素宽度**，靠 .fsp 的 align-items:center 居中 ——
-     * 不在容器上加左右 padding：falcon 的盒模型没有文档保证，padding 一旦
-     * 额外加宽，278 宽的面板会被撑到 302，直接顶出右列（控制条那 12px 超宽
-     * 的旧账就是这么来的）。 */
-    fsInnerW() {
-      return Math.max(80, this.fsPanelW - 24);
-    },
-    fsTrackW() {
-      return this.fsInnerW;
-    },
-    /* 互动选项区高度 = 面板剩余高度。固定部分：padding-top 8 + 退出 30 +
-     * 播放行 40 + 轨道 32 + 步进行 36 = 146，再留 14 的余量防止溢出，
-     * 剩下全给选项列表（内部再扣掉标题行 26）。 */
-    fsInteractH() {
-      return Math.max(60, this.fsPanelH - 160);
     },
     /* 视频 + 字幕那一列：宽度恒等于中列宽（全屏也不变，见 midW 的注释）。 */
     stageStyle() {
-      /* 【第二十七轮】恒定几何：视频段 + 字幕带。底部 32px 由 .chrome-bar /
-       * <hole> 二选一补满，不随控件显隐变化 —— 隐藏前后矩形一个像素都不动。
-       * 第二十六轮曾让洞在收起时吃到 280，结果 280 + 32 = 312 撑出中列，
-       * 与 native 的 280 高矩形不再同源。 */
+      /* 【3.5.12】中列只剩「视频段 + 字幕带」两段（底部条已搬去右列）。
+       * 视频段不再随控件显隐变化：它恒等于 bands.video = H − 字幕带。 */
       return { width: this.midW + 'px', height: (this.bands.video + this.bands.cc) + 'px' };
     },
-    /* **当前生效**的轨道宽度：普通态 = 底部条槽位，全屏态 = 右列面板。
+    /* **当前生效**的轨道宽度：普通态 = 右列顶部那条进度条，全屏态 = 右列面板。
      * 填充宽（seekFillW）、命中测试（seekRatioAt）、DOM 宽度三处全从这里出，
      * 换布局时自动跟着走，不会出现"点这儿、跳那儿"。 */
     seekTrackW() {
-      return this.playFull ? this.fsTrackW : this.barSlots.track;
+      return this.barSlots.track;
     },
     /* 字幕带是否要占像素：**由几何决定，不由"当前有没有句子"决定**。
      *
@@ -1630,46 +1508,35 @@ export default {
       if (n) return n;
       return this.act.status || '';
     },
-    chromeBarVisible() {
-      /* 【第二十七轮】这里只决定「32px 画控件还是画 <hole>」，
-       * **不再决定这条 DOM 存不存在** —— v-if 掉整条会让旧黑条像素留在
-       * framebuffer 里，正是用户说的「原进度条的位置有黑边」。
-       * 全屏态恒 false：唯一的进度条在右栏 fsp 面板里，中列底部换成
-       * <hole>，既没有第二条进度条，也没有黑带。 */
-      return this.bands.bar > 0 && this.ui.chrome && !this.playFull;
-    },
     /* 视频盒与字幕带的宽度：恒等于中列宽，必须与 buildVideoRect 下发的盒子
      * 逐像素相同，否则点击热区与画面错开。 */
     videoBoxStyle() {
-      /* 恒等于 bands.video：视频洞只管自己那段，底部 32px 永远由
-       * .chrome-bar / <hole> 占着。native 矩形按 bandBox 不扣 bar，
-       * 所以画面会一直画到这条带子底下 —— 带子半透明时透出 18%，
-       * 换成 <hole> 时完整透出。这才是参考系统播放器那两张截图的关系：
-       * 有/无进度条，画面位置与大小完全一样。 */
+      /* 【3.5.12】视频洞吃掉中列全高（进度条不在这一列了）：
+       * 266 高、473 宽，16:9 片源出来正好 473x266，没有信箱黑边。
+       * native 矩形按 bandBox 算，扣的是 top + 字幕带，与这里同源。 */
       return { width: this.midW + 'px', height: this.bands.video + 'px' };
     },
     ccBarStyle() {
       return { width: this.midW + 'px', height: this.bands.cc + 'px' };
     },
-    ctrlBarStyle() {
-      return { width: this.midW + 'px', height: this.bands.bar + 'px' };
+    /* 右列顶部常驻进度条的样式（宽 = 右列宽，高 = layout.play.barH）。
+     * 它不参与 bands（中列几何），也不跟 ui.chrome 联动：用户要求
+     * 「固定在上方，不随评论区滑动」，所以它常驻、评论列表在它下面滚。 */
+    rightBarStyle() {
+      return this.L.playBar;
     },
     /* 中列容器：任何状态都用普通态那份几何。全屏只换左右两列的内容，
-     * 中列（含视频洞位置、字幕带、底部条占位）一个像素都不动。 */
+     * 中列（含视频洞位置、字幕带）一个像素都不动。 */
     midStyle() {
       return this.L.playMid;
     },
-    /* 控制条槽位（播放键/时间/轨道/字幕/全屏）。轨道的**宽度**只从这里出，
-     * DOM 与命中测试共用，避免写死 453 那种"布局一改就静默错位"。 */
+    /* 进度条槽位：轨道宽度只从这里出，DOM 与命中测试共用。
+     * 【3.5.12】进度条住在右列（宽 = L.num.right），所以按右列宽算，
+     * 不再是中列宽 —— 写死中列宽会让轨道溢出到左列去。 */
     barSlots() {
-      /* 槽位：播放 / 当前时间 / 轨道 / 总时长 / -10s / +10s / 字幕 / 全屏。
-       * **没有返回键**（第十六轮删掉了左边那个「退出」，见模板注释）。
-       * 轨道宽 = 中列宽 − 其余全部，DOM 与命中测试同源。 */
-      return barMetrics(this.midW, {
-        cc: this.ccBtnVisible,
-        fs: true,
-        step: this.play.isLive ? 0 : 2
-      });
+      /* 只剩「当前时间 / 轨道 / 总时长」三格。
+       * 播放 / ±10s / 字幕 / 全屏早在 3.5.11 就搬到左列 .pleft-ctrl 了。 */
+      return seekMetrics(this.L.num.right);
     },
     trackStyle() {
       return { width: this.seekTrackW + 'px' };
@@ -1722,6 +1589,8 @@ export default {
     ipWidth() {
       return { width: this.L.num.right + 'px' };
     },
+    /* 【3.5.12】互动面板占满整个右列（进度条只在评论区出现，见 .pright-bar
+       的渲染条件），所以这三段仍是 28 + 体 + 26 = 页高。 */
     ipHeadStyle() {
       return { width: this.L.num.right + 'px', height: '28px' };
     },
@@ -1854,11 +1723,12 @@ export default {
       const h = this.L.num.rightBodyH - (this.epTabsVisible ? EP_TAB_H : 0);
       return { width: this.L.num.right + 'px', height: Math.max(80, h) + 'px' };
     },
-    /* 分P/合集列表：页签之下的全部高度（这个页签下没有输入框）。 */
+    /* 分P/合集列表：页签之下的全部高度（这个页签下没有输入框，
+     * 但顶部那条常驻进度条仍然占着 barH）。 */
     epListStyle() {
       return {
         width: this.L.num.right + 'px',
-        height: Math.max(80, this.L.num.height - EP_TAB_H) + 'px'
+        height: Math.max(80, this.L.num.height - this.L.num.barH - EP_TAB_H) + 'px'
       };
     },
     epPageLabel() {
@@ -1930,7 +1800,8 @@ export default {
     this._rectDirty = false; // 取流中切过全屏 → 起播后补一次 setVideoRect
     this._rectPendingReason = ''; // 补发时要用回 full-on/full-off 的原因
     this._rectKey = '';      // 上一次**成功下发**的物理矩形（去重/防连点抖动用）
-    this._tapAt = 0;         // 上一次点画面的时刻（300ms 连点闸）
+    this._tapAt = 0;         // 上一次被接受的点击时刻（60ms 内的重复事件丢弃）
+    this._tapT = 0;          // 单击延时句柄（两击之内被取消 = 双击）
     this._ccSaved = null;    // null = 用户从没显式开关过字幕（决定要不要自动打开）
     this._loadTimer = 0; // 加载动画定时器（120ms 一帧，只在 loading 期间跑）
     this.mixinMemo = {}; // WBI 密钥会话级缓存（播放与搜索共享）
@@ -2821,7 +2692,7 @@ export default {
        * 第二十六轮的整屏 cover 在真机上并没有生效（截图里画面仍在中列），
        * 却引入了重开流的黑屏与失败风险；左右黑区域用户也明确说不用管。
        * cc 与 bar 分开报：控制条浮在画面上、不占矩形，组合逻辑在 play_session。 */
-      return { top: b.top, bottom: b.cc, bar: b.bar, full: false };
+      return { top: b.top, bottom: b.cc, bar: b.bar, full: this.ui.side === true };
     },
     /* 控件显隐：只改状态 + 热更新矩形，不重取流。暂停/播完由 chromeForState 强制显示。 */
     setChrome(v) {
@@ -2833,56 +2704,36 @@ export default {
       /* 控件被点出来后静默 5s 自动收起；点画面任意位置恢复（onVideoTap）。 */
       if (next) this.scheduleAutoHide();
       else this.clearAutoHide();
-    },    /* ---------- 全屏 ----------
-     * 【3.5.6 第十九轮：全屏 = 用新矩形重开一路流】
-     *
-     * 以前是「不换管线，只下发一次 setVideoRect」。真机证明这条路在 X7 上不可靠：
-     * 管线里的 `videoscale ! width=<rect>,height=<rect>` 把输出 caps 在建管线那一刻
-     * 定死了，运行期改 render-rectangle 只能靠 native 的一次原地 seek 重建去追，
-     * 追不上的时候画面就停在旧尺寸上 —— 用户看到的就是「进出全屏后视频被压缩」。
-     *
-     * 而**普通态用 OPEN 建出来的画面是完全正确的**，所以尺寸变化改走 OPEN：
-     * 用同一份 URL / 音轨 / 设备参数、只换矩形和起点，重新起一路流。
-     * 代价是一次 ~0.5s 的起播（黑屏），换来 caps 与矩形从第一帧就一致。
-     *
-     * 失败则回滚 UI 并重开回原布局 —— 绝不能把用户留在"左右列没了、画面还是半截"的状态。 */
-    async onToggleFull() {
-      return this.setFullscreen(!this.ui.full);
     },
-    /* 【3.5.6 第二十一轮：全屏 = 纯 UI，绝不碰视频平面】
+    /* 沉浸态（用户 m20514 第 2 条）：点画面把左右两列换成纯黑占位，再点一次变回来。
      *
-     * 前几轮为了让画面"真的变大"，全屏会改矩形（后来改成用新矩形重开一路）。
-     * 两条路都在真机上出过问题：videoscale 的 caps 在起播时按矩形定死，任何
-     * 事后调整都可能让 buffer 尺寸与平面窗口对不上 —— 用户看到的就是
-     * 「方形被压成扁方形」。
+     * 为什么要改矩形而不是只删 DOM：16:9 在 960x266 上永远是「高度受限」，
+     * 画面尺寸一个像素都不会变，只会因为字幕盒子从中列变成整屏而平移 30 物理像素。
+     * 这种「尺寸不变、只平移」的 SET_RECT 在 native 走 overlay 快路径
+     * （session.c 的 size_same 分支），毫秒级、不重建管线、不黑屏。
      *
-     * 现在全屏只做三件事，全部是 UI：
-     *   ① 左列内容换成纯黑占位（**宽度不变**，中列位置才不变）；
-     *   ② 底部条内容清空（32px 高度照旧占着，视频洞尺寸不动）；
-     *   ③ 右列换成控制面板（退出 / 播放 / 进度条 / ±10s / 字幕 / 互动选项）。
-     * 一次 setVideoRect 都不下发，更不重开 —— 平面自始至终没被碰过。
-     *
-     * 代价：画面尺寸不变（16:9 仍 441x248）。用户明确接受这个代价 ——
-     * "不变形"比"变大"重要。 */
-    async setFullscreen(next) {
-      if (this.mode !== 'play') return;
-      /* 【第二十八轮】全屏 = 纯 UI 换装：左列纯黑占位、右列控制面板、
-       * 中列视频洞一个像素都不动。一次 setVideoRect 都不下发，更不重开。
-       *
-       * 第二十六轮曾用「整屏矩形 + cover + reopenSession」想让视频变大，
-       * 但真机截图里画面仍在原中列位置 —— 那条重开路径并没有生效，
-       * 反而带来 0.5~1s 黑屏、以及左右列透明导致的 UI 残影。
-       * 用户已明确「左右的黑色区域不用管」，这里就回到最稳的常量几何。 */
-      this.ui.full = next;
-      this.ui.chrome = true;
-      this.clearAutoHide();
-      logWarn('[chrome] full=' + next + ' (纯 UI，几何不变)');
+     * 不能只把左右列 v-if 关掉：falcon 不主动清屏，透明空旧像素会残留（第二十六轮事故），
+     * 所以模板里的占位是不透明黑的 .pside-fill。 */
+    setSide(next) {
+      if (this.mode !== 'play' || this.isLivePlay) return;
+      const on = !!next;
+      if (this.ui.side === on) return;
+      this.ui.side = on;
+      /* 沉浸 = 两侧黑 + 控件收起；退出沉浸 = 两侧回来 + 控件展开。
+       * 两者同一侧切，不会出现「侧栏没了但控件还在」的死状态。 */
+      this.ui.chrome = !on;
+      this.applyVideoGeometry(on ? 'side-on' : 'side-off');
+      if (on) this.clearAutoHide();
+      else this.scheduleAutoHide();
+      logWarn('[chrome] side=' + on);
     },
     /* 顶栏左侧按钮：全屏态 = 退出全屏（这时候没有左列返回键，别让用户一点就
      * 连视频一起关掉）；普通态 = 离开播放页。 */
     onTopBack() {
-      if (this.playFull) {
-        this.onToggleFull();
+      /* 沉浸态没有左列返回键（整列是黑的），所以顶栏这颗先退沉浸，
+       * 免得用户一点就把视频一起关掉。 */
+      if (this.ui.side) {
+        this.setSide(false);
         return;
       }
       this.onIbarBack();
@@ -2896,7 +2747,7 @@ export default {
     scheduleAutoHide() {
       this.clearAutoHide();
       if (!canAutoHide(this.play.state, {
-        full: this.playFull,
+        full: false,
         chrome: this.ui.chrome,
         busy: this.seekDragMs != null || this.interact.visible === true
       })) return;
@@ -2923,16 +2774,22 @@ export default {
       if (!s || this.mode !== 'play') return null;
       const p = await ensureProfile();
       const b = this.bands;
-      /* 【第二十八轮】只有一种盒子：中列宽 × 中列总高。
-       * 全屏不再参与矩形计算，所以这段代码里看不到 playFull —— 几何恒定
+      /* 【第二十八轮】普通态只有一种盒子：中列宽 × 中列总高。
+       * 沉浸态（ui.side）只把这张盒子换成整屏，尺寸不变 —— 几何恒定
        * 是这台机器不出「变扁 / 绿幕 / 错位」的唯一可靠办法。 */
       const colH = (p.layout.play.videoH || 0) + (p.layout.play.seekH || 0);
-      const area = {
-        x: p.videoArea.x,
-        y: p.videoArea.y,
-        width: p.videoArea.width,
-        height: colH
-      };
+      /* 沉浸态（ui.side）：字幕盒子从「中列」换成「整个视口」。
+       * 16:9 在 960x266 上永远高度受限，所以尺寸不变，只是居中位置随之平移
+       * （native 走 overlay 快路径，不重建、不黑屏）。这一段必须与
+       * play_session.openVideo 里的 areaBox 逐像素同源。 */
+      const area = this.ui.side === true
+        ? { x: 0, y: 0, width: p.logical.width, height: colH }
+        : {
+          x: p.videoArea.x,
+          y: p.videoArea.y,
+          width: p.videoArea.width,
+          height: colH
+        };
       /* 【第二十五轮：绿幕修复】矩形必须 fit 到画面本身，不能是外框。
        *
        * 上一轮用「矩形=外框 + videoscale add-borders=true」做覆盖，真机上
@@ -2956,7 +2813,8 @@ export default {
     async applyVideoGeometry(reason) {
       const s = this.play.session;
       if (!s || this.mode !== 'play') return true;
-      /* 【3.5.6 第十轮】只有「进/出全屏」才允许换矩形。
+      /* 【3.5.6 第十轮】只有「真的换了盒子」才允许换矩形（现在是字幕开关 +
+       * 沉浸态进/出两个原因）。
        *
        * 其它所有原因（chrome-show / chrome-hide / cc / interact / deferred）
        * 一律 **不下发 setVideoRect**。原因不是效率，是正确性：X7 Pro 起播时
@@ -2966,16 +2824,25 @@ export default {
        * 底部被裁」就是这么来的。控件显隐/字幕开关现在都由 DOM 纯黑占位完成，
        * 几何恒定，一行 native 调用都不需要。
        *
-       * 全屏是唯一例外：native 收到 SET_RECT 后不走即时改平面，而是更新
-       * g_w.rect 并投递一次原地 seek —— build_pipeline 会用新矩形重算 caps
-       * 并重建平面（见 session.c 的 PB2_CMD_SET_RECT）。 */
+       * 例外只给「改尺寸」的动作（字幕带 18px、以及将来的其它分段变化）：
+       * native 收到 SET_RECT 后不走即时改平面，而是更新 g_w.rect 并投递一次
+       * 原地 seek —— build_pipeline 会用新矩形重算 caps 并重建平面
+       * （见 session.c 的 PB2_CMD_SET_RECT）。
+       *
+       * 沉浸态是**另一类**例外：盒子从中列换成整屏，但 16:9 在这块屏上永远
+       * 高度受限，尺寸一个像素不变，只有 y 平移 30。native 会认成 size_same，
+       * 直接走 GstVideoOverlay 快路径，不重建、不黑屏。 */
       const tag = reason || '';
-      /* 【第二十一轮】全屏已经彻底退出矩形计算（纯 UI 换装），所以这里
-       * **只有字幕开关**允许改几何：字幕带占/让 18px，是真的动视频洞。
-       * 其它 reason（chrome-show / chrome-hide / interact / full-*）一律跳过 ——
+      /* 【3.5.13】允许改几何的只有两个原因：
+       *   · cc        —— 字幕带占/让 18px，是真的动视频洞；
+       *   · side-on/off —— 沉浸态，只平移不改尺寸（见上）。
+       * 其它 reason（chrome-show / chrome-hide / interact / deferred）一律跳过，
        * 连日志都省了，避免每次点画面刷一行。 */
       const isCc = tag === 'cc';
-      if (!isCc) {
+      /* 沉浸态的进/出是唯一另一个允许改矩形的动作：只平移不改尺寸，
+       * native 会走 size_same 分支直接 overlay，不重建管线。 */
+      const isSide = tag === 'side-on' || tag === 'side-off';
+      if (!isCc && !isSide) {
         logWarn('[chrome] 几何恒定，跳过 setVideoRect (' + tag + ')');
         return true;
       }
@@ -3355,7 +3222,9 @@ export default {
      * 面板常驻，题目一出现就能在同一列里点到，用户不会被打断。
      * 这个函数保留成"确保控件可见"的入口，调用点不用改。 */
     exitFullForInteract() {
-      if (!this.playFull) return;
+      /* 沉浸态右列是黑的，题面没地方画 → 先把侧栏叫回来。
+       * 普通态只需保证控件展开，几何不动。 */
+      if (this.ui.side) this.setSide(false);
       this.ui.chrome = true;
       this.clearAutoHide();
     },
@@ -4104,19 +3973,34 @@ export default {
      * （另一半保险在 applyVideoGeometry：几何没变就一次都不下发。） */
     onVideoTap() {
       const now = Date.now();
-      if (now - (this._tapAt || 0) < 300) return;
-      this._tapAt = now;
       const st = this.play.state;
       if (st === 'loading') return; // 取流中不抢交互，避免误触
       if (this.isLivePlay) {
         this.onTogglePlay();
         return;
       }
-      /* 【第二十五轮】暂停态也切控件 —— 用户反馈「点屏幕无法隐藏进度条」。
-       * 以前的规则是"暂停时点画面 = 继续播放"（B 站习惯），结果在暂停状态下
-       * 怎么点都只会播放/暂停，控件永远收不起来。
-       * 现在点画面统一是显隐，播放/暂停只由控制条那颗粉键负责。 */
-      this.setChrome(!this.ui.chrome);
+      /* 同一次物理点击会被 .pvideo 与 <hole> 各收一次（falcon 的点击不一定从子
+       * 节点冒泡，所以两个都必须绑）。不先把这个重复判掉，它会被当成一次真正的
+       * 双击 → 点一下就暂停。60ms 内丢弃重复事件；真人双击的两下间隔普遍
+       * 120~250ms，不会被误吞。 */
+      if (now - (this._tapAt || 0) < 60) return;
+      this._tapAt = now;
+      /* 双击仲裁：第一击不立即生效，挂一个延时；延时内又来一击 = 暂停/播放，
+       * 否则延时到期才切沉浸态。 */
+      if (this._tapT) {
+        clearTimeout(this._tapT);
+        this._timers.delete(this._tapT);
+        this._tapT = 0;
+        this.onTogglePlay();
+        return;
+      }
+      const t = setTimeout(() => {
+        this._timers.delete(t);
+        this._tapT = 0;
+        this.setSide(!this.ui.side);
+      }, TAP_DELAY_MS);
+      this._tapT = t;
+      this._timers.add(t);
     },
     /* 控件收起时顶栏/控制条只剩纯黑占位：点这两条也要能把控件叫回来。
      * 真机反馈「全屏后点下方不出进度条」—— 那 32px 当时既没有进度条、
@@ -4427,7 +4311,7 @@ export default {
     /* ---------- 可拖动进度条（任务 E：拖动中不下发 seek） ---------- */
     // falcon 运行时只有 changedTouches[0].pageX / pageY（offsetX/clientX/touches 全为 0），
     // 没有 panstart/panmove，所以自己按逻辑坐标算比例。
-    // 几何唯一来源是 play_chrome.barMetrics：轨道 = 中列 − 播放键 − 两个时间 − 字幕键。
+    // 几何唯一来源是 play_chrome.seekMetrics：轨道 = 中列 − 两个时间 − 两道路径间隙。
     // pageX 是「相对被触摸元素」的坐标，不是整页坐标 —— 实测在绑定元素内点 x=37
     // 拿到的就是 37；现在绑定在 .cb-hit（轨道本身）上，所以不需要再减 8px padding。
     seekRatioAt(x) {
@@ -5344,7 +5228,7 @@ export default {
       this.stopPoll();
       this.stopLoadingAnim();
       this.ui.chrome = true; // 下次进播放页默认展开控件
-      this.ui.full = false;  // 全屏是"这一次播放"的状态，离开就复位（回列表还是三列）
+      this.ui.side = false;  // 沉浸态是"这一次播放"的状态，离开就复位（回列表还是三列）
       this.ui.frame = 0;
       this.clearAutoHide();  // 自动收起句柄必须先清：下面 forEach 只 clearTimeout 不置零
       this._rectDirty = false;

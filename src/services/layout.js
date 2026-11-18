@@ -84,20 +84,33 @@ export function buildLayout(width, height) {
   const thumbH = Math.max(40, round((card * CARD_BASE_H) / CARD_BASE_W));
   const rowH = thumbH + 40; // 封面 + 标题两行 + 元信息（与 3.5.5 的卡片高度一致）
 
-  // ---------- 播放态三列（213 : 469 : 278 的定稿比例）----------
+  // ---------- 播放态三列 ----------
   const left = round((213 * W) / BASE.width);
-  const mid = round((469 * W) / BASE.width);
-  const right = W - left - mid;
-  // 高度：底部控制条 30 / 左列上下 192+74 / 右列 240+26，全部按 H 等比
-  /* 控制条高度：266 上 30（30 的圆键 + 上下刚好贴边）。
-   * 按 H 等比，但要留上下限：X7 家族里 280 高 → 32、320 高 → 36；
-   * 480 高的机型若跟着比例走会变成 54px（一条巨大的黑带），所以封顶 40。 */
-  const seekH = clamp(round((30 * H) / BASE.height), 24, 40);
-  const videoH = Math.max(80, H - seekH);
-  const infoH = round((192 * H) / BASE.height);
-  const btnsH = Math.max(40, H - infoH);
-  const rightBodyH = round((240 * H) / BASE.height);
-  const rightInputH = Math.max(18, H - rightBodyH);
+  const rightMin = round((232 * W) / BASE.width);
+  /* 【3.5.12】中列宽度改成**按 16:9 反算**，不再是写死的 469 比例。
+   * 进度条搬去右列评论区顶部后，中列整条高度都还给了画面（videoH = H）。
+   * 一个 16:9 片源要在一个「高 H 的盒子」里铺满，宽度必须正好 H*16/9：
+   *   比它窄 → 上下各留一条黑边；比它宽 → 左右各留一条黑边。
+   * 按 H 反算就没有黑边了。例：266 高 → 473（原来 469，两侧各 20px 黑边）；
+   * 280 高 → 498（X7 受右列下限约束收到 496）。
+   * 片源不是 16:9 时仍然走 fitLogicalRect 的 contain 信箱，属正常。 */
+  const midIdeal = round((H * 16) / 9);
+  const mid = clamp(midIdeal, 320, Math.max(320, W - left - rightMin));
+  const right = Math.max(0, W - left - mid);
+  /* 中列全高都是画面（进度条不在这一列了）。 */
+  const videoH = Math.max(80, H);
+  /* 右列顶部进度条：只放「时间 / 轨道 / 时间」，常驻、不随评论滚动。
+   * 266 上 30 够：11px 字 + 4px 轨道，上下各留 ~7px。
+   * 上下限：X7 280 → 32；320 高 → 36，480 高封顶 40。 */
+  const barH = clamp(round((30 * H) / BASE.height), 24, 40);
+  /* 左列三段：信息卡 / 控制条（播放 ±10s 字幕 全屏）/ 三按钮。
+   * 控制条 34 是 5 个方块加 4 道间隙再上下各 2px（方块宽度改成 5 等分拉伸，
+   * 见 base.less .pctrl-btn）。它从信息卡里出（简介可滚动，压缩代价最小）。 */
+  const ctrlH = clamp(round((34 * H) / BASE.height), 28, 44);
+  const infoH = round(((192 - 34) * H) / BASE.height);
+  const btnsH = Math.max(40, H - infoH - ctrlH);
+  const rightInputH = Math.max(18, round((26 * H) / BASE.height));
+  const rightBodyH = Math.max(60, H - barH - rightInputH);
 
   // ---------- 图文态 ----------
   const bodyW = W - ICON_BAR_WIDTH;
@@ -124,8 +137,14 @@ export function buildLayout(width, height) {
       right: right,
       videoW: mid,
       videoH: videoH,
-      seekH: seekH,
-      seekTrackW: Math.max(40, mid - 16),
+      /* 【3.5.12】barH = 右列顶部那条常驻进度条的高度（原来叫 seekH，
+       * 是中列底部条的高度）。seekH 保留为 0：中列已经没有底部条了，
+       * 谁还在用 (videoH + seekH) 算中列总高，拿到的一定是 H。 */
+      seekH: 0,
+      barH: barH,
+      /* 轨道宽：进度条住在右列，命中与 DOM 同源，按右列内宽算（左右各 8）。 */
+      seekTrackW: Math.max(40, right - 16),
+      ctrlH: ctrlH,
       infoH: infoH,
       btnsH: btnsH,
       rightBodyH: rightBodyH,
@@ -169,10 +188,13 @@ export function layoutStyles(L) {
       mid: L.play.mid,
       left: L.play.left,
       right: L.play.right,
-      /* 底部控制条的基础高度（点播态 = 原来的进度条行高）。play_chrome.planBands
-       * 用它当 bar 段高，页面据此摆 DOM 与算 render-rectangle。 */
+      /* 【3.5.12】中列底部条已删除（进度条搬去右列顶部），seekH 恒为 0；
+       * barH 才是那条常驻进度条的高度（住在右列 .pright-bar）。 */
       seekH: L.play.seekH,
+      barH: L.play.barH,
       seekTrackW: L.play.seekTrackW,
+      /* 左列控制条（播放 / ±10s / 字幕 / 全屏）的段高 */
+      ctrlH: L.play.ctrlH,
       /* 【分P / 合集】右栏评论体高度：页面要在它上面扣掉 22px 的切换栏，
        * 内联样式里是 '253px' 字符串，JS 算不了，所以这里出一份数字。 */
       rightBodyH: L.play.rightBodyH,
@@ -196,11 +218,14 @@ export function layoutStyles(L) {
     card: { width: px(L.grid.card) },
     playLeft: { width: px(L.play.left), height: px(L.height) },
     playInfo: { width: px(L.play.left), height: px(L.play.infoH) },
+    playCtrl: { width: px(L.play.left), height: px(L.play.ctrlH) },
     playBtns: { width: px(L.play.left), height: px(L.play.btnsH) },
     playMid: { width: px(L.play.mid), height: px(L.height) },
     video: { width: px(L.play.videoW), height: px(L.play.videoH) },
     videoLive: { width: px(L.play.videoW), height: px(L.height) },
     seek: { width: px(L.play.videoW), height: px(L.play.seekH) },
+    /* 右列顶部常驻进度条（时间 / 轨道 / 时间），宽度 = 右列宽 */
+    playBar: { width: px(L.play.right), height: px(L.play.barH) },
     seekTrack: { width: px(L.play.seekTrackW) },
     playRight: { width: px(L.play.right), height: px(L.height) },
     rightBody: { width: px(L.play.right), height: px(L.play.rightBodyH) },

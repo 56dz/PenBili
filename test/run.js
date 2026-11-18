@@ -2613,7 +2613,9 @@ async function main() {
      * X6 Pro（960x266 / swScale=0），而且 X6 走 kmssink 硬件缩放，
      * 不做 16 收边（alignPlane16 内部按 swScale 短路）。
      * 16:9 → 中列 469x266 里 fit 成 469x264 → 物理 {2,278,264,468}。 */
-    assert.deepStrictEqual(o.rect, { x: 2, y: 278, width: 264, height: 468 });
+    /* 【3.5.12】中列按 16:9 反算（473x266），16:9 源 fit 后正好铺满洞，
+     * 不再有左右 2px 信箱、也不给底部控制条让位 → 物理 {0,274,266,472}。 */
+    assert.deepStrictEqual(o.rect, { x: 0, y: 274, width: 266, height: 472 });
     assert.strictEqual(o.userAgent, DEFAULT_UA);
     assert.strictEqual(o.referer, REFERER);
     assert.strictEqual(o.fps, HTML5_FPS); // 不锁死数值：锚定 openVideo 传递配置常量（v2.5.1 起 24）
@@ -2654,7 +2656,7 @@ async function main() {
     assert.strictEqual(r.session.durationMs, 60000);
     assert.strictEqual(r.session.title, 'feed标题', 'item 标题优先');
     // 同上：node 无 env → 回退 X6 Pro（swScale=0，不做 16 收边）
-    assert.deepStrictEqual(w.calls.open[0].rect, { x: 2, y: 278, width: 264, height: 468 });
+    assert.deepStrictEqual(w.calls.open[0].rect, { x: 0, y: 274, width: 266, height: 472 });
   });
   test('play_session: 多P稿件用当前P的时长（view.duration 是所有P之和）', async () => {
     const w = fakePlayDeps();
@@ -2691,10 +2693,10 @@ async function main() {
     assert.strictEqual(r.ok, true, r.message);
     const rect = w.calls.open[0].rect;
     /* node 无 $falcon.env → 回退 X6 Pro：中列 469x266 里 fit 竖屏
-     * 1080x1920 → 逻辑 150x266 → 物理 {0,438,266,150}（宽高互换的竖柱）。
+     * 1080x1920 → 逻辑 150x266 → 物理 {0,436,266,150}（宽高互换的竖柱）。
      * plane 只有画面那么宽，左右没有 add-borders 的绿幕，
      * 多出来的黑由 UI 层（hole 之外的 fb 黑）提供。 */
-    assert.deepStrictEqual(rect, { x: 0, y: 438, width: 266, height: 150 });
+    assert.deepStrictEqual(rect, { x: 0, y: 436, width: 266, height: 150 });
     assert.ok(rect.height < rect.width, '竖屏输出应为竖长方形（物理宽高互换后）');
     const outRatio = rect.height / rect.width;
     const srcRatio = 1080 / 1920;
@@ -4292,7 +4294,11 @@ async function main() {
     /* X6 是 kmssink 硬件缩放，不参与 16 收边（否则白白缩小画面） */
     const p6 = dp.buildProfile({ name: 'x6p' });
     const r6 = dp.playVideoRectsFor(1920, 1080, p6, false, null).physical;
-    assert.strictEqual(r6.height % 16, 4, 'X6 保持 420，不做 16 收边');
+    /* 3.5.12：中列吃满视口高，16:9 源 → 逻辑 473x266 → 物理 266x472。
+     * X6 走 kmssink 硬件缩放，**不做 16 收边**（收边只会白白缩小画面）。 */
+    assert.strictEqual(r6.width, 266);
+    assert.strictEqual(r6.height, 472);
+    assert.notStrictEqual(r6.height % 16, 0, 'X6 不许被收边到 16 网格');
   });
 
   test('device: 16:9 挖洞与下发矩形严格同源（画面必须铺满洞）', () => {
@@ -4425,16 +4431,22 @@ async function main() {
     assert.strictEqual(L.grid.width, 870);
     assert.strictEqual(L.grid.thumbH, 93);
     assert.strictEqual(L.play.left, 213);
-    assert.strictEqual(L.play.mid, 469);
-    assert.strictEqual(L.play.right, 278);
-    assert.strictEqual(L.play.videoH, 236);
-    /* 控制条 30（3.5.6 第九轮从 26 抬上来，给 30 的圆键腾地方；画面相应少 4px） */
-    assert.strictEqual(L.play.seekH, 30);
-    assert.strictEqual(L.play.infoH, 192);
+    /* 【3.5.12】中列宽按 16:9 反算（用户 m19885：视频要铺满播放区）。
+     * 266 * 16/9 ≈ 472.9 → 473，右列被压到 274 但仍高于 232 的下限。 */
+    assert.strictEqual(L.play.mid, 473);
+    assert.strictEqual(L.play.right, 274);
+    assert.strictEqual(L.play.left + L.play.mid + L.play.right, 960);
+    /* 进度条搬去评论区顶部后，中列**整列都是画面**（seekH 恒 0、不再从画面里
+     * 扣一条控制条）；左列 34px 控制条与 158 信息卡维持 3.5.11 的形状。 */
+    assert.strictEqual(L.play.videoH, 266);
+    assert.strictEqual(L.play.seekH, 0);
+    assert.strictEqual(L.play.barH, 30);
+    assert.strictEqual(L.play.ctrlH, 34);
+    assert.strictEqual(L.play.infoH, 158);
     assert.strictEqual(L.play.btnsH, 74);
-    assert.strictEqual(L.play.rightBodyH, 240);
+    assert.strictEqual(L.play.rightBodyH, 210);
     assert.strictEqual(L.play.rightInputH, 26);
-    assert.strictEqual(L.play.seekTrackW, 453);
+    assert.strictEqual(L.play.seekTrackW, 258);
     assert.strictEqual(L.article.bodyW, 896);
     assert.strictEqual(L.article.coverW, 880);
   });
@@ -4443,8 +4455,10 @@ async function main() {
     const L = lay.buildLayout(936, 280);
     assert.strictEqual(L.play.left + L.play.mid + L.play.right, 936);
     assert.strictEqual(L.play.videoH + L.play.seekH, 280);
-    assert.strictEqual(L.play.infoH + L.play.btnsH, 280);
-    assert.strictEqual(L.play.rightBodyH + L.play.rightInputH, 280);
+    assert.strictEqual(L.play.infoH + L.play.ctrlH + L.play.btnsH, 280);
+    /* 右列自顶向下：进度条 / 评论体 / 输入框，三段仍要正好吃掉视口高。 */
+    assert.strictEqual(L.play.barH + L.play.rightBodyH + L.play.rightInputH, 280);
+    assert.ok(L.play.barH > 0, '右列顶部进度条必须有高度');
     // 首页网格：5 列必须真正塞进内容区（这是「右侧 184px 黑边」的根因）
     assert.strictEqual(L.grid.cols, 5);
     assert.ok(L.grid.padLeft + L.grid.width <= L.content.width,
@@ -4504,9 +4518,11 @@ async function main() {
        * 这里守的是"新旧两套换算对同一个盒子结果完全相同"。 */
       const vod = { x: p.videoArea.x, y: p.videoArea.y, width: p.videoArea.width, height: p.videoArea.height };
       assert.deepStrictEqual(dp.playVideoRectsFor(c[0], c[1], p, false), playVideoRects(c[0], c[1], vod));
+      /* 直播盒也走 profile（3.5.12 起点播/直播在中列上完全同框），这里比的
+       * 仍是「screen.js 的数学模型」与「device_profile 的装箱」两条独立路径。 */
       assert.deepStrictEqual(
         dp.playVideoRectsFor(c[0], c[1], p, true),
-        playVideoRects(c[0], c[1], LIVE_VIDEO_AREA)
+        playVideoRects(c[0], c[1], p.liveVideoArea)
       );
     }
   });
@@ -4598,18 +4614,18 @@ async function main() {
       const w = cases[i][0];
       const h = cases[i][1];
       const num = lay.layoutStyles(lay.buildLayout(w, h)).num;
-      assert.ok(num.seekH > 0, 'num.seekH 必须存在（控制条段高）');
+      assert.strictEqual(num.seekH, 0, '中列已没有控制条段（进度条搬去右列）');
+      assert.ok(num.barH > 0, 'num.barH 必须存在（右列顶部常驻进度条）');
       const b = pc.planBands({
         totalH: num.height, chrome: true, cc: true,
-        barH: num.seekH, topH: pc.CHROME_TOP_H, ccH: pc.CC_BAND_H
+        barH: 0, topH: 0, ccH: pc.CC_BAND_H
       });
       assert.strictEqual(b.top + b.video + b.cc + b.bar, h, w + 'x' + h + ' 四段必须等于视口高');
       assert.ok(b.video > 100, '正常视口下画面不能被挤没');
-      /* 【第二十四轮】DOM 的洞（b.video）比 native 的盒子短一条控制条：
-       * 视频平面多画那 b.bar 行到控制条底下，被半透明控制条盖住。
-       * 这正是参考系统播放器"进度条浮在画面上"的几何。 */
+      /* 【3.5.12】中列只剩一个盒子：视频洞。native 矩形与洞逐像素同源 ——
+       * 不再有"平面多画一条控制条、被半透明条盖住"的旧几何。 */
       const box = pc.bandBox({ x: 0, y: 0, width: num.videoW, height: num.height }, b);
-      assert.strictEqual(box.height, b.video + b.bar, '视频矩形 = 洞 + 控制条（覆盖）');
+      assert.strictEqual(box.height, b.video, '视频矩形 = 洞（没有控制条要盖了）');
       assert.strictEqual(box.y, b.top);
       assert.strictEqual(box.y + box.height + b.cc, h, '视频矩形 + 字幕带必须铺到中列底部');
     }
@@ -4726,46 +4742,57 @@ async function main() {
      * 主动发评论时发生，与本次真机反馈的前后台路径不同，单独留观察。 */
   });
 
-  test('fullscreen: 纯 UI 换装 + 互斥独立 v-if + 不透明清屏', () => {
-    /* 【第二十八轮】真机截图：点全屏后左列仍是标题/简介/点赞投币收藏，
-     * 右栏评论列表、输入框与「退出全屏 / 播放键 / 进度条」叠成一团。
-     * 根因不是几何，是 falcon 对跨 <div>/<template> 的 v-else-if / v-else
-     * 链接不住（项目第 746 行注释早已记录），评论区那个 v-else 照样渲染；
-     * 第二十六轮又把左右列改成全透明，旧像素不擦除，进一步加重叠加。 */
+  test('沉浸态: 纯 UI 换装 + 互斥独立 v-if + 不透明清屏（3.5.13 起全屏下线）', () => {
+    /* 【3.5.13】用户 m20514：主播放界面已经填满，全屏按钮与整块面板全部拆掉。
+     * 现在的沉浸态是 ui.side —— 点画面把左右两列换成不透明黑占位，再点一次回来。
+     *
+     * 两条历史教训仍然有效：
+     *   第二十八轮：falcon 对跨 <div>/<template> 的 v-else-if / v-else 链接不住，
+     *               四条分支必须写显式互斥的独立 v-if（真机上全屏态时评论区
+     *               v-else 照样渲染，和面板叠成一团）。
+     *   第二十六轮：falcon 不主动清屏，透明占位擦不掉上一屏像素，必须不透明黑。 */
     const vue = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'pages', 'index', 'index.vue'), 'utf8');
     const less = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'styles', 'base.less'), 'utf8');
 
     // ① 左列 / 右栏一律用显式互斥的独立 v-if，不许再有跨标签 v-else 链
-    assert.ok(/<template v-if="!playFull">/.test(vue), '左列信息栏必须是独立 v-if');
-    assert.ok(/<template v-if="!playFull && interact\.visible">/.test(vue), '互动分支独立');
-    assert.ok(/<template v-if="!playFull && !interact\.visible && favOverlay">/.test(vue), '收藏夹分支独立');
-    assert.ok(/<template v-if="!playFull && !interact\.visible && !favOverlay">/.test(vue), '评论区分支独立');
+    assert.ok(/<template v-if="!ui\.side">/.test(vue), '左列信息栏必须是独立 v-if');
+    assert.ok(/<template v-if="!ui\.side && interact\.visible">/.test(vue), '互动分支独立');
+    assert.ok(/<template v-if="!ui\.side && !interact\.visible && favOverlay">/.test(vue), '收藏夹分支独立');
+    assert.ok(/<template v-if="!ui\.side && !interact\.visible && !favOverlay">/.test(vue), '评论区分支独立');
     assert.ok(!/<template v-else-if="interact\.visible">/.test(vue), '不许退回 v-else-if 链');
     assert.ok(!/<template v-else-if="favOverlay">/.test(vue), '不许退回 v-else-if 链');
     assert.ok(!/<!-- 评论区（默认） -->\s*<template v-else>/.test(vue), '评论区不许用 v-else');
-    assert.ok(/<div v-if="!ui\.chrome" class="fs-clear"/.test(vue), '清屏占位也要独立 v-if');
+    assert.ok(/<div v-if="ui\.side" class="pside-fill"/.test(vue), '沉浸占位必须是独立 v-if');
 
-    // ② 左右列必须真的画不透明黑擦掉上一屏像素（透明 = 残留 = 错乱）
-    assert.ok(/\.pleft-fs\s*\{[\s\S]{0,200}background-color:\s*#000000/.test(less), '.pleft-fs 必须不透明黑底');
-    assert.ok(/\.fsp\s*\{[\s\S]{0,200}background-color:\s*#000000/.test(less), '.fsp 必须不透明黑底');
-    assert.ok(/\.fs-clear\s*\{[\s\S]{0,200}background-color:\s*#000000/.test(less), '.fs-clear 必须不透明黑底');
+    // ② 占位必须真的画不透明黑（透明 = 残留 = 错乱）；全屏那三组样式要删干净
+    assert.ok(/\.pside-fill\s*\{[\s\S]{0,200}background-color:\s*#000000/.test(less),
+      '.pside-fill 必须不透明黑底');
+    assert.ok(!/\.pleft-fs\s*\{/.test(less) && !/\.fsp\s*\{/.test(less) && !/\.fs-clear\s*\{/.test(less),
+      '全屏面板样式必须删干净（3.5.13 下线，留着就是死代码）');
     assert.ok(!/leftColStyle|rightColStyle/.test(vue), '不许再用内联透明覆盖容器底色');
 
-    // ③ 全屏不改几何：不重开、不 cover、不参与矩形计算
-    const fsSeg = vue.slice(vue.indexOf('async setFullscreen'), vue.indexOf('onTopBack'));
-    assert.ok(!/await reopenSession\(/.test(fsSeg), '全屏切换不许重开流（真机上那条路径没生效）');
-    assert.ok(/full: false/.test(vue), 'bandPx 的 full 恒 false');
+    // ③ 沉浸态只平移不改尺寸：不重开流、不 cover、不参与分段几何
+    const sideSeg = vue.slice(vue.indexOf('setSide(next)'), vue.indexOf('onTopBack()'));
+    assert.ok(/applyVideoGeometry\(on \? 'side-on' : 'side-off'\)/.test(sideSeg),
+      '进/出沉浸都要下发矩形（否则画面停在原来位置）');
+    assert.ok(!/await reopenSession\(/.test(sideSeg), '沉浸切换不许重开流（那条路径真机没生效）');
+    assert.ok(/full: false/.test(vue), 'bands() 的 full 恒 false（沉浸不改中列分段）');
+    assert.ok(/full: this\.ui\.side === true/.test(vue), 'bandPx 的 full 必须跟着 ui.side');
     const rectSeg = vue.slice(vue.indexOf('async buildVideoRect'), vue.indexOf('async applyVideoGeometry'));
-    assert.ok(!/coverFrameFor/.test(rectSeg) && !/this\.playFull/.test(rectSeg),
-      '矩形计算里不许出现全屏/cover');
+    assert.ok(!/coverFrameFor/.test(rectSeg) && !/playFull/.test(rectSeg), '矩形计算里不许出现全屏/cover');
+    assert.ok(/this\.ui\.side === true[\s\S]{0,200}p\.logical\.width/.test(rectSeg),
+      '沉浸态信箱盒子必须换成整个视口（与 play_session 逐像素同源）');
     const ps = fsx.readFileSync(
       pathx.join(__dirname, '..', 'src', 'services', 'play_session.js'), 'utf8');
-    assert.ok(!/if \(band\.full\)/.test(ps), '起播矩形也不许分全屏两支');
+    assert.ok(/const areaBox = band\.full/.test(ps),
+      '起播矩形也要认沉浸态（否则起播时开关侧栏画面会跳）');
 
-    // ④ 第二十七轮底部 32px 修复不能被回退掉
-    assert.ok(/<hole v-if="!chromeBarVisible" class="bar-hole"/.test(vue), '底部 hole 仍在');
-    assert.ok(/v-if="ui\.chrome" class="fsp"/.test(vue), '全屏唯一进度条仍随点画面显隐');
-    assert.ok(/!this\.playFull/.test(vue), '中列全屏态不许再画第二条进度条');
+    // ④ 全屏彻底消失：中列不再让位、进度条在右列常驻
+    assert.ok(!/bar-hole/.test(vue), '中列不许再有底部控制条 / hole');
+    assert.ok(!/playFull/.test(vue), 'playFull 必须彻底消失（连注释都不许留）');
+    assert.ok(!/class="fsp/.test(vue) && !/fsPanel/.test(vue) && !/setFullscreen/.test(vue),
+      '全屏面板 / 尺寸计算 / 状态机全部下线');
+    assert.ok(/<div v-if="!isLivePlay" class="pright-bar"/.test(vue), '进度条仍然常驻右列顶部');
   });
 
   test('device: coverFrameFor 计算正确（能力保留，第二十八轮起全屏不再启用）', () => {
@@ -4787,7 +4814,7 @@ async function main() {
     assert.ok(tall.physical.height < 936, '竖屏回落 contain，画面窄于视口');
   });
 
-  test('底部黑边: 32px 恒有 DOM，隐藏时用真 <hole> 清掉旧像素', () => {
+  test('进度条: 常驻评论区顶部，不再占中列像素（3.5.12）', () => {
     /* 【第二十七轮】用户澄清：「视频下方原先进度条的位置有黑边，左右不用管」。
      * 根因是第二十四~二十六轮把整条 v-if 掉了 —— falcon 不主动清屏，
      * 上一次那条半透明黑条的像素一直留在 fb 上。普通 rgba(0,0,0,0) div
@@ -4796,12 +4823,28 @@ async function main() {
       pathx.join(__dirname, '..', 'src', 'pages', 'index', 'index.vue'), 'utf8');
     const less = fsx.readFileSync(
       pathx.join(__dirname, '..', 'src', 'styles', 'base.less'), 'utf8');
-    assert.ok(/<hole v-if="!chromeBarVisible" class="bar-hole"/.test(vue),
-      '控件收起时底部 32px 必须是真 <hole>（不是不渲染、也不是普通透明 div）');
-    assert.ok(/:style="ctrlBarStyle"/.test(vue), '带子与 hole 必须共用同一个 32px 几何');
-    assert.ok(/\.bar-hole\s*\{[\s\S]{0,400}rgba\(0, 0, 0, 0\)/.test(less),
-      '.bar-hole 必须是全透明挖孔');
+    /* 【3.5.12】用户 m19885：「进度条移至评论区的最上方，固定在上方，不随评论区
+     * 滑动」。于是第二十七轮那套「底部恒有 DOM + 收起时用 <hole> 擦旧像素」整个
+     * 作废 —— 中列不再有任何控件像素，也就不存在擦不掉的残留。
+     * 这一条守三件事：① 条在评论区内部、列表之上；② 不跟 ui.chrome 联动；
+     * ③ 条高来自 layout（playBar / num.barH），不是写死 px。 */
+    assert.ok(/<div v-if="!isLivePlay" class="pright-bar" :style="rightBarStyle">/.test(vue),
+      '进度条必须常驻评论区顶部（直播态没有进度条）');
+    assert.ok(/rightBarStyle\(\)\s*\{\s*return this\.L\.playBar;/.test(vue),
+      '条高必须来自 layout 的 playBar');
+    assert.ok(/\.pright-bar\s*\{[\s\S]{0,400}@nav-background/.test(less),
+      '.pright-bar 必须是不透明右列底色（背后没有画面可透）');
+    assert.ok(!/bar-hole/.test(vue) && !/ctrlBarStyle/.test(vue),
+      '中列那条控制条 / hole / ctrlBarStyle 必须一起删干净');
     assert.ok(!/class="pmid-tap"/.test(vue), '不许退回普通透明 div 占位');
+    /* 顺序：进度条 → 分P页签 → 评论列表。顺序反了就是「跟着评论一起滚」。 */
+    const iBar = vue.indexOf('class="pright-bar"');
+    const iTabs = vue.indexOf('class="ep-tabs"');
+    const iBody = vue.indexOf('class="pright-body"');
+    assert.ok(iBar > 0 && iBar < iTabs && iTabs < iBody,
+      '进度条必须在页签与列表之前（固定不滚）');
+    assert.ok(!/ui\.chrome/.test(vue.slice(iBar, iBar + 400)),
+      '进度条显隐不许跟控件收起联动');
 
     /* 几何恒定：videoBoxStyle / stageStyle 不许再跟着 chromeBarVisible 变，
      * 否则 280 洞 + 32 条 = 312 撑出中列，与 native 的 280 矩形不再同源。 */
@@ -4815,13 +4858,13 @@ async function main() {
     const num = lay.layoutStyles(lay.buildLayout(936, 280)).num;
     const nb = pc.planBands({
       totalH: num.height, chrome: true, cc: false,
-      barH: num.seekH, topH: 0, ccH: pc.CC_BAND_H
+      barH: 0, topH: 0, ccH: pc.CC_BAND_H
     });
     assert.strictEqual(nb.video + nb.cc + nb.bar, num.height, '三段恒等式');
     const box = pc.bandBox(
       { x: p.videoArea.x, y: p.videoArea.y, width: num.videoW, height: num.height }, nb);
     assert.strictEqual(box.height, num.height,
-      'native 矩形不扣控制条：画面一直画到那 32px 底下（显示时透 18%，隐藏时全透）');
+      '洞吃掉中列全高：native 矩形不再为任何控件让位');
     assert.ok(/playVideoRectsFor/.test(vue), '普通态仍 fit 到画面大小（不产生绿边）');
   });
 
@@ -4903,10 +4946,19 @@ async function main() {
       '回调不许再被 playFull 挡住');
     assert.ok(/if \(this\.play\.state === 'playing' && this\.ui\.chrome\) this\.setChrome\(false\)/.test(seg),
       '回调条件必须是「在播 + 控件亮着」');
-    /* 点画面恢复：onVideoTap 必须还在切 chrome。 */
+    /* 点画面：3.5.13 起单击 = 切沉浸态（setSide），不是只切控件。
+     * 双击仲裁必须还在，否则点一下就会暂停。 */
     const tapSeg = vue.slice(vue.indexOf('onVideoTap()'), vue.indexOf('onBarTap()'));
-    assert.ok(/setChrome\(!this\.ui\.chrome\)/.test(tapSeg),
-      '点播放区必须能重新叫回控件');
+    assert.ok(/setSide\(!this\.ui\.side\)/.test(tapSeg),
+      '单击播放区必须切沉浸态（左右两列藏/显）');
+    assert.ok(/if \(now - \(this\._tapAt \|\| 0\) < 60\) return;/.test(tapSeg),
+      '同一次物理点击会被 .pvideo 与 <hole> 各收一次，60ms 去重必须还在');
+    assert.ok(/clearTimeout\(this\._tapT\)/.test(tapSeg) && /this\.onTogglePlay\(\);/.test(tapSeg),
+      '双击必须改成暂停/播放');
+    assert.ok(/\}, TAP_DELAY_MS\);/.test(tapSeg),
+      '单击必须挂起 TAP_DELAY_MS 再执行（可单测的常量，不许写死魔法数）');
+    /* 自动收起只动 chrome，绝不动 side —— 否则每 5 秒触发一次矩形平移。 */
+    assert.ok(!/this\.setSide\(/.test(seg), '5 秒自动收起不许碰沉浸态');
   });
 
   test('页面接线: 开机必须补齐 buvid（缺它投币必 -401，点赞却正常）', () => {
@@ -5000,17 +5052,17 @@ async function main() {
     assert.strictEqual(v.split('let seekWaiting').length, 2, '只允许一处声明（重复声明会 shadow）');
     assert.ok(v.indexOf('poll tick 异常') > 0,
       'tick() 必须挂 promise 兜底：任何抛错都要打点并让下一轮继续，不能静默吃掉后半段');
-    /* 控制条不能靠 CSS padding 留白（会和 barMetrics 双算，挤掉全屏键） */
+    /* 进度条不能靠 CSS padding 留白（会和 seekMetrics 双算，挤掉轨道）。
+     * 【3.5.12】中列那条 .chrome-bar 已删，进度条搬进右列 .pright-bar。 */
     const less = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'styles', 'base.less'), 'utf8');
-    const i = less.indexOf('.chrome-bar {');
-    assert.ok(i > 0, '.chrome-bar 规则必须存在');
+    const i = less.indexOf('.pright-bar {');
+    assert.ok(i > 0, '.pright-bar 规则必须存在');
     const block = less.slice(i, i + 400);
-    assert.ok(!/padding/.test(block), '.chrome-bar 不许有 padding-left/right（宽度会双算）');
-    assert.ok(/background-color:\s*rgba\(0,\s*0,\s*0,\s*0\.8/.test(block),
-      '控制条底色必须是半透明黑（浮在画面上，透出下面的视频）');
-    const bi = less.indexOf('.cb-btn {');
-    const btn = less.slice(bi, bi + 400);
-    assert.ok(!/border-width/.test(btn), '.cb-btn 不许描边（width 是否含边框不可知，会撑爆控制条）');
+    assert.ok(!/padding/.test(block), '.pright-bar 不许有 padding-left/right（宽度会双算）');
+    assert.ok(/background-color:\s*@nav-background/.test(block),
+      '右列进度条底色必须是右列底色（它是实心 UI 像素，背后没有画面）');
+    assert.ok(!/\.chrome-bar\s*\{/.test(less) && !/\.bar-hole\s*\{/.test(less),
+      '中列控制条与挖孔占位的样式必须删干净（3.5.12 起它们已无模板引用）');
   });
 
   /* ==================== 播放器资源（字幕 / 互动 / player v2） ==================== */
@@ -5343,45 +5395,70 @@ async function main() {
      * 第十四轮删掉顶端那条 18px 标题带 —— 用户要「视频占满、进度条别占地方」，
      * 这块屏上省下的每一像素都直接变成画面宽度。标题在左列本来就有，
      * 暂停标记改由播放键（暂停态实心品牌粉）承载。 */
-    assert.ok(/chrome-bar/.test(vue) && /\.chrome-bar/.test(less), '底部控制条要落地');
+    assert.ok(/pright-bar/.test(vue) && /\.pright-bar/.test(less),
+      '进度条要落地（3.5.12 起住评论区顶部，中列那条已删）');
     assert.ok(!/class="chrome-top"/.test(vue), '顶栏不许再回来（它吃掉 18px 画面高度）');
     assert.ok(/onVideoTap/.test(vue) && /setChrome\(/.test(vue), '单击画面显隐控件');
-    assert.ok(/cb-back/.test(vue) && /\.cb-back/.test(less), '全屏态返回键要在控制条里');
-    assert.ok(/cb-step/.test(vue) && /\.cb-step/.test(less), '±10s 要在控制条里');
-    assert.ok(/cb-play-on/.test(vue) && /\.cb-play-on/.test(less), '暂停标记由播放键承载');
+    /* 【3.5.11】底部条只剩「时间/轨道/时间」；播放/±10s/字幕/全屏搬到左列，
+     * 全屏退出仍然只有右列面板的 .fsp-exit 一处。 */
+    assert.ok(/pleft-ctrl/.test(vue) && /\.pleft-ctrl/.test(less), '左列控制条要落地');
+    assert.ok(/pctrl-play/.test(vue) && /onSeekStep\(-10000\)/.test(vue) &&
+      /onCcToggle/.test(vue),
+      '播放/±10s/字幕都要在左列控制条里');
+    /* 【3.5.13】全屏键与整块面板下线（用户 m20514：主界面已经填满）。
+     * 剩下的 4 颗靠 .pctrl-btn 的 flex-grow:1 自动等分补位。 */
+    assert.ok(!/onToggleFull/.test(vue) && !/class="pctrl-btn" @click="onToggleFull"/.test(vue),
+      '全屏入口必须彻底移除');
+    assert.ok(/\.pctrl-btn\s*\{[\s\S]{0,220}flex-grow:\s*1/.test(less),
+      '剩下 4 颗必须靠 flex-grow 等分铺满左列（不许写回固定宽度）');
+    assert.ok(!/cb-back/.test(vue), '底部条不许再有返回键（全屏退出只在右列面板）');
+    /* 【3.5.11】±10s 搬到左列，底部条里不再有 .cb-step；
+     * .cb-step 的样式这条也一并作废（左列改用 .pctrl-btn + .pctrl-t）。 */
+    assert.ok(!/cb-step/.test(vue), '底部条不许再有 ±10s');
+    assert.ok(/pctrl-t/.test(vue) && /\.pctrl-t/.test(less), '±10s 用左列的控制条按钮');
+    assert.ok(/pctrl-play/.test(vue) && /\.pctrl-play/.test(less),
+      '播放/暂停由左列 .pctrl-play 承载（中列那条控制条 3.5.12 已删）');
     assert.ok(/pl-tv/.test(vue) && /\.pl-tv/.test(less) && /startLoadingAnim/.test(vue), '加载动画要落地');
     const ps = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'services', 'play_session.js'), 'utf8');
     assert.ok(/item\.useCid/.test(ps), '播放链必须支持互动片段 cid 覆盖');
     assert.ok(/bandPx/.test(ps) && /bandBox/.test(ps), 'openVideo 必须把顶栏/字幕/控制条算进矩形');
-    assert.ok(/band\.full/.test(ps), '全屏态的信箱盒子必须从视口原点起（左右列让位）');
+    assert.ok(/band\.full/.test(ps), '沉浸态的信箱盒子必须从视口原点起（左右列让位）');
   });
 
-  test('页面接线: 全屏（左右列让位 + 自动收起 + 顶栏字幕）+ 六档跳转键', () => {
+  test('页面接线: 沉浸态（点画面藏/显侧栏 + 双击暂停）+ 六档跳转键', () => {
     const vue = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'pages', 'index', 'index.vue'), 'utf8');
     const less = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'styles', 'base.less'), 'utf8');
-    /* 全屏：状态、让位、矩形、退出 —— 少一个就会出现"点了没反应"或"画面和挖洞错位" */
-    assert.ok(/ui\.full/.test(vue) && /playFull\(\)/.test(vue), '全屏状态必须落在页面上');
-    assert.ok(/onToggleFull/.test(vue) && /midStyle/.test(vue), '全屏必须改中列宽度');
-    assert.ok(/!playFull/.test(vue), '左右两列在全屏态必须让位');
-    assert.ok(/full: this\.playFull/.test(vue), '分段几何要把全屏标记带进去');
-    assert.ok(/exitFullForInteract/.test(vue), '互动题面出现必须先退全屏（否则没有可点的地方）');
+    /* 【3.5.13】沉浸态：状态、占位、矩形、双击 —— 少一个就会出现"点了没反应"
+     * 或"画面和挖洞错位"。 */
+    assert.ok(/ui\.side/.test(vue) && /setSide\(next\)/.test(vue), '沉浸状态必须落在页面上');
+    assert.ok(/\{ chrome: true, frame: 0, side: false \}/.test(vue), 'ui.side 初始必须 false');
+    assert.ok(!/ui\.full/.test(vue) && !/playFull/.test(vue), '全屏状态必须彻底删除');
+    /* 左右两列在沉浸态让位 = 换成不透明黑占位（不能 v-if 掉，否则中列会左移）。 */
+    assert.ok(/<div v-if="ui\.side" class="pside-fill" :style="L\.playLeft">/.test(vue),
+      '沉浸态左列必须保留宽度、只铺纯黑占位');
+    assert.ok(/<div v-if="ui\.side" class="pside-fill" :style="L\.playRight">/.test(vue),
+      '沉浸态右列必须保留宽度、只铺纯黑占位');
+    assert.ok(/v-if="mode === 'play'" class="pleft"/.test(vue),
+      '左列容器在任何状态下都要渲染（宽度占位决定中列位置）');
+    assert.ok(/exitFullForInteract/.test(vue), '互动题面出现必须先退沉浸（否则没有可点的地方）');
     assert.ok(/canAutoHide/.test(vue) && /scheduleAutoHide/.test(vue) && /clearAutoHide/.test(vue),
-      '全屏态控件要能静默自动收起');
-    /* 字幕：独立的 18px 单行带（第十四轮顶栏删掉后回到这里） */
+      '控件要能静默自动收起');
+    /* 双击：仲裁窗口必须是有名字的常量，且走 onTogglePlay。 */
+    assert.ok(/const TAP_DELAY_MS = 2[0-9]0;/.test(vue),
+      '单击/双击仲裁窗口必须是 200~290ms 的命名常量（实测手感区间）');
+    assert.ok(/this\._tapT = 0;/.test(vue), '_tapT 句柄必须初始化（否则第一击 clearTimeout(null)）');
+    /* 字幕：独立的 18px 单行带 */
     assert.ok(/ccBarVisible/.test(vue) && /class="cc-bar"/.test(vue) && /\.cc-bar/.test(less),
       '字幕必须是独立的一条 18px 带子');
-    /* 【第十九轮】带子"让出的像素"和"画的像素"必须一对一：只要 bands.cc > 0
-     * 就必须渲染这条黑带（没有台词时是空黑），否则那 18px 是透明洞，
-     * 上一屏的控制条会透出来 —— 真机「全屏多出一条进度条」的根因之一。 */
     assert.ok(/ccBarVisible\(\)\s*\{[\s\S]{0,120}return this\.bands\.cc > 0;/.test(vue),
       '字幕带的渲染条件只能看几何（bands.cc），不能看"当前有没有台词"');
     assert.ok(/\.cc-bar\s*\{[\s\S]*?background-color:\s*#000000/.test(less),
       '字幕带必须铺纯黑（空台词时也是它挡住上一屏）');
-    /* 底栏：返回（全屏态）+ 全屏键；±10s 也从顶栏搬了过来 */
-    assert.ok(/onTopBack/.test(vue) && /\.cb-back/.test(less), '全屏态要有返回键');
+    /* 左列控制条：播放 / -10s / +10s / 字幕（全屏键 3.5.13 移除） */
     assert.ok(/onSeekStep\(-10000\)/.test(vue) && /onSeekStep\(10000\)/.test(vue), '±10s 跳转');
-    assert.ok(/cb-fs/.test(vue) && /\.cb-fs/.test(less) && /退出/.test(vue) && /全屏/.test(vue),
-      '控制条要有全屏/退出键');
+    assert.ok(!/onToggleFull/.test(vue), '全屏键必须移除');
+    assert.ok(/class="pright-bar"/.test(vue) && !/cb-fs/.test(vue),
+      '右列那条只有进度条本体，不许再有全屏键');
     assert.ok(/AUTO_HIDE_MS/.test(vue), '自动收起用统一常量');
   });
 
@@ -5404,24 +5481,23 @@ async function main() {
       '控件显隐不许进几何（它只换 DOM 内容，不改矩形）');
     assert.ok(!/bands\(\) \{[\s\S]{0,700}?fsSide/.test(vue),
       '全屏也不许进几何（唯一几何源是普通态那份）');
-    assert.ok(/barH: this\.L\.num\.seekH/.test(vue),
-      '底部条高度恒定（全屏也不归零）');
+    assert.ok(/barH: 0/.test(vue),
+      '中列不再有控制条段（进度条搬去右列，不参与中列分段）');
     assert.ok(/class="pstage"/.test(vue) && /\.pstage\s*\{/.test(less),
       '视频 + 字幕要成一组');
-    /* 全屏只换左右两列的内容：左列纯黑占位、右列控制面板，中列不动。 */
-    assert.ok(/<div v-if="playFull" class="pleft-fs"/.test(vue) && /\.pleft-fs\s*\{/.test(less),
-      '全屏时左列必须保留宽度、只铺纯黑占位（不能 v-if 掉，否则中列会左移）');
+    /* 沉浸态只换左右两列的内容：两列纯黑占位，中列一个像素不动。 */
+    assert.ok(/<div v-if="ui\.side" class="pside-fill"/.test(vue) && /\.pside-fill\s*\{/.test(less),
+      '沉浸时左右列必须保留宽度、只铺纯黑占位（不能 v-if 掉，否则中列会左移）');
     assert.ok(/v-if="mode === 'play'" class="pleft"/.test(vue),
       '左列容器在全屏态也要渲染（宽度占位决定中列位置）');
-    assert.ok(/class="chrome-bar"[\s\S]{0,300}?ui\.chrome && !playFull/.test(vue),
-      '全屏时底部条只占位、不画控件');
+    assert.ok(/<div v-if="!isLivePlay" class="pright-bar"/.test(vue),
+      '进度条常驻（显隐只由直播态决定，跟 ui.chrome 无关）');
     /* 轨道宽 / 填充 / 命中三处同源 */
-    assert.ok(/seekTrackW\(\)[\s\S]{0,160}playFull \? this\.fsTrackW/.test(vue),
-      '全屏时轨道宽必须切到面板宽度');
+    assert.ok(/barSlots\(\) \{[\s\S]{0,160}seekMetrics\(this\.L\.num\.right\)/.test(vue),
+      '轨道宽必须按右列宽算（进度条住右列顶部）');
     assert.ok(/trackRatioFromX\(x, this\.seekTrackW\)/.test(vue),
       '命中测试必须用同一个 seekTrackW');
-    assert.ok(/onBarTap/.test(vue) && /class="chrome-bar"[^>]*@click="onBarTap"/.test(vue),
-      '控件收起时点控制条要把控件叫回来');
+    assert.ok(/onBarTap/.test(vue), 'onBarTap 保留（全屏面板与互动面板仍在用）');
     assert.ok(/const isCc = tag === 'cc'/.test(vue),
       '字幕带出现/消失是唯一允许改矩形的原因');
     assert.ok(!/isFull/.test(vue.slice(vue.indexOf('async applyVideoGeometry'), vue.indexOf('async applyVideoGeometry') + 1600)),
@@ -5462,16 +5538,18 @@ async function main() {
     const diagVue = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'pages', 'diag', 'diag.vue'), 'utf8');
     const diagLess = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'styles', 'diag.less'), 'utf8');
 
-    /* ① 真机反馈「全屏模式下有两个退出按钮，左一个右一个」。
-     *    【第二十一轮】之后全屏只剩一个出口：右列面板顶部的 .fsp-exit
-     *    「退出全屏」。底部条在全屏态根本不渲染控件（ui.chrome && !playFull），
-     *    所以也不可能有第二个。 */
+    /* ① 【3.5.13】全屏整套下线（用户 m20514），退出口必须是 0 处 ——
+     *    沉浸态靠"再点一下画面"退出，顶栏那颗返回键也会先退沉浸。 */
     const exits = (vue.match(/class="fsp-exit"/g) || []).length;
-    assert.strictEqual(exits, 1, '全屏退出口只许一处（右列面板顶部）');
+    assert.strictEqual(exits, 0, '全屏已下线，不许再有 fsp-exit 退出口');
+    assert.ok(!/class="pleft-fs"/.test(vue) && !/\.pleft-fs\s*\{/.test(less),
+      '全屏占位类必须删干净');
     assert.ok(!/class="cb-back"/.test(vue),
       '底部条不许再出现 cb-back（那是第二个「退出」的来源）');
-    assert.ok(/cb-btn cb-fs/.test(vue) && /playFull \? '还原' : '全屏'/.test(vue),
-      '底部条的全屏键在全屏态必须叫「还原」，不能再出现第二个「退出」');
+    /* 【3.5.11】底部条已没有全屏键（搬到左列 pctrl-btn，且左列在全屏态整块不渲染），
+     * 所以「第二个退出」物理上不可能出现；这里只守底部条不再有按钮。 */
+    assert.ok(!/cb-fs/.test(vue) && !/cb-btn/.test(vue),
+      '底部条只留进度条本体：不许再有 cb-btn / cb-fs');
     assert.ok(!/barMetrics\(this\.midW,\s*\{[^}]*back:/.test(vue),
       'barMetrics 不许再为返回键预留槽位（否则轨道短 33px、右边留一段点不到的空洞）');
     assert.ok(pc.BAR_BACK_W === 30 && pc.SEEK_KNOB_W === 12 && pc.BAR_TIME_W === 42,
@@ -5501,10 +5579,10 @@ async function main() {
       '已播放填充必须跟轨道同高（实测 ' + fillH + '）');
     assert.ok(/\.seek-fill\s*\{[\s\S]*?@accent-play/.test(less),
       '已播放填充必须用参考系统播放器的 activeColor');
-    assert.ok(/\.cb-play\s*\{[\s\S]*?background-color:\s*@accent-play/.test(less),
+    assert.ok(/\.pctrl-play\s*\{[\s\S]*?background-color:\s*@accent-play/.test(less),
       '播放键要恒粉（参考系统播放器的 play-btn 底不随播放状态变）');
-    assert.ok(/\.cb-btn\s*\{[\s\S]*?background-color:\s*rgba\(0,\s*0,\s*0,\s*0\)/.test(less),
-      '字幕/全屏键不要底板（参考系统播放器的 action-btn 是纯文字）');
+    assert.ok(/\.pctrl-btn\s*\{[\s\S]*?background-color:\s*rgba\(255,\s*255,\s*255,\s*0\.08\)/.test(less),
+      '左列控制键统一 8% 白底板（选中态才换品牌粉）');
     assert.ok(pc.SEEK_KNOB_W === 12 && /seekTrackW - SEEK_KNOB_W/.test(vue),
       'seekFillW 必须用 SEEK_KNOB_W 扣右端余量');
 
@@ -5516,12 +5594,11 @@ async function main() {
     assert.ok(ccFs !== null && Math.abs(ccFs - 13) < 0.6,
       '字幕字号必须是 13px（18px 带内不裁字），实测 ' + ccFs);
 
-    /* ⑤ 全屏占位块必须不透明：真机「全屏 UI 错乱、多个进度条」里那条多出来的
+    /* ⑤ 沉浸占位块必须不透明：真机「UI 错乱、多个进度条」里那条多出来的
      *    进度条就是透明区域露出的上一屏 fb 残留（falcon 不主动清屏）。
-     *    第二十一轮起全屏不再有"没人画"的区域：左列 .pleft-fs 是纯黑占位，
-     *    中列与右列都有人画。 */
-    assert.ok(/\.pleft-fs\s*\{[\s\S]*?background-color:\s*#000000/.test(less),
-      '.pleft-fs 必须铺纯黑，否则普通态的标题/简介残影会留在全屏画面左侧');
+     *    3.5.13 起左右列在沉浸态是 .pside-fill 纯黑占位，中列一直有人画。 */
+    assert.ok(/\.pside-fill\s*\{[\s\S]*?background-color:\s*#000000/.test(less),
+      '.pside-fill 必须铺纯黑，否则普通态的标题/简介残影会留在沉浸画面两侧');
 
     /* ④ 自检页右栏必须「上滚 + 下固定」：X7 上内容约 300px > 266~280px 视口，
      *    没有滚动容器时底部四个按钮永远点不到；按钮固定在滚动区之外，
@@ -5560,25 +5637,24 @@ async function main() {
 
   test('play_chrome: 三种点播几何都恒等于视口高（第十轮）', () => {
     const num = lay.layoutStyles(lay.buildLayout(936, 280)).num;
-    /* 普通态（控件展开/收起都用这一份） */
+    /* 【3.5.12】普通态：中列只剩「视频洞 + 字幕带」，整列 280 都是画面。 */
     const normal = pc.planBands({
-      totalH: num.height, chrome: true, cc: false, barH: num.seekH
+      totalH: num.height, chrome: true, cc: false, barH: 0, topH: 0
     });
     assert.deepStrictEqual([normal.top, normal.cc, normal.bar, normal.video],
-      [18, 0, num.seekH, 280 - 18 - num.seekH]);
+      [0, 0, 0, 280]);
     assert.strictEqual(normal.top + normal.video + normal.cc + normal.bar, 280);
-    /* 控件收起时页面仍然拿同一份几何（只是 DOM 内容换成黑），所以这里不用再算 */
+    /* 控件显隐不改几何（收起时只是不再画控件） */
     const hidden = pc.planBands({
-      totalH: num.height, chrome: true, cc: false, barH: num.seekH
+      totalH: num.height, chrome: true, cc: false, barH: 0, topH: 0
     });
     assert.deepStrictEqual(hidden, normal, '显隐前后几何必须逐字段相同');
-    /* 全屏态：控制条让位，画面段变大 */
+    /* 全屏也只换左右两列的内容，中列一像素不动 */
     const full = pc.planBands({
-      totalH: num.height, chrome: true, cc: false, barH: 0, full: true
+      totalH: num.height, chrome: true, cc: false, barH: 0, topH: 0, full: true
     });
-    assert.strictEqual(full.bar, 0);
-    assert.ok(full.video > normal.video, '全屏画面段必须更大');
-    assert.strictEqual(full.top + full.video + full.cc + full.bar, 280);
+    assert.deepStrictEqual([full.top, full.video, full.cc, full.bar],
+      [normal.top, normal.video, normal.cc, normal.bar], '全屏不许改中列几何');
   });
 
   test('device: describeProfile 含机型/偏移/平面/缩放/倍率诊断字段', () => {

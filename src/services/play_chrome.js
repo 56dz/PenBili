@@ -240,9 +240,49 @@ export function bandBox(area, bands) {
 }
 
 /*
- * 控制条槽位。midW = 中列宽（X7 普通态 457 / 全屏态 936），
- * opts.cc = 是否要放"字幕"按钮，opts.fs = 是否要放"全屏"按钮。
- * → { pad, play, time, cc, fs, track }
+ * 【3.5.11】底部进度条槽位 —— 只剩「当前时间 / 轨道 / 总时长」。
+ *
+ * 用户要求「视频下方只保留进度条本体」，播放键、±10s、字幕、全屏全部搬去
+ * 左列（简介与点赞投币收藏之间）。所以这条带子从 5 槽降到 3 槽：
+ *   fixed = 时间 x2 + 间隙 x2
+ *   track = midW - fixed
+ * track 仍是**唯一**的轨道宽度来源：DOM 的 width 与 seekRatioAt() 的命中测试都用它。
+ */
+export function seekMetrics(midW) {
+  const mid = Math.max(120, Math.round(num(midW, 469)));
+  const gaps = 2;
+  const fixed = BAR_PAD_X * 2 + BAR_TIME_W * 2 + BAR_GAP * gaps;
+  return {
+    pad: BAR_PAD_X,
+    time: BAR_TIME_W,
+    track: Math.max(40, mid - fixed)
+  };
+}
+
+/*
+ * 【3.5.11】左列控制条槽位 —— 播放 / -10s / +10s / 字幕 / 全屏。
+ *
+ * 5 个方块 + 4 道间隙，竖排段高由 layout 的 play.ctrlH 给（266 上 34）。
+ * `fits` 只是自检用：213 宽扣掉左右 6px padding 后要能放下 5x30+4x3=162。
+ */
+export function ctrlMetrics(leftW) {
+  const w = Math.max(120, Math.round(num(leftW, 213)));
+  const gaps = 4;
+  const total = BAR_PLAY_W * 5 + BAR_GAP * gaps;
+  return {
+    play: BAR_PLAY_W,
+    step: BAR_STEP_W,
+    cc: BAR_CC_W,
+    fs: BAR_FS_W,
+    gaps: gaps,
+    total: total,
+    fits: total <= w - 12
+  };
+}
+
+/*
+ * 通用槽位计算（保留给全屏侧栏面板与单测的守恒校验）。
+ * midW = 条宽，opts.cc/fs/back/step 决定要不要放对应按钮。
  * track 是**唯一**的轨道宽度来源：DOM 的 width 与 seekRatioAt() 的命中测试都用它。
  */
 export function barMetrics(midW, opts) {
