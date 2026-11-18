@@ -4,7 +4,7 @@
 
 这是一款跑在有道词典笔上的 B 站客户端，用有道自家的 Falcon 小程序框架（QuickJS + Vue 2 单文件组件）写成。屏幕只有 960×266 点，指甲盖大小，所以我按 iPad 版 B 站的骨架重做了界面，把推荐、搜索、播放、评论、图文、直播全塞进这一个页面里。
 
-当前版本 `3.5.9`，支持 **X6 Pro / X7 Pro**（RK3562，aarch64）。X5 分支已停止维护。
+当前版本 `3.5.10`，支持 **X6 Pro / X7 Pro**（RK3562，aarch64）。X5 分支已停止维护。
 X7 Pro 的播放器适配（黑屏修复、设备参数运行时自适应）见 [`docs/x7pro-adaptation.md`](docs/x7pro-adaptation.md)；
 播放页悬浮控件（顶栏 / 控制条 / 字幕带 / 全屏四段布局、单击显隐、自动收起、加载动画）见
 [`docs/player-chrome.md`](docs/player-chrome.md)；控制条视觉、"点两下画面跑偏"、
@@ -14,7 +14,7 @@ X7 Pro 的播放器适配（黑屏修复、设备参数运行时自适应）见 
 分 P / 合集见 [`docs/video-pages-season.md`](docs/video-pages-season.md)，
 双机型（x6/x7/diag）构建见 [`docs/build-variants.md`](docs/build-variants.md)。
 
-![version](https://img.shields.io/badge/version-3.5.9-blue)
+![version](https://img.shields.io/badge/version-3.5.10-blue)
 ![license](https://img.shields.io/badge/license-GPL--3.0-green)
 
 代码与安装包双仓同步：[GitCode](https://gitcode.com/dz56dz/PenBili)（国内推荐）· [GitHub](https://github.com/56dz/PenBili)。
@@ -337,7 +337,7 @@ npm ci
 # 交叉编译 native（产出三个 .so 到 libs/）
 npm run native
 
-# 打 AMR 包（产出 8002026110200001.3_5_9.amr，约 241 KB）
+# 打 AMR 包（产出 8002026110200001.3_5_10.amr，约 241 KB）
 npm run build
 
 # 单测
@@ -379,8 +379,8 @@ NODE_BIN=... bash tools/build-variants.sh
 ## 安装
 
 ```bash
-adb push 8002026110200001.3_5_9.amr /tmp/
-adb shell "miniapp_cli install /tmp/8002026110200001.3_5_9.amr"   # 必须返回 "ret":0
+adb push 8002026110200001.3_5_10.amr /tmp/
+adb shell "miniapp_cli install /tmp/8002026110200001.3_5_10.amr"   # 必须返回 "ret":0
 
 # 冷启动：先切桌面再起目标页，保证重建页面实例
 adb shell "miniapp_cli start 8080222437664451"

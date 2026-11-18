@@ -4840,19 +4840,116 @@ async function main() {
     assert.strictEqual(pc.trackRatioFromX(narrow.track / 2, narrow.track), 0.5);
   });
 
-  test('play_chrome: 全屏静默自动收起只在"真在播 + 控件亮着"时计时', () => {
+  test('play_chrome: 静默自动收起只在"真在播 + 控件亮着"时计时（普通态也收）', () => {
     assert.strictEqual(pc.canAutoHide('playing', { full: true, chrome: true }), true);
-    assert.strictEqual(pc.canAutoHide('playing', { full: false, chrome: true }), false,
-      '普通态不自动收（画面会自己变大，像 bug）');
-    assert.strictEqual(pc.canAutoHide('playing', { full: true, chrome: false }), false,
+    /* 【3.5.10】普通态也要收起 —— 用户要求「5 秒没操作就隐藏，点击播放区重新显示」。
+     * 收起不会让画面变大：applyVideoGeometry 对 chrome-show/hide 一律跳过，
+     * 视频矩形只由 bands 决定。 */
+    assert.strictEqual(pc.canAutoHide('playing', { full: false, chrome: true }), true,
+      '普通态同样自动收（几何恒定，不会跳变）');
+    assert.strictEqual(pc.canAutoHide('playing', { chrome: false }), false,
       '已经收起了没什么可收');
-    assert.strictEqual(pc.canAutoHide('paused', { full: true, chrome: true }), false);
-    assert.strictEqual(pc.canAutoHide('loading', { full: true, chrome: true }), false);
+    assert.strictEqual(pc.canAutoHide('paused', { chrome: true }), false,
+      '暂停必须让用户看得到播放键');
+    assert.strictEqual(pc.canAutoHide('loading', { chrome: true }), false);
+    assert.strictEqual(pc.canAutoHide('ended', { chrome: true }), false);
     assert.strictEqual(
-      pc.canAutoHide('playing', { full: true, chrome: true, busy: true }), false,
+      pc.canAutoHide('playing', { chrome: true, busy: true }), false,
       '拖进度条 / 互动题面期间不许打断');
-    assert.ok(pc.AUTO_HIDE_MS >= 2000 && pc.AUTO_HIDE_MS <= 6000,
-      '3.5s 量级（太短看不清，太长挡画面）');
+    assert.strictEqual(pc.AUTO_HIDE_MS, 5000, '用户明确要求 5 秒');
+  });
+
+  test('play_chrome: videoReserve 是页面与起播两条路径的唯一口径', () => {
+    /* X6（barOverlay=false）：控制条不透明，必须占位 → 让出 cc + bar。 */
+    assert.strictEqual(pc.videoReserve({ cc: 0, bar: 30 }, false), 30);
+    assert.strictEqual(pc.videoReserve({ cc: 18, bar: 30 }, false), 48);
+    /* X7（barOverlay=true）：控制条是半透明浮层 → 只让出 cc。 */
+    assert.strictEqual(pc.videoReserve({ cc: 0, bar: 30 }, true), 0);
+    assert.strictEqual(pc.videoReserve({ cc: 18, bar: 30 }, true), 18);
+    /* 兼容只给 bottom 的旧调用（readBandPx 里字段名是 bottom）。 */
+    assert.strictEqual(pc.videoReserve({ bottom: 18, bar: 30 }, false), 48);
+    assert.strictEqual(pc.videoReserve(null, false), 0, '脏输入不许炸');
+  });
+
+  test('页面接线: 起播与热更新必须用同一个底部让位量（X6 不许差一条控制条）', () => {
+    const vue = fsx.readFileSync(
+      pathx.join(__dirname, '..', 'src', 'pages', 'index', 'index.vue'), 'utf8');
+    const ps = fsx.readFileSync(
+      pathx.join(__dirname, '..', 'src', 'services', 'play_session.js'), 'utf8');
+    /* 【3.5.10】3.5.9 的 bug：起播走 play_session 扣 bar、页面 buildVideoRect 不扣，
+     * X6 上同一个 640x360 片子算出 236 高与 266 高两个矩形，来回跳。
+     * 现在两边都必须调 videoReserve()。 */
+    assert.ok(/videoReserve\(b, p\.barOverlay\)/.test(vue),
+      '页面的 buildVideoRect 必须用 videoReserve(b, p.barOverlay)');
+    assert.ok(/videoReserve\(\{ cc: band\.bottom, bar: band\.bar \}, profile\.barOverlay\)/.test(ps),
+      '起播路径也必须用 videoReserve');
+    /* 两处都不许再自己拼 bar 让位量。 */
+    assert.ok(!/band\.bottom \+ \(profile\.barOverlay/.test(ps), '不许手写 bar 让位量');
+    assert.ok(!/bandBox\(area, \{ top: b\.top, cc: b\.cc, bar: 0 \}\)/.test(vue),
+      '页面不许再用不扣 bar 的旧口径');
+  });
+
+  test('页面接线: 普通态 5 秒收起控件，点画面恢复', () => {
+    const vue = fsx.readFileSync(
+      pathx.join(__dirname, '..', 'src', 'pages', 'index', 'index.vue'), 'utf8');
+    /* 注意：`this.scheduleAutoHide();` 里也含 "scheduleAutoHide()"，用裸 indexOf
+     * 会定位到调用点而不是方法定义，必须锚定行首 + 花括号。 */
+    const _s0 = vue.indexOf('\n    scheduleAutoHide() {');
+    assert.ok(_s0 > 0, '必须能定位 scheduleAutoHide 方法定义');
+    const seg = vue.slice(_s0, vue.indexOf('\n    clearAutoHide() {', _s0));
+    assert.ok(!/if \(this\.playFull\) return;/.test(seg),
+      '普通态也要计时（不许一进来就 return）');
+    assert.ok(!/if \(this\.playFull && this\.play\.state === 'playing'\)/.test(seg),
+      '回调不许再被 playFull 挡住');
+    assert.ok(/if \(this\.play\.state === 'playing' && this\.ui\.chrome\) this\.setChrome\(false\)/.test(seg),
+      '回调条件必须是「在播 + 控件亮着」');
+    /* 点画面恢复：onVideoTap 必须还在切 chrome。 */
+    const tapSeg = vue.slice(vue.indexOf('onVideoTap()'), vue.indexOf('onBarTap()'));
+    assert.ok(/setChrome\(!this\.ui\.chrome\)/.test(tapSeg),
+      '点播放区必须能重新叫回控件');
+  });
+
+  test('页面接线: 开机必须补齐 buvid（缺它投币必 -401，点赞却正常）', () => {
+    const vue = fsx.readFileSync(
+      pathx.join(__dirname, '..', 'src', 'pages', 'index', 'index.vue'), 'utf8');
+    /* 【3.5.10】真机实测：同一个登录态、同一个 aid，
+     *   like  → {"code":0}
+     *   coin  → {"code":-401,"message":"非法访问"}
+     * 差别只有 buvid3/buvid4（投币带风控决策 origin_scene=video_coin）。
+     * 补上 buvid 后 coin 立刻 code=0。以前 fetchFinger 只有自检探针会调。 */
+    assert.ok(/if \(!sess\.buvid3\)/.test(vue), '开机必须判断 buvid 是否缺失');
+    assert.ok(/this\.client\.fetchFinger\(\)/.test(vue), '缺失时要用 fetchFinger 补');
+    const seg = vue.slice(vue.indexOf('if (!sess.buvid3)'), vue.indexOf('if (sess.login && sess.login.SESSDATA)'));
+    assert.ok(/buvid3: fp\.buvid3/.test(seg), '补齐后要写回 buvid3');
+    assert.ok(/await saveSession\(sess\)/.test(seg), '补齐后必须落盘，否则下次开机又缺');
+    assert.ok(/buvid 已补齐/.test(seg), '补齐要留日志');
+    /* 未登录也要把匿名触点设进 cookie（风控只认 Cookie）。 */
+    assert.ok(/if \(!\(sess\.login && sess\.login\.SESSDATA\) && sess\.buvid3\)/.test(vue),
+      '未登录也要 setCookie(匿名触点)');
+    /* -401 不能写成「未登录」：它是设备指纹缺失，和登录态无关。 */
+    const cli = fsx.readFileSync(
+      pathx.join(__dirname, '..', 'src', 'services', 'bili', 'client.js'), 'utf8');
+    assert.ok(/case -401:/.test(cli), 'describeBiliCode 必须收录 -401');
+    assert.ok(/buvid/.test(cli.slice(cli.indexOf('case -401:'), cli.indexOf('case -403:'))),
+      '-401 的文案必须点明 buvid 缺失');
+  });
+
+  test('页面接线: 投币失败原因必须看得见（act.status 要有渲染点）', () => {
+    const vue = fsx.readFileSync(
+      pathx.join(__dirname, '..', 'src', 'pages', 'index', 'index.vue'), 'utf8');
+    /* 【3.5.10】用户报「投币用不了」，但页面上没有任何地方显示失败原因：
+     * act.status 写了「已投满 2 枚」「需要登录后才能投币」，模板从不渲染。 */
+    assert.ok(/pnoteText\(\)/.test(vue), '必须有 pnoteText computed');
+    assert.ok(/return this\.act\.status \|\| ''/.test(vue), 'pnoteText 要在无播放提示时退回 act.status');
+    assert.ok(/<text class="pnote">\{\{ pnoteText \}\}<\/text>/.test(vue),
+      '左列提示行必须绑 pnoteText');
+    /* 四个早退分支 + 成功/失败路径都要留日志，否则日志里查不到卡在哪。 */
+    const coinSeg = vue.slice(vue.indexOf('async onAddCoin()'), vue.indexOf('async loadFavFolders()'));
+    assert.ok(/coin skip: busy/.test(coinSeg), 'busy 分支要留日志');
+    assert.ok(/coin skip: noaid/.test(coinSeg), 'noaid 分支要留日志（带原始值）');
+    assert.ok(/coin skip: full/.test(coinSeg), 'full 分支要留日志（带 coin 值）');
+    assert.ok(/coin skip: nocsrf/.test(coinSeg), 'nocsrf 分支要留日志');
+    assert.ok(/coin post aid=/.test(coinSeg), '下发前要留一行 aid，方便对 HTTP 日志');
   });
 
   test('play_chrome: 时间码 0 也要出字（进度条卡在开头的半个症状）', () => {

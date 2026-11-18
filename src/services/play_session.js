@@ -16,7 +16,7 @@ import { deriveMixinKey } from './bili/wbi.js';
 // plane-id 一起下发给 native（旧代码把 107 / 76 写死在 C 里）。
 import { ensureProfile, playVideoRectsFor } from './device_profile.js';
 /* 中列的「顶部悬浮条 / 视频洞 / 字幕带 / 控制条」分段几何（与页面同源）。 */
-import { bandBox } from './play_chrome.js';
+import { bandBox, videoReserve } from './play_chrome.js';
 import { dashLadderFor, videoFpsCapFor, liveFpsCapFor, liveQnFor, pixelBudgetFor } from './video_settings.js';
 
 export const SEEK_STEP_MS = 20000;
@@ -529,7 +529,9 @@ export async function openVideo(ctx, item) {
    * 这里**无条件**构造盒子（以前 top=0 且无字幕时会返回 null → 落到
    * videoArea 的 248 高，与页面 buildVideoRect 的 280 高差 32px，
    * 起播后立刻又要 SET_RECT 重建一次）。现在两条路都用「中列全高」。 */
-  const reserveBottom = band.bottom + (profile.barOverlay === false ? band.bar : 0);
+  /* 【3.5.10】口径收进 play_chrome.videoReserve()：页面 buildVideoRect 调同一个
+   * 函数，两条路径必须逐像素一致（以前这里扣 bar、那里不扣，X6 上差 48 物理像素）。 */
+  const reserveBottom = videoReserve({ cc: band.bottom, bar: band.bar }, profile.barOverlay);
   /* 【第二十八轮】全屏不改几何：band.full 恒 false，只有中列一种盒子。 */
   const areaBox = {
     x: profile.videoArea.x,

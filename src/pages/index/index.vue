@@ -123,7 +123,7 @@
              所以提示落在左列信息卡最下面一行：播放态（holeVisible）同样看得见。
              这一行**恒定渲染**（无提示时是空串），不改几何尺寸，避免提示出现/消失时布局抖动；
              代价是简介从 7 行缩到 5 行（192px 高度是固定预算，见 base.less .pleft-info）。 -->
-        <text class="pnote">{{ play.note }}</text>
+        <text class="pnote">{{ pnoteText }}</text>
       </div>
       <!-- 三个按钮（点赞/投币/收藏）直播态隐藏（用户反馈 m07570-3）。
            直播没有「收藏夹」语义，点赞/投币对房间也不适用，留着只会占掉 74px
@@ -1041,7 +1041,7 @@ import {
  * 四段之和恒等于视口高；native 的 render-rectangle 用同一份数字收缩。
  * 单击画面收起控件、隐藏后字幕贴底，全靠这套分段（见 play_chrome.js 的注释）。 */
 import {
-  planBands, bandBox, barMetrics, trackRatioFromX, seekGoal,
+  planBands, bandBox, barMetrics, trackRatioFromX, seekGoal, videoReserve,
   loadingFrame, chromeForState, canAutoHide, formatClock,
   CC_BAND_H, CHROME_LOAD_MS, AUTO_HIDE_MS, SEEK_KNOB_W
 } from '../../services/play_chrome.js';
@@ -1619,6 +1619,17 @@ export default {
       if (this.cc.status) return this.cc.status + '。换一个带 CC 字幕的视频试试。';
       return '播放视频后，这里会显示该稿件的字幕状态（无 CC 字幕 / 下载失败原因）。';
     },
+    /* 左列最后那一行提示。优先显示播放提示（定位中/加载中/音画不同步恢复中…）；
+     * 没有播放提示时退回互动状态（点赞/投币/收藏的结果）。
+     *
+     * 【3.5.10】`act.status` 以前**模板里根本没有渲染点** —— 投币失败时
+     * `onAddCoin` 认认真真写了「已投满 2 枚」「需要登录后才能投币」「投币失败：…」，
+     * 用户一个都看不到，观感就是「点一下没反应、投币用不了」。这一行就是它的显示位。 */
+    pnoteText() {
+      const n = this.play.note;
+      if (n) return n;
+      return this.act.status || '';
+    },
     chromeBarVisible() {
       /* 【第二十七轮】这里只决定「32px 画控件还是画 <hole>」，
        * **不再决定这条 DOM 存不存在** —— v-if 掉整条会让旧黑条像素留在
@@ -2043,11 +2054,48 @@ export default {
       const h = await loadHistory();
       this.history = h.items;
       this.videoSettings = await loadVideoSettings();
-      const sess = await loadSession();
+      let sess = await loadSession();
       this.session = sess;
       if (sess.buvid3) {
         // 仅供诊断页/日志使用；「我的」页不展示这种短码，未登录时给用户看得懂的引导文案
         this.buvidShort = sess.buvid3;
+      }
+      /*
+       * 【3.5.10】buvid3/buvid4 必须补齐，否则投币必挂。
+       *
+       * 真机实测（2026-11-18，同一个登录态、同一个 aid）：
+       *   POST /x/web-interface/archive/like  → {"code":0}            ← 点赞不受影响
+       *   POST /x/web-interface/coin/add      → {"code":-401,"message":"非法访问"}
+       * 两者唯一的差别就是投币带了风控决策（`origin_scene: video_coin`，
+       * `decisions: ["verify_captcha_level3"]`），而它依赖 Cookie 里的 buvid。
+       * 给同一个 Cookie 补上 buvid3/buvid4 后，投币立刻返回 {"code":0}。
+       *
+       * 以前只有自检探针会调 fetchFinger()，正常使用路径从没补过 ——
+       * 老用户存储里 buvid3 是空串，就表现为「点赞能用、投币永远失败」。
+       * 这里开机补一次并落盘，后续 cookieFromSession() 自然带上。
+       */
+      if (!sess.buvid3) {
+        try {
+          const fp = await this.client.fetchFinger();
+          if (fp.ok) {
+            sess = Object.assign({}, sess, {
+              version: 2, buvid3: fp.buvid3, buvid4: fp.buvid4 || ''
+            });
+            await saveSession(sess);
+            this.session = sess;
+            this.buvidShort = fp.buvid3;
+            logWarn('[bili] buvid 已补齐（' + fp.buvid3.length + ' 字符）');
+          } else {
+            logWarn('[bili] buvid 补齐失败 ' + fp.stage + ' ' + fp.message);
+          }
+        } catch (e) {
+          logWarn('[bili] buvid 补齐异常 ' + ((e && e.message) || e));
+        }
+      }
+      if (!(sess.login && sess.login.SESSDATA) && sess.buvid3) {
+        /* 未登录也要把匿名触点带上：风控只认 Cookie，匿名请求不带 buvid 一样会被
+         * 判成「非法访问」（投币/部分接口）。这里只补 cookie，不做 nav 验证。 */
+        this.client.setCookie(cookieFromSession(sess));
       }
       if (sess.login && sess.login.SESSDATA) {
         // 登录态恢复：Cookie 立即生效（首屏请求依赖它）；nav 验证放后台不阻塞首屏
@@ -2782,7 +2830,7 @@ export default {
       if (this.ui.chrome === next) return;
       this.ui.chrome = next;
       this.applyVideoGeometry(next ? 'chrome-show' : 'chrome-hide');
-      /* 全屏态：控件被点出来后静默 3.5s 自动收起（参考系统播放器的自动收起节拍）。 */
+      /* 控件被点出来后静默 5s 自动收起；点画面任意位置恢复（onVideoTap）。 */
       if (next) this.scheduleAutoHide();
       else this.clearAutoHide();
     },    /* ---------- 全屏 ----------
@@ -2839,13 +2887,14 @@ export default {
       }
       this.onIbarBack();
     },
-    /* 全屏态"静默 3.5s 自动收起"的计时。计不计时由 canAutoHide 判（纯函数、可单测）：
-     * 只在全屏 + 控件展开 + 真的在播 + 没有拖动/互动题面时才跑。 */
+    /* "静默 5s 自动收起控件"的计时。计不计时由 canAutoHide 判（纯函数、可单测）：
+     * 控件展开 + 真的在播 + 没有拖动/互动题面时才跑。
+     *
+     * 【3.5.10】普通态也收起（用户要求「5 秒没操作就隐藏，点击播放区重新显示」）。
+     * 收起不改变视频几何（applyVideoGeometry 对 chrome-show/hide 一律跳过），
+     * 不会有「画面自己变大」的观感突变。点画面 → onVideoTap → setChrome(true)。 */
     scheduleAutoHide() {
       this.clearAutoHide();
-      /* 【第二十一轮】全屏面板常驻（占的是右列，不是浮层），永不自动收起；
-       * 普通态也没有"3.5s 后隐藏控件"的需求（控件收起只会让用户以为丢了）。 */
-      if (this.playFull) return;
       if (!canAutoHide(this.play.state, {
         full: this.playFull,
         chrome: this.ui.chrome,
@@ -2854,7 +2903,7 @@ export default {
       const t = setTimeout(() => {
         this._hideT = 0;
         this._timers.delete(t);
-        if (this.playFull && this.play.state === 'playing') this.setChrome(false);
+        if (this.play.state === 'playing' && this.ui.chrome) this.setChrome(false);
       }, AUTO_HIDE_MS);
       this._hideT = t;
       this._timers.add(t);
@@ -2894,7 +2943,11 @@ export default {
        * （hole 之外的 fb 黑 / 两侧 UI 像素）。plane 只覆盖画面，没有边可补，
        * 也就不会有绿幕。控制条那 32px 仍然浮在画面上（bandBox 不扣 bar）：
        * 画面底部落在控制条区域内，被半透明条盖住。 */
-      const box = bandBox(area, { top: b.top, cc: b.cc, bar: 0 });
+      /* 【3.5.10】底部让位量与起播路径（play_session 的 reserveBottom）**同源**：
+       * 都调 play_chrome.videoReserve()。以前这里写死 bar:0，X6 上算出的矩形比
+       * 起播高 48 物理像素 —— 起播时画面在控制条上方，一旦字幕开关触发这次重算，
+       * 画面就掉到控制条底下去，用户看到「有时覆盖、有时不覆盖」。 */
+      const box = bandBox(area, { top: b.top, cc: videoReserve(b, p.barOverlay), bar: 0 });
       const r = playVideoRectsFor(s.width || 640, s.height || 360, p, s.live === true, box);
       return { physical: r.physical, cropX: 0, cropY: 0 };
     },
@@ -4236,15 +4289,20 @@ export default {
       }
     },
     async onToggleLike() {
-      if (this.act.busy) return;
+      if (this.act.busy) {
+        logWarn('[bili] like skip: busy');
+        return;
+      }
       const aid = this.playAid();
       if (!(aid > 0)) {
         this.act.status = '拿不到稿件号';
+        logWarn('[bili] like skip: noaid');
         return;
       }
       const csrf = await this.csrfToken();
       if (!csrf) {
         this.act.status = '需要登录后才能点赞';
+        logWarn('[bili] like skip: nocsrf');
         return;
       }
       const on = !(this.act.like > 0);
@@ -4262,33 +4320,44 @@ export default {
       logWarn('[bili] like → ' + this.act.like);
     },
     async onAddCoin() {
-      if (this.act.busy) return;
+      /* 【3.5.10】四个早退分支以前**一行日志都没有**，设备日志里连
+       * `POST /x/web-interface/coin/add` 都查不到（= 根本没进网络），完全没法定位。
+       * 现在每个分支都打一行 `[bili] coin skip: ...`，并带上判定所需的原始值。 */
+      if (this.act.busy) {
+        logWarn('[bili] coin skip: busy');
+        return;
+      }
       const aid = this.playAid();
       if (!(aid > 0)) {
         this.act.status = '拿不到稿件号';
+        logWarn('[bili] coin skip: noaid session=' + JSON.stringify(this.play.session && this.play.session.aid) +
+          ' ctxOid=' + (this.replyCtx && this.replyCtx.oid));
         return;
       }
       if (this.act.coin >= 2) {
         this.act.status = '已投满 2 枚';
+        logWarn('[bili] coin skip: full coin=' + this.act.coin + ' aid=' + aid);
         return;
       }
       const csrf = await this.csrfToken();
       if (!csrf) {
         this.act.status = '需要登录后才能投币';
+        logWarn('[bili] coin skip: nocsrf');
         return;
       }
       this.act.busy = true;
+      logWarn('[bili] coin post aid=' + aid + ' multiply=1');
       const r = await addCoin(this.client, aid, 1, false, csrf);
       this.act.busy = false;
       if (!r.ok) {
         this.act.status = '投币失败：' + r.message;
-        logWarn('[bili] coin fail stage=' + r.stage + ' code=' + r.code);
+        logWarn('[bili] coin fail stage=' + r.stage + ' code=' + r.code + ' msg=' + r.message);
         return;
       }
       this.act.coin = Math.min(2, this.act.coin + 1);
       this.act.coinCount = (this.act.coinCount || 0) + 1;
       this.act.status = '已投 ' + this.act.coin + ' 枚';
-      logWarn('[bili] coin → ' + this.act.coin);
+      logWarn('[bili] coin ok → ' + this.act.coin);
     },
     async loadFavFolders() {
       const aid = this.playAid();

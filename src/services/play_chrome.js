@@ -83,11 +83,13 @@ export const CC_BAND_H = 18;
 export const CHROME_MIN_VIDEO = 80;
 /* 加载动画节拍（ms）：QuickJS 里跑 setInterval，120ms 一帧既够顺也不心疼 CPU。 */
 export const CHROME_LOAD_MS = 120;
-/* 全屏态控件自动收起的静默时长（ms）。参考系统播放器的 `scheduleHideControls` + `hideTimer`
- * 是同一条规则。
- * 只在全屏态生效：普通态收起控件会让中列画面变大、左右列不动，观感突变且不是用户
- * 主动点的，容易当成 bug —— 普通态仍然只认"点画面"这一种显隐方式。 */
-export const AUTO_HIDE_MS = 3500;
+/* 控件自动收起的静默时长（ms）。用户明确要求「5 秒没操作就隐藏」。
+ *
+ * 【3.5.10】以前只在全屏态生效，理由是「普通态收起控件会让中列画面变大、像 bug」。
+ * 但视频矩形与 DOM 挖洞现在严格同源（见 bandBox / videoReserve），收起控件
+ * **不会**让画面变大 —— 矩形只由 bands 决定，与 chrome 显隐无关
+ * （applyVideoGeometry 对非 cc 原因一律跳过）。所以普通态也可以放心收起了。 */
+export const AUTO_HIDE_MS = 5000;
 
 /* 底部控制条各槽位宽度（逻辑像素）。轨道宽 = 中列宽 - 其它所有槽位，
  * 由 barMetrics() 算出来**同一份数字**喂给 DOM 和命中测试 —— 以前 seek 比例靠
@@ -335,16 +337,37 @@ export function chromeForState(state) {
 }
 
 /*
- * 全屏态要不要开始"静默 3.5s 自动收起"的计时。四个条件缺一不可：
- *   full   只在全屏态做（普通态收起控件会让中列画面跳变，见 AUTO_HIDE_MS 注释）；
+ * 要不要开始"静默 5s 自动收起控件"的计时。三个条件缺一不可：
  *   chrome 控件本来就是收起的，没什么可收；
  *   busy   正在拖进度条 / 互动题面挂着 —— 用户正要操作，这时候收起来是打断；
  *   state 必须真的在播；暂停/播完/出错/取流中一律不自动收。
+ *
+ * 【3.5.10】删掉原来的 `full !== true return false`：普通态也要收起（用户要求
+ * 「5 秒没操作就隐藏，点击播放区重新显示」）。不会造成画面跳变 —— 显隐控件
+ * 不改几何，见 AUTO_HIDE_MS 注释。opts.full 仍接收，只为调用方不改签名。
  */
 export function canAutoHide(state, opts) {
   const o = opts || {};
-  if (o.full !== true) return false;
   if (o.chrome !== true) return false;
   if (o.busy === true) return false;
   return state === 'playing';
+}
+
+/*
+ * 「视频矩形底部要让出多少行」—— 页面 DOM 与 native render-rectangle 的**唯一**口径。
+ *
+ * bands 用 cc（字幕带）与 bar（控制条）两个字段；barOverlay 来自 device_profile：
+ *   barOverlay === false（X6 Pro）控制条不透明、必须占位 → 让出 cc + bar；
+ *   barOverlay === true （X7 Pro）控制条是半透明浮层，只让出 cc。
+ *
+ * 为什么必须收成一个函数：3.5.9 的两条路径各算一次，X6 上起播走
+ * play_session（扣 bar）得 236 高，之后任何触发页面 buildVideoRect 的动作
+ * （不扣 bar）得 266 高，同一画面在两种矩形间跳 —— 用户看到的就是
+ * 「有时候视频在进度条上方、有些时候覆盖在进度条上」。
+ */
+export function videoReserve(bands, barOverlay) {
+  const b = bands || {};
+  const cc = Math.max(0, Math.round(num(b.cc != null ? b.cc : b.bottom, 0)));
+  const bar = Math.max(0, Math.round(num(b.bar, 0)));
+  return cc + (barOverlay === false ? bar : 0);
 }

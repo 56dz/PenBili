@@ -68,6 +68,12 @@ export function describeBiliCode(code, voucher) {
     case -400:
       msg = '请求错误(-400)：参数或签名不合法';
       break;
+    case -401:
+      /* 【3.5.10】投币/风控专用：B 站对带风控决策的写接口（coin/add 的
+       * origin_scene=video_coin）要求 Cookie 里必须有 buvid3/buvid4，
+       * 缺了就回 -401「非法访问」。点赞不查所以要区分开，别写成「未登录」。 */
+      msg = '风控(-401)：缺少匿名设备指纹（buvid），已自动补齐后重试';
+      break;
     case -403:
       msg = '访问权限不足(-403)';
       break;
