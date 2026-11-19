@@ -4,7 +4,7 @@
 
 这是一款跑在有道词典笔上的 B 站客户端，用有道自家的 Falcon 小程序框架（QuickJS + Vue 2 单文件组件）写成。屏幕只有 960×266 点，指甲盖大小，所以我按 iPad 版 B 站的骨架重做了界面，把推荐、搜索、播放、评论、图文、直播全塞进这一个页面里。
 
-当前版本 `3.5.19`，支持 **X6 Pro / X7 Pro**（RK3562，aarch64）。X5 分支已停止维护。
+当前版本 `3.5.20`，支持 **X6 Pro / X7 Pro**（RK3562，aarch64）。X5 分支已停止维护。
 X7 Pro 的播放器适配（黑屏修复、设备参数运行时自适应）见 [`docs/x7pro-adaptation.md`](docs/x7pro-adaptation.md)；
 播放页控件（左列控制键 / 右列常驻进度条 / 字幕带分段、单击沉浸、双击暂停、自动收起、加载动画）见
 [`docs/player-chrome.md`](docs/player-chrome.md)；控制条视觉、"点两下画面跑偏"、
@@ -14,7 +14,7 @@ X7 Pro 的播放器适配（黑屏修复、设备参数运行时自适应）见 
 分 P / 合集见 [`docs/video-pages-season.md`](docs/video-pages-season.md)，
 双机型（x6/x7/diag）构建见 [`docs/build-variants.md`](docs/build-variants.md)。
 
-![version](https://img.shields.io/badge/version-3.5.19-blue)
+![version](https://img.shields.io/badge/version-3.5.20-blue)
 ![license](https://img.shields.io/badge/license-GPL--3.0-green)
 
 代码与安装包双仓同步：[GitCode](https://gitcode.com/dz56dz/PenBili)（国内推荐）· [GitHub](https://github.com/56dz/PenBili)。
@@ -446,7 +446,8 @@ adb shell "grep -a 'Esmart1-win0' -A9 /sys/kernel/debug/dri/0/summary"
   3.5.17 修了**滚动弹幕半路冒出**：位置公式 `x = lw - elapsed*(lw+bw)/8000` 直接由「本该出现的时刻」算起，只有准点抢到泳道的那条才从右边缘进来。播放中途开弹幕、切显示区域、或泳道排满后重试成功时，`elapsed` 已经是几百毫秒到几秒，`x` 就落在画面中间甚至左侧。现在加 `DM_LATE_MS = 300`：**超过 300ms 直接标记 `DM_LANE_DEAD` 丢弃，本次播放不再重试抢泳道**（判定必须放在抢泳道之前，否则泳道占用表已被写脏）。日志里 `late=` 就是这批被丢掉的数量 —— 宁可少几条，也不半路冒出来。
   3.5.18 是对这个问题的二次修正：上一版只保证「不半路冒出」，但弹幕密集时主循环按 `t_ms` 升序扫描、**预算判定却在抢泳道之后**，抢到预算的永远是已经飞了五八秒、快到左边的老条目，刚该入场的新条目被饿死，等它终于被画出来时 `elapsed` 已经一两秒。现在把顺序改成**先判迟到 → 再查预算 → 最后抢泳道**：预算用完的条目直接跳过，**不再为它预留泳道**。新增两个计数器直接可观测：`hungry=`（被预算挡在门外的条数）、`mid=`（首次画出时 `elapsed` 已超过 `DM_LATE_ENTRY_MS = 160` 的条数，即「半路冒出」的直接计数）。真机 1478 条的稿子上 `hungry` 每五秒两三百条、`mid` 几乎恒为 0，`vis` 与 `drawn` 从「34 对 6」变成相等，帧率仍然 30fps。
 
-  3.5.19 收了三个默认值：**弹幕默认开启**（`DM_MODE_DEFAULT = 'full'`，之前默认关，装上以为没做弹幕）、**弹幕默认字号小**（`DM_SIZE_DEFAULT = 'small'`，嫌小自己去「我的 → 弹幕字号」调）、**字幕默认关闭**（去掉旧版「首次遇到有轨道的稿子就自动打开」）。设置文件损坏或版本迁移时也回到这组默认值，不再回到「永远没弹幕」。
+  3.5.19 收了三个默认值：**弹幕默认开启**（之前默认关，装上以为没做弹幕）、**弹幕默认字号小**（`DM_SIZE_DEFAULT = 'small'`，嫌小自己去「我的 → 弹幕字号」调）、**字幕默认关闭**（去掉旧版「首次遇到有轨道的稿子就自动打开」）。设置文件损坏或版本迁移时也回到这组默认值，不再回到「永远没弹幕」。
+  【3.5.20】默认档从全屏改成 **1/4**屏：全屏在密集稿子上每屏十几条、盖住画面主体，而弹幕本来是陪读的东西。嫌少自己切到 1/2 或全屏。
   详见 [`docs/danmaku.md`](docs/danmaku.md)
 - **未登录时 B 站字幕列表恒为空**（CC 字幕/AI 字幕需要 `SESSDATA`）；互动视频节点匿名态
   `story_list` 只有起始模块，登录后才能用服务端进度回溯，本项目改为本地历史快照回退

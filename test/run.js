@@ -5385,8 +5385,8 @@ async function main() {
     }
     assert.strictEqual(dm.normalizeDmSettings(null).mode, dm.DM_MODE_DEFAULT);
     assert.strictEqual(dm.normalizeDmSettings({ mode: '乱写' }).mode, dm.DM_MODE_DEFAULT);
-    /* 3.5.19：默认开启弹幕，且默认就是全屏模式 */
-    assert.strictEqual(dm.DM_MODE_DEFAULT, 'full');
+    /* 3.5.19 默认开启弹幕；3.5.20 默认档改为 1/4（全屏太遮画面） */
+    assert.strictEqual(dm.DM_MODE_DEFAULT, 'quarter');
     assert.strictEqual(dm.normalizeDmSettings({ mode: 'quarter' }).mode, 'quarter');
   });
 

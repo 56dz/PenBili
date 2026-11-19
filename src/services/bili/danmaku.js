@@ -21,10 +21,14 @@ import { logWarn } from '../storage.js';
 /* 切换式开关：off → full → half → quarter → off */
 export const DM_MODES = ['off', 'full', 'half', 'quarter'];
 export const DM_MODE_LABELS = { off: '弹幕关', full: '弹幕全屏', half: '弹幕 1/2', quarter: '弹幕 1/4' };
-/* 【3.5.19】默认开启弹幕（全屏模式）。
+/* 【3.5.19】默认开启弹幕。
  * 之前默认 off，用户反馈「装上就是没弹幕，还以为没做」。
- * 脏数据也回到这个默认值（而不是回到 off）。 */
-export const DM_MODE_DEFAULT = 'full';
+ * 脏数据也回到这个默认值（而不是回到 off）。
+ *
+ * 【3.5.20】默认档从全屏改成 **1/4**。
+ * 全屏在密集稿子上每屏十几条、盖住了画面主体，而弹幕本来就是
+ * 陪读的东西 —— 上方 1/4 刚好放下三四条、不挡人脸。嫌少自己切到 1/2 或全屏。 */
+export const DM_MODE_DEFAULT = 'quarter';
 export const DM_SETTINGS_KEY = 'bili_dm_settings';
 export const DM_SETTINGS_VERSION = 2;
 
@@ -275,7 +279,7 @@ export function parseSegReply(buf) {
   return { ok: list.length > 0, list: list, count: list.length, message: message };
 }
 
-/* 脏数据一律退回默认值（DM_MODE_DEFAULT = full）。
+/* 脏数据一律退回默认值（DM_MODE_DEFAULT）。
  * 3.5.19 之前这里退回 off，结果「设置文件损坏」就等于永远没弹幕。 */
 export function normalizeDmSettings(raw) {
   let r = raw;
