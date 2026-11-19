@@ -394,6 +394,40 @@ export async function setVideoRect(x, y, w, h) {
   ]);
 }
 
+/* ---------------- 【3.5.14 弹幕】----------------
+ *
+ * 为什么弹幕要走 native：视频是 kmssink 直送 DRM 平面，`Esmart1-win0` 的
+ * zpos 高于 Falcon UI 层（`Esmart0-win0`），**任何 DOM 都盖不到画面上**。
+ * CC 字幕能做 UI 条，是因为它从画面里让出一块高度；弹幕要浮在画面上，
+ * 只能把像素烧进视频帧。
+ *
+ * 三个导出的分工：
+ *   dmFeed(text)  喂一整片弹幕文本（JS 已解析好并去重），每行
+ *                 `id|progress|mode|color|fontsize|content`
+ *   dmMode(m,f)   切换 0=关 / 1=全屏 / 2=上半 / 3=上 1/4，f = 逻辑字号
+ *   dmClear()     切集或跨分片 seek 时清空
+ *
+ * 三者都走 callOptional：v1 播放器没有这些导出，返回 PLAYER_UNSUPPORTED
+ * 让页面降级隐藏开关，而不是抛异常打断播放。 */
+
+export async function dmFeed(text) {
+  await getPlayerModule();
+  return callOptional('dmFeed', [String(text || '')]);
+}
+
+export async function dmMode(mode, fontPx) {
+  await getPlayerModule();
+  return callOptional('dmMode', [
+    Math.round(Number(mode) || 0),
+    Math.round(Number(fontPx) || 0)
+  ]);
+}
+
+export async function dmClear() {
+  await getPlayerModule();
+  return callOptional('dmClear', []);
+}
+
 /* v1 专有：显示权与弹幕泳道（v2 无此概念 → PLAYER_UNSUPPORTED，调用方需容错） */
 export async function pauseRender() {
   await getPlayerModule();

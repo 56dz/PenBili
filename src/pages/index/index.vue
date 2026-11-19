@@ -154,6 +154,12 @@
         <div class="pctrl-btn" @click="onCcToggle">
           <text :class="cc.on ? 'pctrl-t pctrl-t-on' : 'pctrl-t'">字幕</text>
         </div>
+        <!-- 【3.5.14】弹幕：切换式，点一次换下一档（关 → 全屏 → 1/2 → 1/4）。
+            文案压到 2~3 个字，因为 5 颗键等分左列后每颗只有 ~40px。
+            「1/2」「1/4」指弹幕只出现在画面上方那一块。 -->
+        <div class="pctrl-btn" @click="onDmToggle">
+          <text :class="dm.mode === 'off' ? 'pctrl-t' : 'pctrl-t pctrl-t-on'">{{ dmBtnText }}</text>
+        </div>
       </div>
       <!-- 三个按钮（点赞/投币/收藏）直播态隐藏（用户反馈 m07570-3）。
            直播没有「收藏夹」语义，点赞/投币对房间也不适用，留着只会占掉 74px
@@ -327,6 +333,20 @@
         <!-- 字幕为什么没有：未登录 / 无 CC 轨道 / 下载失败，全写在这一行。
              播放器里只留「字幕」这个开关，不再抢占画面上的顶栏（用户要求）。 -->
         <text class="mine-notice" :style="L.wide">{{ ccSettingHint }}</text>
+        <!-- 【3.5.14】弹幕开关放在这里（与 CC 字幕同一套轮转交互），
+             左列那颗键只是快捷方式 —— 两边都改同一个 dm.mode。 -->
+        <div class="mine-secrow" :style="L.wide">
+          <text class="mine-sec">弹幕</text>
+        </div>
+        <div class="mine-row" :style="L.wide" @click="onDmToggle">
+          <text class="mine-label">弹幕显示</text>
+          <text class="mine-value">{{ dmSettingText }} ›</text>
+        </div>
+        <div class="mine-row" :style="L.wide" @click="onDmSizeToggle">
+          <text class="mine-label">弹幕字号</text>
+          <text class="mine-value">{{ dmSizeText }} ›</text>
+        </div>
+        <text class="mine-notice" :style="L.wide">{{ dmSettingHint }}</text>
         <div class="mine-secrow" :style="L.wide">
           <text class="mine-sec">直播</text>
         </div>
@@ -905,6 +925,24 @@ import { buildProfile, readFalconEnv, playVideoRectsFor } from '../../services/d
  *   fmtDur       列表行尾的 mm:ss
  * 解析本身在 client.fetchView 里做完（parsePages / parseSeason）。 */
 import { pageIndexOf, episodeIndexOf, fmtDur } from '../../services/bili/video_meta.js';
+import {
+  DM_MODES,
+  DM_MODE_LABELS,
+  DM_SIZE_LABELS,
+  DM_SIZE_PX,
+  DM_SIZE_DEFAULT,
+  DM_MODE_DEFAULT,
+  DM_SETTINGS_KEY,
+  nextDmSize,
+  dmSizePx,
+  normalizeDmSettings,
+  nextDmMode,
+  segmentIndexAt,
+  dedupeByKey,
+  buildFeedText,
+  fetchSegment,
+  createSegCache
+} from '../../services/bili/danmaku.js';
 import { input } from '../../services/input.js';
 import {
   openVideo,
@@ -946,10 +984,10 @@ import {
 } from '../../services/video_settings.js';
 /* 【CC 字幕 / 互动视频】上游 x/player/v2 与 x/stein/edgeinfo_v2。
  * 纯逻辑全部放在 services/bili/ 下，页面只负责状态机与渲染（可 Node 单测）。 */
-import { fetchPlayerV2 } from '../../services/bili/player_v2.js';
+import { fetchPlayerV2, fetchPlayerV2Tracks } from '../../services/bili/player_v2.js';
 import {
   SUBTITLE_SETTINGS_KEY, normalizeSubtitleSettings, pickSubtitleTrack,
-  fetchSubtitleCues, cueAt
+  rankSubtitleTracks, subtitleFit, SUBTITLE_FIT_GOOD, fetchSubtitleCues, cueAt
 } from '../../services/bili/subtitle.js';
 /* 【播放控件】中列被切成「顶部悬浮条 / 视频洞 / 字幕带 / 控制条」四段，
  * 四段之和恒等于视口高；native 的 render-rectangle 用同一份数字收缩。
@@ -989,6 +1027,13 @@ const QR_QUIET = 4;
  * 右列总高 253（body）+ 27（输入框），这条 22 从 body 里扣 —— 评论少看一行，
  * 换来「分P / 合集」永远在视线里。不加高整列：那 22px 会从视频区抢。 */
 const EP_TAB_H = 22;
+/* 字幕候选最多试几条：实测同一 cid 会挂 3~6 个互不相同的 AI 产物，
+ * 每条都要下一次字幕文件（几十~几百 KB）。取 4 是在「找准」与「起播别太久」
+ * 之间的折中；一旦某条偏差 <= SUBTITLE_FIT_GOOD 就立刻收工，正常只下一次。 */
+const CC_TRY_MAX = 4;
+/* 字幕位置最多外推多久：1s 主轮询间隔 + 200ms 余量。超过就说明 tick 被拖住了，
+ * 宁可让字幕停一下，也不要它跑到画面前面去。 */
+const CC_EXTRAP_MAX_MS = 1200;
 /* 单击/双击仲裁窗口：第一击挂起，到期才切沉浸态；期间来第二击则改为暂停/播放。
  * 太短（<150ms）会把耐心的用户误伤成双击，太长（>350ms）每次单击都要等、手感粘滞；
  * 260 是经典取值。 */
@@ -1207,6 +1252,25 @@ export default {
         status: '',
         loading: false,
         posMs: 0
+      },
+      /* 【3.5.14】弹幕：模式持久化在 bili_dm_settings，列表按 6 分钟分片拉取。
+       * 为什么必须烧进视频帧：KMS 平面里视频层（Esmart1-win0, zpos=2）
+       * 永远压在 Falcon UI（Esmart0-win0, zpos=0）之上，UI 层的 DOM 盖不住
+       * 画面 —— 想「弹幕浮在视频上」只有两条路：再占一个空闲 Esmart 平面
+       * （zpos 不可控、跨机型风险大），或者把字画进帧里（选这条）。
+       * seg 缓存用 Map 存已解析的分片，切集/teardown 全清。 */
+      dm: {
+        mode: DM_MODE_DEFAULT,
+        size: DM_SIZE_DEFAULT,
+        segIdx: 0,
+        list: [],
+        cache: null,
+        seen: null,
+        status: '',
+        loading: false,
+        ready: false,
+        failIdx: 0,
+        failCount: 0
       },
       /* 互动视频：一个 node 对应一个片段；choices 是该片段条件过滤后的选项。
        * history 保存每个片段的 (node, vars) 快照，「回退」不用再请求网络。 */
@@ -1609,6 +1673,31 @@ export default {
       const t = pickSubtitleTrack(this.cc.tracks, this.cc.lan);
       return t ? t.lanDoc : '自动';
     },
+    /* 左列那颗弹幕键的字。键宽只有 ~40px，放不下「弹幕 1/2」这种 6 个字，
+     * 所以用固定的 2~3 字短标：关 / 全屏 / 1-2 / 1-4。
+     * 完整档位名在 dmStatusText 与「我的」设置行里给。 */
+    dmBtnText() {
+      switch (this.dm.mode) {
+        case 'full': return '全屏';
+        case 'half': return '1-2';
+        case 'quarter': return '1-4';
+        default: return '弹幕';
+      }
+    },
+    dmSettingText() {
+      return DM_MODE_LABELS[this.dm.mode] || '弹幕关';
+    },
+    dmSizeText() {
+      return DM_SIZE_LABELS[this.dm.size] || DM_SIZE_LABELS[DM_SIZE_DEFAULT];
+    },
+    dmSettingHint() {
+      /* 状态优先：失败原因比任何说明都重要 */
+      if (this.dm.status) return this.dm.status;
+      if (this.dm.mode === 'off') return '视频帧里不画任何东西，零开销；字号 ' + this.dmSizeText;
+      if (this.isLivePlay) return '直播间暂无弹幕';
+      return (this.dm.ready ? '弹幕已烧进视频帧（UI 层盖不住画面）' : '起播后自动加载') +
+        ' · 字号 ' + this.dmSizeText;
+    },
     interactTitle() {
       const n = this.interact.node;
       const t = n && n.title ? n.title : '互动片段';
@@ -1794,6 +1883,10 @@ export default {
     this._poll = 0;
     this._ccClock = 0;
     this._ccAnchor = null;
+    /* 上一 tick 的 native 位置/帧数：两者都不动 = 位置冻结（缓冲/卡顿），
+     * 此时字幕钟必须停止外推（见 tick 里 _ccAnchor 的注释）。 */
+    this._tickPos = -1;
+    this._tickFrames = -1;
     this._autoChainT = 0;
     this._choiceT = 0; // 互动题面倒计时（duration>0 时才跑）
     this._hideT = 0;   // 全屏态控件自动收起句柄（0=没有计时，见 AUTO_HIDE_MS）
@@ -1808,6 +1901,8 @@ export default {
     this.client = createClient({});
     /* CC 字幕开关是用户设置，读盘不阻塞首屏渲染。 */
     this.loadCcSettings().then(() => {}, () => {});
+    /* 弹幕模式也是用户设置，同样不阻塞首屏。 */
+    this.loadDmSettings().then(() => {}, () => {});
     /* 播放器实现选择（v1=旧 player.c，v2=新 player2 模块）在这里一次性读盘：
      * 之后每次 open/status 都走内存值，热路径不碰 storage（storage 是同步 FS 调用，
      * 每秒一次轮询里读盘会拖慢 QuickJS 主线程）。 */
@@ -2579,12 +2674,17 @@ export default {
       this.clearAutoChain();
       this.clearChoiceCountdown();
       this._ccAnchor = null;
+      this._tickPos = -1;
+      this._tickFrames = -1;
       this.cc.tracks = [];
       this.cc.cues = [];
       this.cc.lanDoc = '';
       this.cc.status = '';
       this.cc.loading = false;
       this.cc.posMs = 0;
+      /* 弹幕：模式持久化、数据不持久化 —— 换一集还该按原模式显示，
+       * 但上一个稿子的弹幕必须清干净（否则会看到别人视频的弹幕）。 */
+      this.resetDm();
       this.interact = {
         active: false, visible: false, busy: false,
         bvid: '', graphVersion: 0, edgeId: 0, cid: 0,
@@ -2624,6 +2724,149 @@ export default {
       }
       await this.applyVideoGeometry('cc');
     },
+    /* ---------------- 弹幕（3.5.14） ---------------- */
+    saveDmSettings() {
+      setJson(DM_SETTINGS_KEY, { version: 2, mode: this.dm.mode, size: this.dm.size });
+    },
+    async loadDmSettings() {
+      const raw = await getJson(DM_SETTINGS_KEY, null);
+      const s = normalizeDmSettings(raw);
+      this.dm.mode = s.mode;
+      this.dm.size = s.size;
+    },
+    /*
+     * 字号取用户档位（小/中/大 → 16/20/24 屏幕逻辑像素），不再按视频区高度
+     * 自动算 —— 之前的 0.09*videoH 在 266 上正好 24，但 native 还要按平面
+     * 缓冲区宽度再放大一次，用户看到的是"大字"，而且没有地方能调。
+     * 现在档位是唯一来源，native 那个比例换算保持不变（它只是把逻辑像素
+     * 映射到缓冲区像素，不是风格选择）。
+     */
+    dmFontPx() {
+      return dmSizePx(this.dm.size);
+    },
+    dmModeIndex() {
+      const i = DM_MODES.indexOf(this.dm.mode);
+      return i < 0 ? 0 : i;
+    },
+    /* 把当前模式推给 native。mode=0（关闭）时 native 在渲染函数第一行
+     * 就 return，一个像素都不碰 —— 关弹幕是真零开销，不是画成透明。 */
+    async applyDmMode() {
+      const r = await player.dmMode(this.dmModeIndex(), this.dmFontPx());
+      if (r && r.ok === false && r.code !== 'PLAYER_UNSUPPORTED') {
+        logWarn('[dm] dmMode 失败 ' + (r.error || r.code));
+        this.dm.status = '弹幕渲染不可用';
+        this.dm.mode = 'off';
+        this.saveDmSettings();
+      }
+      return r;
+    },
+    /* 切换式开关：off → full → half → quarter → off。
+     * 「1/2」「1/4」指弹幕只在画面上方那一块出现，裁切在 native 里做，
+     * JS 只负责把模式号传下去。 */
+    async onDmToggle() {
+      this.dm.mode = nextDmMode(this.dm.mode);
+      this.saveDmSettings();
+      this.dm.status = DM_MODE_LABELS[this.dm.mode] || '';
+      /* 用户主动拨开关 = 明确的"再试一次"，把拉片失败计数清零 */
+      this.dm.failIdx = 0;
+      this.dm.failCount = 0;
+      logWarn('[dm] mode=' + this.dm.mode);
+      if (this.mode !== 'play' || this.isLivePlay) return;
+      await this.applyDmMode();
+      if (this.dm.mode !== 'off' && !this.dm.list.length) {
+        await this.loadDmSegment(this.gen, this.dm.segIdx || 1);
+      }
+    },
+    /* 字号轮转：小 → 中 → 大 → 小。「我的」页那一行用它。
+     * 只改字号、不碰数据与模式 —— native 侧 dm_set_mode 收到新字号会清字形
+     * 缓存重排，所以切换是立即生效的，不需要重新拉弹幕。 */
+    async onDmSizeToggle() {
+      this.dm.size = nextDmSize(this.dm.size);
+      this.saveDmSettings();
+      logWarn('[dm] size=' + this.dm.size + ' px=' + this.dmFontPx());
+      if (this.mode !== 'play' || this.isLivePlay || this.dm.mode === 'off') return;
+      await this.applyDmMode();
+    },
+    resetDm() {
+      this.dm.size = this.dm.size || DM_SIZE_DEFAULT;
+      this.dm.segIdx = 0;
+      this.dm.list = [];
+      this.dm.seen = null;
+      this.dm.status = '';
+      this.dm.loading = false;
+      this.dm.ready = false;
+      this.dm.failIdx = 0;
+      this.dm.failCount = 0;
+      if (this.dm.cache && typeof this.dm.cache.clear === 'function') this.dm.cache.clear();
+    },
+    async clearDmNative() {
+      try { await player.dmClear(); } catch (e) { /* 老播放器没有这个导出，忽略 */ }
+    },
+    /* 拉一个 6 分钟分片，**整片**喂给 native。
+     * 为什么整片喂而不是每帧喂可见的那几条：native 用 pos_ms 自己筛可见集合，
+     * JS 只在跨分片时过一次网，QuickJS 主线程不被弹幕拖累（v2.7.0 的教训是
+     * 每帧重算文字，占掉 ~20% 解码预算）。
+     * 去重键是 idStr，**不是 content** —— 同一句话被不同人刷是真实弹幕，
+     * 按内容去重会把它们吃掉。 */
+    async loadDmSegment(myGen, idx) {
+      const s = this.play.session;
+      if (!s || s.live || !s.aid || !s.cid) return;
+      if (this.dm.mode === 'off' || this.dm.loading) return;
+      /* 同一片连续失败两次就别再试了：tickDm 是 250ms 一拍，不设闸门
+       * 会把一个 412/风控的片子打成每秒 4 次请求。用户拨一次开关才会重置。 */
+      if (idx === this.dm.failIdx && this.dm.failCount >= 2) return;
+      this.dm.loading = true;
+      this.dm.status = '弹幕加载中…';
+      try {
+        if (!this.dm.cache) this.dm.cache = createSegCache(6);
+        let list = typeof this.dm.cache.get === 'function' ? this.dm.cache.get(idx) : null;
+        if (!list) {
+          const r = await fetchSegment(this.client, { aid: s.aid, cid: s.cid, index: idx });
+          if (this.gen !== myGen) return;
+          if (!r.ok) {
+            this.dm.failIdx = idx;
+            this.dm.failCount += 1;
+            this.dm.status = '弹幕获取失败（' + (r.message || r.stage || '') + '）';
+            logWarn('[dm] seg ' + idx + ' fail(' + this.dm.failCount + '): ' +
+              (r.stage || '') + ' ' + (r.message || ''));
+            return;
+          }
+          if (!this.dm.seen) this.dm.seen = Object.create(null);
+          list = dedupeByKey(r.list, this.dm.seen);
+          if (typeof this.dm.cache.put === 'function') this.dm.cache.put(idx, list);
+          logWarn('[dm] seg ' + idx + ' 新 ' + list.length + ' 条（原始 ' + r.count + '）');
+        }
+        if (this.gen !== myGen) return;
+        this.dm.segIdx = idx;
+        this.dm.failIdx = 0;
+        this.dm.failCount = 0;
+        this.dm.list = list || [];
+        const f = await player.dmFeed(buildFeedText(this.dm.list));
+        if (f && f.ok === false && f.code === 'PLAYER_UNSUPPORTED') {
+          this.dm.status = '当前播放器不支持弹幕';
+          return;
+        }
+        this.dm.ready = true;
+        this.dm.status = (DM_MODE_LABELS[this.dm.mode] || '') + ' · ' + this.dm.list.length + ' 条';
+      } catch (e) {
+        this.dm.failIdx = idx;
+        this.dm.failCount += 1;
+        this.dm.status = '弹幕异常';
+        logWarn('[dm] load 异常: ' + ((e && e.message) || e));
+      } finally {
+        this.dm.loading = false;
+      }
+    },
+    /* 250ms 字幕钟里顺带调一次。同分片内只是整数比较，开销可忽略；
+     * 只有跨 6 分钟边界（含 seek 跳片）才真的发网络请求。 */
+    tickDm(posMs) {
+      if (this.mode !== 'play' || this.isLivePlay || this.dm.mode === 'off') return;
+      const idx = segmentIndexAt(posMs);
+      if (idx !== this.dm.segIdx) {
+        this.clearDmNative();
+        this.loadDmSegment(this.gen, idx).then(() => {}, () => {});
+      }
+    },
     async onCcLanTap() {
       if (!this.cc.tracks.length) {
         this.cc.status = this.hasLogin ? '该稿件暂无 CC 字幕轨道' : '无字幕轨道 · 登录后可看 AI 字幕';
@@ -2641,7 +2884,10 @@ export default {
       this.cc.loading = true;
       const m = await ensureMixinResult(this.makeCtx(myGen));
       if (this.gen !== myGen) return;
-      const info = await fetchPlayerV2(this.client, s.bvid, s.cid, {
+      /* 3.5.16：player/v2 的字幕列表是灰度分桶的动态结果（实测同一 cid 连续 6 次
+       * 出现 0 条 / A / 0 条 / B / C / 0 条四种互不相同的 AI 产物），单次请求
+       * 既可能空、也可能只拿到「属于别的剪辑」的那版。所以这里取候选池。 */
+      const info = await fetchPlayerV2Tracks(this.client, s.bvid, s.cid, {
         mixinKey: m.ok ? m.key : '',
         nowSec: () => Math.floor(Date.now() / 1000)
       });
@@ -2655,9 +2901,14 @@ export default {
       this.cc.tracks = info.subtitles;
       await this.loadCcCues(myGen, info.subtitles);
     },
+    /* 3.5.16：候选池逐条试。
+     * 上游对同一 cid 会同时挂几条互不对应的 AI 字幕产物（灰度分桶），
+     * 只取首条时用户会看到「字幕和视频完全对不上」。判定不需要理解语义：
+     * 用 subtitleFit() 比对「最后一条 cue / 视频时长」与首句起点，
+     * 挑第一条对得上的；全都对不上时退回首条（不能让用户没字幕）。 */
     async loadCcCues(myGen, tracks) {
-      const t = pickSubtitleTrack(tracks, this.cc.lan);
-      if (!t) {
+      const cands = rankSubtitleTracks(tracks, this.cc.lan);
+      if (!cands.length) {
         this.cc.cues = [];
         this.cc.status = this.hasLogin ? '该稿件暂无 CC 字幕' : '无字幕 · 登录后可看 AI 字幕';
         logWarn('[cc] 无轨道可用 tracks=' + ((tracks && tracks.length) || 0) +
@@ -2665,22 +2916,63 @@ export default {
         await this.applyVideoGeometry('cc');
         return;
       }
-      this.cc.lanDoc = t.lanDoc;
+      const s0 = this.play.session;
+      const durMs = s0 && s0.durationMs > 0 ? s0.durationMs : 0;
+      const limit = Math.min(cands.length, CC_TRY_MAX);
       this.cc.loading = true;
-      const r = await fetchSubtitleCues(this.client, t.url);
-      if (this.gen !== myGen) return;
-      this.cc.loading = false;
-      if (!r.ok) {
-        this.cc.cues = [];
-        this.cc.status = '字幕下载失败：' + r.message;
-        logWarn('[cc] ' + this.cc.status);
-      } else {
-        this.cc.cues = r.cues;
-        this.cc.status = '';
-        const c0 = r.cues[0] || null;
-        logWarn('[cc] loaded ' + r.count + ' cues lang=' + t.lan + ' host=' + (r.host || '?') +
-          ' first=' + (c0 ? (c0.fromMs + '-' + c0.toMs + 'ms ' + c0.text.slice(0, 12)) : 'none'));
+      let best = null;
+      let bestFit = null;
+      let lastErr = '';
+      /* 候选**并发**下载再统一打分，取「末条结束时间/视频时长」离 1.0 最近的那条。
+       * 依据：
+       *   ① 必须打分而不是先到先得 —— 实测同一 cid 的三个候选 ratio 是
+       *      0.78 / 1.56 / 4.19，先到的不一定是 0.78 那条；真机还见过
+       *      2.42 / 3.22 / 1.00 三条并列，正确那条排在第三位。
+       *   ② 必须并发 —— 串行 4 条要 3~4s，起播后字幕迟迟不出；
+       *      并发实测 1s 出头就能全部拿到。
+       * 只有「某条已经是完美匹配」时才可能省掉剩下的下载（见 GOOD 早退）。 */
+      const tasks = [];
+      for (let i = 0; i < limit; i++) tasks.push(fetchSubtitleCues(this.client, cands[i].url));
+      const rs = await Promise.all(tasks);
+      if (this.gen !== myGen) {
+        /* 代次已变（用户又切了一集）：直接走人，但 loading 必须复位，
+         * 否则「字幕加载中」会一直挂着，永远不再重试。 */
+        this.cc.loading = false;
+        return;
       }
+      for (let i = 0; i < rs.length; i++) {
+        const t = cands[i];
+        const r = rs[i];
+        if (!r || !r.ok) {
+          lastErr = (r && r.message) || '未知错误';
+          logWarn('[cc] 候选 ' + (i + 1) + '/' + limit + ' 下载失败：' + lastErr);
+          continue;
+        }
+        const fit = subtitleFit(r.cues, durMs);
+        logWarn('[cc] 候选 ' + (i + 1) + '/' + limit + ' ' + t.lan + ' ' + r.count +
+          ' cues 覆盖=' + fit.ratio.toFixed(2) + ' 偏差=' + fit.dev.toFixed(2) + ' ' + fit.reason);
+        if (!best || fit.dev < best.fit.dev) best = { t: t, r: r, fit: fit };
+      }
+      this.cc.loading = false;
+      if (!best) {
+        this.cc.cues = [];
+        this.cc.status = '字幕下载失败：' + (lastErr || '未知错误');
+        logWarn('[cc] ' + this.cc.status);
+        await this.applyVideoGeometry('cc');
+        return;
+      }
+      this.cc.lanDoc = best.t.lanDoc;
+      this.cc.cues = best.r.cues;
+      bestFit = best.fit;
+      this.cc.status = bestFit && bestFit.ok ? '' : '字幕可能与本视频不完全对应';
+      /* SUBTITLE_FIT_GOOD 只用来区分「几乎完美」与「勉强对得上」，两者都不再重试；
+       * 留这个判据是为了让日志能一眼看出这次是不是真的找准了。 */
+      const perfect = bestFit && bestFit.ok && bestFit.dev <= SUBTITLE_FIT_GOOD;
+      const c0 = best.r.cues[0] || null;
+      logWarn('[cc] loaded ' + best.r.count + ' cues lang=' + best.t.lan +
+        ' host=' + (best.r.host || '?') + ' fit=' + (bestFit ? bestFit.reason : '?') +
+        (perfect ? ' (perfect)' : '') +
+        ' first=' + (c0 ? (c0.fromMs + '-' + c0.toMs + 'ms ' + c0.text.slice(0, 12)) : 'none'));
       await this.applyVideoGeometry('cc');
     },
     /* 上下让位量（逻辑像素）+ 全屏标记。native 的 render-rectangle 与 falcon
@@ -2980,13 +3272,25 @@ export default {
     async initExtras(myGen, item) {
       const s = this.play.session;
       if (!s || s.live) return;
+      /* 弹幕与 player/v2 无关（seg.so 是独立接口、不查登录态），所以放在
+       * 最早的位置起步：即使字幕/互动信息拿不到，弹幕也该照常工作。
+       * 先把模式推给 native（可能还是 off → native 一个像素都不碰），
+       * 再按当前播放位置拉第一片。 */
+      await this.applyDmMode();
+      if (this.gen !== myGen) return;
+      if (this.dm.mode !== 'off') {
+        this.loadDmSegment(myGen, segmentIndexAt(this.play.positionMs || 0)).then(
+          () => {},
+          () => {}
+        );
+      }
       let mixinKey = '';
       try {
         const m = await ensureMixinResult(this.makeCtx(myGen));
         if (m.ok) mixinKey = m.key;
       } catch (e) { /* WBI 只用于回退，拿不到就直连 */ }
       if (this.gen !== myGen) return;
-      const info = await fetchPlayerV2(this.client, s.bvid, s.cid, {
+      const info = await fetchPlayerV2Tracks(this.client, s.bvid, s.cid, {
         mixinKey: mixinKey,
         nowSec: () => Math.floor(Date.now() / 1000)
       });
@@ -3002,24 +3306,12 @@ export default {
        * 「字幕无法显示」绝大多数时候断在这一行，而不是渲染。 */
       logWarn('[cc] player/v2 tracks=' + info.subtitles.length +
         ' login=' + (this.hasLogin ? 1 : 0) + ' ccOn=' + (this.cc.on ? 1 : 0));
-      /* 从没动过字幕开关（_ccSaved === null）且这个稿子有轨道 → 自动打开。
-       * 只在这一种情况下擅自开：用户明确关过就不再自作主张。
-       * 注意"真的拿到字幕才算开" —— 字幕文件要 auth_key，未登录/AI 字幕不可用时
-       * 会 403，这时留一个"开着却没有字"的开关只会让人更困惑，直接回退成关。 */
-      const autoCc = this._ccSaved === null && !this.cc.on && info.subtitles.length > 0;
-      if (autoCc) this.cc.on = true;
+      /* 【3.5.19】字幕默认**关闭**。
+       * 旧版行为：_ccSaved === null（用户从没动过开关）且稿子有轨道就自动打开。
+       * 用户希望字幕默认不开（与弹幕相反），因此这里不再代人做决定：
+       * 只有 this.cc.on 为真（用户自己在左列点了字幕键，或在「我的」里开过并已持久化）
+       * 才去拉字幕文件。拉不到也不回退开关 —— 让 ccSettingHint 把原因写出来。 */
       if (this.cc.on) await this.loadCcCues(myGen, info.subtitles);
-      if (autoCc) {
-        if (this.cc.cues.length > 0) {
-          this.saveCcSettings();
-          logWarn('[cc] 首次遇到有字幕的稿件 → 自动打开（' + this.cc.cues.length + ' 句）');
-        } else {
-          /* 取不到就**保持开启**，让「我的 → CC 字幕」那行把原因写出来
-           * （ccSettingHint）。以前这里回退成关：开关变灰、画面上什么都没有，
-           * 用户只会得出「字幕根本没有」的结论（真机反馈原话）。 */
-          logWarn('[cc] 有轨道但取不到字幕（' + (this.cc.status || '空') + '）→ 保留开启并提示');
-        }
-      }
       if (info.interactive) {
         logWarn('[interact] graph_version=' + info.graphVersion + ' bvid=' + s.bvid);
         await this.startInteractive(myGen, info.graphVersion, item);
@@ -3590,9 +3882,22 @@ export default {
          * 结果是 tick 从第 2870 行起整段不执行 —— 位置不回写（进度条卡在开头）、
          * 字幕锚点不更新（字幕永远取 pos=0 那句）、末尾判据不触发（互动播完没选项）、
          * state 不跟随 native。一个 TDZ 让四个功能一起哑火，症状看着像四个 bug。 */
-        if (!seekWaiting) {
-          this._ccAnchor = { pos: st.positionMs, at: Date.now(), frozen: st.state !== 'playing' };
-        }
+        /* 【3.5.16 修「字幕和视频完全对不上」的主因】旧实现只判 state !== 'playing'，
+         * 但**缓冲/卡顿/取流暂停时 state 仍然是 playing，positionMs 却不动**：
+         * 于是 250ms 的字幕钟继续按墙钟往前插值，字幕一路跑到前面去（真机实测
+         * 卡 12 秒 = 字幕提前 12 秒，恢复后才被拉回）。
+         * 现在多加一条硬判据：这一 tick 的 positionMs 与 frames 都没变 ⇒ 位置冻结，
+         * 锚点按 frozen 处理（只显示 st.positionMs 那一句，不再外推）。
+         * 注意 seekBusy 用的是本 tick 早已算好的值（旧代码读的 seekWaiting 在下文
+         * 才被赋值，同一个 tick 内恒为 false，那是个死守卫）。 */
+        const posStalled = this._tickPos === st.positionMs && this._tickFrames === st.frames;
+        this._tickPos = st.positionMs;
+        this._tickFrames = st.frames;
+        this._ccAnchor = {
+          pos: st.positionMs,
+          at: Date.now(),
+          frozen: st.state !== 'playing' || posStalled || seekBusy || seekWaiting
+        };
         /* 【互动视频】只在题面窗口打开选项：真实 edgeinfo_v2 的 start_time_r=300
          * （= 3.00s）表示片尾前 3 秒才出题；type=0 的自动跳转片段根本不出面板。
          * 用户主动收起（dismissed）后本轮不再自动弹回，可用右列入口手动打开。 */
@@ -3916,13 +4221,21 @@ export default {
         this._intervals.delete(this._ccClock);
       }
       this._ccClock = setInterval(() => {
+        /* 弹幕搭这趟车，不另开定时器：它只需要在跨 6 分钟分片时动一次，
+         * 其余时候就是一次整数比较。放在字幕的「没开就早退」之前，
+         * 因为字幕关着的时候不代表弹幕也关着。 */
+        this.tickDm(this._ccAnchor && !this._ccAnchor.frozen
+          ? this._ccAnchor.pos + Math.max(0, Date.now() - this._ccAnchor.at)
+          : this.play.positionMs);
         if (!this.ccActive) {
           if (this.cc.posMs !== 0) this.cc.posMs = 0;
           return;
         }
         const a = this._ccAnchor;
         let p = a ? a.pos : this.play.positionMs;
-        if (a && !a.frozen) p = a.pos + Math.max(0, Date.now() - a.at);
+        /* 外推上限 = 一次轮询间隔 + 余量。tick 若被长任务拖住，没有上限就会把
+         * 字幕推到很远的地方（实测卡顿时 12 秒）。 */
+        if (a && !a.frozen) p = a.pos + Math.min(CC_EXTRAP_MAX_MS, Math.max(0, Date.now() - a.at));
         if (p !== this.cc.posMs) this.cc.posMs = p;
       }, 250);
       this._intervals.add(this._ccClock);
@@ -5242,6 +5555,10 @@ export default {
       this._timers.forEach((t) => clearTimeout(t));
       this._timers.clear();
       this.resetExtras(); // 顺手停掉自动连播定时器、清空互动历史与字幕时轴
+      /* 弹幕数据必须让 native 也丢掉：下次起播是另一个稿子，
+       * 留着旧列表会看到别人的弹幕飘在当前视频上。模式（self.dm.mode）
+       * 不动 —— 那是用户设置，换集之后仍按原档显示。 */
+      this.clearDmNative();
       this._seekDebounceT = 0; // 排队中的 seek 已随 _timers 一起清掉
       this._choiceT = 0;       // 互动倒计时句柄同上（resetExtras 已 clear）
       this._seekNoteAt = 0;

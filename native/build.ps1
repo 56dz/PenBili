@@ -96,6 +96,7 @@ if ($buildPlayer2) {
     "$base\native\csrc\session\session.c",
     "$base\native\csrc\session\cmd.c",
     "$base\native\csrc\video\kms_plane.c",
+    "$base\native\csrc\video\dm_overlay.c",
     "$base\native\csrc\audio\audio_out.c",
     "$base\native\csrc\source\src_http.c"
   )

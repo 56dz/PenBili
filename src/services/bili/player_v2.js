@@ -95,3 +95,89 @@ export async function fetchPlayerV2(client, bvid, cid, opts) {
   }
   return Object.assign({ ok: true }, parsePlayerV2(res.data));
 }
+
+/* 3.5.16：字幕列表是灰度分桶的，一次请求可能是空、也可能只给其中一版产物。
+ * 实测同一 bvid+cid 连续 6 次 player/v2：
+ *   0 条 / A(675cues) / 0 条 / B(38cues) / C(319cues) / 0 条 —— 四个互不相同的
+ *   AI 产物，内容主题都不一样。用户反馈的「字幕和视频完全对不上」就是这个：
+ *   页面只取首条，拿到哪版全看分桶。
+ * 对策：把 `subtitles` 当**候选池**，多次请求按 url 去重合并，交页面逐条试。
+ *
+ * opts: { mixinKey?, nowSec?, tries?, gapMs?, shouldStop? }
+ *   tries     请求次数上限（默认 3）
+ *   gapMs     两次之间等待（默认 260ms；设备上次网络抖动时不至于卡太久）
+ *   shouldStop(merged) 返回 true 可提前收工（默认凑够 wantTracks 条就停）
+ *   wantTracks  期望候选数（默认 2：给页面留一次换轨机会）
+ * → { ok:true, subtitles, tries, interactive, graphVersion, ... } | { ok:false, ... }
+ */
+
+/* 合并一批 player/v2 结果里的字幕候选（按 url 去重）。 */
+function mergeTracks(merged, seen, list) {
+  if (!Array.isArray(list)) return;
+  for (let k = 0; k < list.length; k++) {
+    const t = list[k];
+    if (!t || !t.url || seen[t.url]) continue;
+    seen[t.url] = 1;
+    merged.push(t);
+  }
+}
+
+/* 3.5.16：字幕列表是灰度分桶的，单次请求既可能空、也可能只给其中一版产物。
+ *
+ * 实测（BV1qenS6REgT / cid 43048174426 / 176s）连取 6 轮能凑到 4 个互不相同的
+ * AI 产物，末条/时长偏差 0.04 / 0.08 / 0.12 / 0.76 —— 只取 1~2 条时经常两个
+ * 都是错的，用户看到的就是「字幕和视频完全对不上」。
+ *
+ * 串行取 6 轮要 6.8s（每轮 1.1s），起播等不起；实测**并发**发 5 个请求只花
+ * 0.56s 就能拿到 5 个不同分桶。所以策略是「第 1 发单跑探路，够数就收工；
+ * 不够再把剩下的并发打出去」。这样正常稿件只花 1 次往返，异常稿件 ~0.6s。
+ *
+ * opts: { mixinKey?, nowSec?, tries?, wantTracks?, shouldStop? }
+ * → { ok:true, subtitles, tries, interactive, graphVersion, ... } | { ok:false, ... }
+ */
+export const PLAYER_V2_TRIES = 5;
+export const PLAYER_V2_WANT = 4;
+/* 保留给调用方显式限速用（默认 0：并发发，不排队等）。 */
+export const PLAYER_V2_GAP_MS = 0;
+
+function sleepMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms | 0)));
+}
+
+export async function fetchPlayerV2Tracks(client, bvid, cid, opts) {
+  const o = opts || {};
+  const tries = Math.max(1, Math.floor(Number(o.tries) || PLAYER_V2_TRIES));
+  const gapMs = Number.isFinite(Number(o.gapMs)) ? Number(o.gapMs) : PLAYER_V2_GAP_MS;
+  const want = Math.max(1, Math.floor(Number(o.wantTracks) || PLAYER_V2_WANT));
+  const merged = [];
+  const seen = Object.create(null);
+
+  /* 第 1 发探路：请求本身失败（风控/网络）就别再叠加并发，直接报给调用方。 */
+  const first = await fetchPlayerV2(client, bvid, cid, o);
+  if (!first || !first.ok) {
+    return first || { ok: false, stage: 'transport', message: 'player/v2 请求失败' };
+  }
+  mergeTracks(merged, seen, first.subtitles);
+  let last = first;
+  let used = 1;
+  if (typeof o.shouldStop === 'function' && o.shouldStop(merged)) {
+    return Object.assign({}, last, { ok: true, subtitles: merged, tries: used });
+  }
+  if (merged.length >= want || tries <= 1) {
+    return Object.assign({}, last, { ok: true, subtitles: merged, tries: used });
+  }
+
+  /* 剩下的一起打出去。任何一个成功都保留结果；只有全失败才维持 first。 */
+  if (gapMs > 0) await sleepMs(gapMs);
+  const rest = [];
+  for (let i = 1; i < tries; i++) rest.push(fetchPlayerV2(client, bvid, cid, o));
+  const got = await Promise.all(rest);
+  used = tries;
+  for (let i = 0; i < got.length; i++) {
+    const r = got[i];
+    if (!r || !r.ok) continue;
+    last = r;
+    mergeTracks(merged, seen, r.subtitles);
+  }
+  return Object.assign({}, last, { ok: true, subtitles: merged, tries: used });
+}

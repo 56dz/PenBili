@@ -5155,6 +5155,156 @@ async function main() {
     assert.strictEqual(sub.normalizeSubtitleSettings({ on: true, lan: 'ai-zh' }).on, true);
   });
 
+  test('subtitle: 候选池排序去重（同 cid 多版本 AI 产物都要列出）', () => {
+    const tracks = [
+      { lan: 'en-US', lanDoc: 'English', url: 'https://i0.hdslb.com/en.json' },
+      { lan: 'ai-zh', lanDoc: '中文A', url: 'https://i0.hdslb.com/a.json' },
+      { lan: 'ai-zh', lanDoc: '中文B', url: 'https://i0.hdslb.com/b.json' },
+      { lan: 'ai-zh', lanDoc: '中文A重复', url: 'https://i0.hdslb.com/a.json' },
+      { lan: 'ja', lanDoc: '日本語', url: '' }
+    ];
+    const r = sub.rankSubtitleTracks(tracks, '');
+    assert.strictEqual(r.length, 3, '无 url 的轨道要丢掉、同 url 只留一次');
+    assert.deepStrictEqual(r.map((t) => t.url), [
+      'https://i0.hdslb.com/a.json',
+      'https://i0.hdslb.com/b.json',
+      'https://i0.hdslb.com/en.json'
+    ]);
+    const en = sub.rankSubtitleTracks(tracks, 'en-US');
+    assert.strictEqual(en[0].lan, 'en-US', '指定语言必须排第一');
+    assert.strictEqual(sub.rankSubtitleTracks([], 'zh').length, 0);
+    assert.strictEqual(sub.pickSubtitleTrack(tracks, '').url, 'https://i0.hdslb.com/a.json');
+  });
+
+  test('subtitle: subtitleFit 用覆盖度打分，取离 1.0 最近的候选', () => {
+    const full = [];
+    for (let i = 0; i < 60; i++) full.push({ fromMs: i * 2000, toMs: i * 2000 + 1900, text: 'x' + i });
+    /* 铺满全片 → 通过，偏差应接近 0 */
+    const ok = sub.subtitleFit(full, 119900);
+    assert.strictEqual(ok.ok, true);
+    assert.ok(ok.dev < 0.02);
+    /* 字幕只覆盖到 2 分钟而片长 10 分钟 → 明显错片 */
+    const short = sub.subtitleFit(full, 600000);
+    assert.ok(!short.ok && short.reason === 'too-short');
+    assert.ok(short.ratio < 0.3);
+    /* 时间轴按别的片子算（超 2.1 倍）→ 判错 */
+    assert.ok(!sub.subtitleFit(full, 50000).ok);
+    /* 首句在第 5 分钟、片长 10 分钟 → 起点太晚 */
+    const late = sub.subtitleFit([{ fromMs: 300000, toMs: 600000, text: 'x' }], 600000);
+    assert.ok(!late.ok && late.reason === 'late-start');
+    /* 真机实测 BV1j2sx6PE8p(73s) 的三个候选：0.78 / 1.56 / 4.19，
+     * 只有 0.78 那条是这条音轨的，必须靠 dev 最小挑出来 */
+    const c078 = [{ fromMs: 0, toMs: 56980, text: 'a' }];
+    const c156 = [{ fromMs: 0, toMs: 113900, text: 'b' }];
+    const c419 = [{ fromMs: 0, toMs: 306120, text: 'c' }];
+    const d078 = sub.subtitleFit(c078, 73000);
+    const d156 = sub.subtitleFit(c156, 73000);
+    const d419 = sub.subtitleFit(c419, 73000);
+    assert.ok(d078.ok && d078.dev < 0.25, '0.78 必须判合格');
+    assert.ok(d419.dev > d156.dev && d156.dev > d078.dev, '打分必须能排出优劣');
+    assert.ok(!d419.ok, '4.19 倍必须判错');
+    /* 没有时长信息一律放行，不能让用户彻底没字幕 */
+    assert.strictEqual(sub.subtitleFit(full, 0).ok, true);
+    assert.strictEqual(sub.subtitleFit(full, 0).reason, 'no-duration');
+    /* 空 cues */
+    assert.ok(!sub.subtitleFit([], 120000).ok);
+    /* 边界常量必须与页面注释一致 */
+    assert.strictEqual(sub.SUBTITLE_FIT_MIN, 0.55);
+    assert.strictEqual(sub.SUBTITLE_FIT_MAX, 2.1);
+    assert.strictEqual(sub.SUBTITLE_FIT_TOL, 0.55);
+    assert.ok(sub.SUBTITLE_FIT_GOOD < sub.SUBTITLE_FIT_TOL);
+    /* 0.24 偏差的候选（实测是错的那版）不能被当成「够好」而提前收工 */
+    assert.ok(sub.SUBTITLE_FIT_GOOD < 0.2, '提前收工阈值必须比错片的 0.24 更严');
+  });
+
+  test('player/v2: 字幕分桶导致偶发空列表 → 多取几次合并候选', async () => {
+    const seq = [[], [{ lan: 'ai-zh', lan_doc: '中文', subtitle_url: '//i0.hdslb.com/a.json' }],
+      [{ lan: 'ai-zh', lan_doc: '中文2', subtitle_url: '//i0.hdslb.com/b.json' }]];
+    let n = 0;
+    const client = {
+      request: async () => {
+        const subs = seq[n] || [];
+        n++;
+        return { ok: true, code: 0, data: { subtitle: { subtitles: subs } } };
+      }
+    };
+    const r = await pv2.fetchPlayerV2Tracks(client, 'BV1UE411y7Wy', 127486603,
+      { gapMs: 1, tries: 3, wantTracks: 2 });
+    assert.ok(r.ok, '至少一次成功就算成功');
+    assert.strictEqual(r.tries, 3);
+    assert.deepStrictEqual(r.subtitles.map((t) => t.url),
+      ['//i0.hdslb.com/a.json', '//i0.hdslb.com/b.json'], '两版产物都要留作候选');
+    /* 首次请求就拿到足够候选时不应白跑第二趟 */
+    let m = 0;
+    const client2 = {
+      request: async () => {
+        m++;
+        return { ok: true, code: 0, data: { subtitle: { subtitles: [
+          { lan: 'ai-zh', subtitle_url: '//i0.hdslb.com/a.json' },
+          { lan: 'ai-zh', subtitle_url: '//i0.hdslb.com/b.json' }
+        ] } } };
+      }
+    };
+    const r2 = await pv2.fetchPlayerV2Tracks(client2, 'BV1UE411y7Wy', 127486603,
+      { gapMs: 1, wantTracks: 2 });
+    assert.strictEqual(m, 1, 'wantTracks 够了就收工');
+    assert.strictEqual(r2.subtitles.length, 2);
+    /* 请求本身失败（非空列表）时直接返回错误，不要叠加重试 */
+    const client3 = { request: async () => ({ ok: false, stage: 'api', code: -403, message: '风控' }) };
+    const r3 = await pv2.fetchPlayerV2Tracks(client3, 'BV1UE411y7Wy', 127486603, { gapMs: 1 });
+    /* 默认轮数要够多：实测 6 轮才凑齐 4 个候选 */
+    assert.strictEqual(pv2.PLAYER_V2_TRIES, 5);
+    assert.strictEqual(pv2.PLAYER_V2_WANT, 4);
+    assert.ok(!r3.ok && r3.code === -403);
+    /* 参数非法沿用 fetchPlayerV2 的校验 */
+    const r4 = await pv2.fetchPlayerV2Tracks(client3, 'nope', 1, { gapMs: 1 });
+    assert.ok(!r4.ok && r4.stage === 'param');
+  });
+
+  test('页面接线: 字幕用候选池 + 覆盖度筛选（3.5.16 修「字幕对不上」）', () => {
+    const fsx = require('fs');
+    const pathx = require('path');
+    const vue = fsx.readFileSync(
+      pathx.join(__dirname, '..', 'src', 'pages', 'index', 'index.vue'), 'utf8');
+    assert.ok(/fetchPlayerV2Tracks/.test(vue), '页面必须走多候选拉取');
+    assert.ok(/rankSubtitleTracks\(tracks, this\.cc\.lan\)/.test(vue), '候选要按语言排序');
+    assert.ok(/subtitleFit\(r\.cues, durMs\)/.test(vue), '必须用覆盖度判定');
+    assert.ok(/fit\.dev < best\.fit\.dev/.test(vue), '候选必须按偏差最小选，不是先到先得');
+    assert.ok(/const CC_TRY_MAX = 4;/.test(vue), '候选上限要够（实测同一 cid 有 3~6 个产物）');
+    /* 全部候选都对不上时不能把字号 / cues 清空到用户没字幕 */
+    const from = vue.indexOf('async loadCcCues(myGen, tracks)');
+    const to = vue.indexOf('/* 上下让位量', from);
+    assert.ok(from > 0 && to > from, '定位 loadCcCues 代码段失败');
+    const seg = vue.slice(from, to);
+    assert.ok(seg.indexOf('if (!best)') > 0, '要先兜住「一条都没下下来」');
+    assert.ok(/this\.cc\.status = [^;]*'字幕可能与本视频不完全对应'/.test(seg),
+      '对不上时要给出可见提示，而不是静默显示错的字幕');
+  });
+
+  test('页面接线: 字幕位置冻结时停止外推（3.5.16 修「字幕跑到画面前面」）', () => {
+    const fsx = require('fs');
+    const pathx = require('path');
+    const vue = fsx.readFileSync(
+      pathx.join(__dirname, '..', 'src', 'pages', 'index', 'index.vue'), 'utf8');
+    /* 旧实现的死守卫：seekWaiting 在锚点段读取，但赋值在本函数更晚的地方，
+     * 同一 tick 内恒为 false → 「seek 期间不更新锚点」从未生效。现在改用
+     * 本 tick 早已算好的 seekBusy，外加「位置+帧数都没动」的硬判据。 */
+    assert.ok(/const posStalled = this\._tickPos === st\.positionMs && this\._tickFrames === st\.frames;/.test(vue),
+      '必须有「位置与帧数都没动 = 冻结」的判据');
+    assert.ok(/frozen: st\.state !== 'playing' \|\| posStalled \|\| seekBusy \|\| seekWaiting/.test(vue),
+      '冻结判据要同时覆盖缓冲/seek/非播放态');
+    /* 字幕钟的外推必须有上限 */
+    assert.ok(/const CC_EXTRAP_MAX_MS = \d+;/.test(vue), '外推上限要有常量');
+    assert.ok(/Math\.min\(CC_EXTRAP_MAX_MS, Math\.max\(0, Date\.now\(\) - a\.at\)\)/.test(vue),
+      '字幕钟必须夹住外推量');
+    /* 代次提前返回不能把 loading 一直挂着 */
+    const at = vue.indexOf('const rs = await Promise.all(tasks);');
+    assert.ok(at > 0, '找不到并发下载段');
+    const seg = vue.slice(at, at + 600);
+    assert.ok(/if \(this\.gen !== myGen\) \{[\s\S]{0,200}?this\.cc\.loading = false;/.test(seg),
+      '代次变化提前返回前必须复位 loading');
+  });
+
   test('subtitle: 下载纯 JSON（无 code 字段）→ cues', async () => {
     const client = {
       getRawJson: async () => ({ ok: true, data: { body: [{ from: 1, to: 3, content: '你好' }] } })
@@ -5163,6 +5313,192 @@ async function main() {
     assert.ok(r.ok && r.count === 1 && r.cues[0].text === '你好');
     const bad = await sub.fetchSubtitleCues(client, 'https://evil.example.com/a.json');
     assert.ok(!bad.ok && bad.stage === 'param');
+  });
+
+  /* ==================== 弹幕（3.5.14） ==================== */
+  const dm = await import('../src/services/bili/danmaku.js');
+  const dmFixturePath = require('path').join(__dirname, '..', 'api-mock', 'fixtures', 'dm_seg.bin');
+
+  test('danmaku: 真实响应体（5863 条）解析出字段与 mode 分布', () => {
+    const buf = require('fs').readFileSync(dmFixturePath);
+    assert.strictEqual(buf.length, 1236855, 'fixture 大小写死在测试里，换了样本要一起改');
+    const r = dm.parseSegReply(buf);
+    assert.ok(r.ok, '解析必须成功: ' + r.message);
+    assert.strictEqual(r.count, 5863);
+    const modes = {};
+    for (const d of r.list) modes[d.mode] = (modes[d.mode] || 0) + 1;
+    assert.deepStrictEqual(modes, { 1: 2742, 4: 516, 5: 1743, 7: 862 },
+      'mode 分布是样本指纹，改了解析器先确认不是错位');
+    const first = r.list[0];
+    for (const k of ['idStr', 'progress', 'mode', 'color', 'fontsize', 'text']) {
+      assert.ok(k in first, '元素必须有 ' + k);
+    }
+    assert.ok(first.text.length > 0, '正文不许为空');
+    const maxProg = r.list.reduce((m, d) => Math.max(m, d.progress), 0);
+    assert.ok(maxProg > 300000 && maxProg < 400000, 'progress 是毫秒: ' + maxProg);
+  });
+
+  test('danmaku: 容错（非 protobuf / 空 / 截断）', () => {
+    assert.ok(!dm.parseSegReply(null).ok);
+    assert.ok(!dm.parseSegReply(new Uint8Array(0)).ok);
+    assert.strictEqual(dm.parseSegReply(null).message, '响应为空');
+    const html = Buffer.from('<!DOCTYPE html><html><body>error</body></html>');
+    const r1 = dm.parseSegReply(html);
+    assert.ok(!r1.ok && /魔数/.test(r1.message), 'HTML 必须被魔数挡住: ' + r1.message);
+    /* 尾部截断：能解析多少算多少，不许抛异常 */
+    const buf = require('fs').readFileSync(dmFixturePath);
+    const r2 = dm.parseSegReply(buf.subarray(0, buf.length - 777));
+    assert.ok(r2.ok && r2.count > 5000, '尾部截断仍应解析出大部分: ' + r2.count);
+  });
+
+  test('danmaku: 去重按 idStr，同内容不同 id 必须都留', () => {
+    const list = [
+      { idStr: '1', text: '一样的话' },
+      { idStr: '2', text: '一样的话' },
+      { idStr: '1', text: '重复的 id' }
+    ];
+    const seen = Object.create(null);
+    const out = dm.dedupeByKey(list, seen);
+    assert.strictEqual(out.length, 2, '按内容去重会吃掉真实重复弹幕');
+    assert.deepStrictEqual(out.map((d) => d.idStr), ['1', '2']);
+    assert.strictEqual(dm.dedupeByKey(list, seen).length, 0, '同一 seen 里不许重复通过');
+  });
+
+  test('danmaku: 分片下标、可见窗口、设置轮转', () => {
+    assert.strictEqual(dm.SEG_MS, 360000);
+    assert.deepStrictEqual(
+      [0, 1, 359999, 360000, 720000].map(dm.segmentIndexAt),
+      [1, 1, 1, 2, 3]
+    );
+    /* 滚动弹幕活 8s，顶部/底部固定弹幕活 4s */
+    assert.strictEqual(dm.danmakuVisibleAt({ mode: 1, progress: 1000 }, 999), false);
+    assert.strictEqual(dm.danmakuVisibleAt({ mode: 1, progress: 1000 }, 1000), true);
+    assert.strictEqual(dm.danmakuVisibleAt({ mode: 1, progress: 1000 }, 8999), true);
+    assert.strictEqual(dm.danmakuVisibleAt({ mode: 1, progress: 1000 }, 9000), false);
+    assert.strictEqual(dm.danmakuVisibleAt({ mode: 5, progress: 1000 }, 4999), true);
+    assert.strictEqual(dm.danmakuVisibleAt({ mode: 5, progress: 1000 }, 5000), false);
+    assert.deepStrictEqual(dm.DM_MODES, ['off', 'full', 'half', 'quarter']);
+    let m = 'off';
+    for (const want of ['full', 'half', 'quarter', 'off']) {
+      m = dm.nextDmMode(m);
+      assert.strictEqual(m, want);
+    }
+    assert.strictEqual(dm.normalizeDmSettings(null).mode, dm.DM_MODE_DEFAULT);
+    assert.strictEqual(dm.normalizeDmSettings({ mode: '乱写' }).mode, dm.DM_MODE_DEFAULT);
+    /* 3.5.19：默认开启弹幕，且默认就是全屏模式 */
+    assert.strictEqual(dm.DM_MODE_DEFAULT, 'full');
+    assert.strictEqual(dm.normalizeDmSettings({ mode: 'quarter' }).mode, 'quarter');
+  });
+
+  test('danmaku: feed 文本按行、竖线换行清洗、超长截断', () => {
+    const t = dm.buildFeedText([
+      { idStr: '1', progress: 100, mode: 1, color: 16777215, fontsize: 25, text: 'a|b' },
+      { idStr: '2', progress: 200, mode: 5, color: 255, fontsize: 18, text: 'c\nd' },
+      { idStr: '3', progress: 300, mode: 1, color: 0, fontsize: 0, text: 'x'.repeat(200) }
+    ]);
+    const lines = t.split('\n');
+    assert.strictEqual(lines.length, 3);
+    const f = lines[0].split('|');
+    assert.strictEqual(f.length, 6, '字段数必须正好 6（竖线是分隔符）');
+    assert.strictEqual(f[5], 'ab', '竖线必须被清掉');
+    assert.strictEqual(lines[1].split('|')[5], 'cd', '换行直接去掉（不是换空格，会多出一格宽度）');
+    /* fontsize 原样带下去，钳位交给 native（它才知道缓冲区多大） */
+    assert.strictEqual(lines[2].split('|')[4], '0');
+    assert.ok(lines[2].split('|')[5].length <= 80, '超长正文必须截断');
+  });
+
+  test('danmaku: fetchSegment 拼参、失败分段、client 注入', async () => {
+    const seen = [];
+    const client = {
+      getBinary: async (url) => {
+        seen.push(url);
+        return { ok: false, stage: 'http', httpStatus: 412, message: 'HTTP 412' };
+      }
+    };
+    const bad = await dm.fetchSegment(client, { aid: 1, cid: 2, index: 3 });
+    assert.ok(!bad.ok && bad.stage === 'http');
+    assert.ok(/type=1/.test(seen[0]) && /oid=2/.test(seen[0]) &&
+      /pid=1/.test(seen[0]) && /segment_index=3/.test(seen[0]), seen[0]);
+    const miss = await dm.fetchSegment(null, { aid: 1, cid: 2, index: 3 });
+    assert.ok(!miss.ok && miss.stage === 'client');
+    const noArg = await dm.fetchSegment(client, { aid: 0, cid: 2, index: 3 });
+    assert.ok(!noArg.ok && noArg.stage === 'param');
+  });
+
+  test('danmaku: 页面接线（左列开关 / 分片切换 / 关弹幕走 off / teardown 清 native）', () => {
+    const fs = require('fs');
+    const vue = fs.readFileSync(require('path').join(__dirname, '..', 'src', 'pages', 'index', 'index.vue'), 'utf8');
+    assert.ok(/class="pctrl-btn" @click="onDmToggle"/.test(vue), '左列必须有弹幕键');
+    assert.ok(/onDmToggle\(\) \{/.test(vue) && /nextDmMode\(this\.dm\.mode\)/.test(vue),
+      '必须走 nextDmMode 轮转');
+    assert.ok(/player\.dmMode\(/.test(vue) && /player\.dmFeed\(/.test(vue) &&
+      /player\.dmClear\(/.test(vue), '三个 native 导出都要接上');
+    assert.ok(/tickDm\(/.test(vue) && /segmentIndexAt\(posMs\)/.test(vue),
+      '跨分片必须靠 segmentIndexAt 判');
+    /* 关弹幕时 native 第一行就 return，一个像素都不碰 —— 这是性能承诺 */
+    assert.ok(/dm\.mode === 'off'/.test(vue), '关闭必须短路，不许照常渲染');
+    assert.ok(/resetDm\(\)/.test(vue) && /this\.resetDm\(\);/.test(vue),
+      'resetExtras 里必须清弹幕数据');
+    assert.ok(/this\.clearDmNative\(\);/.test(vue), 'teardown 必须让 native 丢掉旧列表');
+    assert.ok(/DM_SETTINGS_KEY/.test(vue) && /normalizeDmSettings/.test(vue),
+      '模式必须持久化且脏数据回默认');
+  });
+
+  test('danmaku: 字号档位（小/中/大）轮转、持久化与页面接线', () => {
+    const vue = require('fs').readFileSync(
+      require('path').join(__dirname, '..', 'src', 'pages', 'index', 'index.vue'), 'utf8');
+    /* 三档而不是滑杆：falcon 没有原生滑杆控件，轮转最不容易误触 */
+    assert.deepStrictEqual(dm.DM_SIZES, ['small', 'mid', 'large']);
+    assert.strictEqual(dm.nextDmSize('small'), 'mid');
+    assert.strictEqual(dm.nextDmSize('mid'), 'large');
+    assert.strictEqual(dm.nextDmSize('large'), 'small');
+    assert.strictEqual(dm.nextDmSize('bogus'), 'mid', '脏值按中档处理（轮转起点）');
+
+    /* 档位 → 屏幕逻辑像素。基准值就是屏幕上看到的像素：native 的
+     * 「基准 × 缓冲区比例」与 kmssink 的「缓冲区缩到矩形」互为倒数 */
+    assert.deepStrictEqual(dm.DM_SIZE_PX, { small: 16, mid: 22, large: 26 });
+    assert.strictEqual(dm.dmSizePx('small'), 16);
+    assert.strictEqual(dm.dmSizePx('mid'), 22);
+    assert.strictEqual(dm.dmSizePx('large'), 26);
+    assert.strictEqual(dm.dmSizePx('bogus'), dm.DM_SIZE_PX[dm.DM_SIZE_DEFAULT]);
+    assert.ok(dm.DM_SIZE_PX.small < dm.DM_SIZE_PX.mid && dm.DM_SIZE_PX.mid < dm.DM_SIZE_PX.large);
+
+    /* 【3.5.19】默认小档；脏数据整条退回「默认模式 + 小档」 */
+    assert.strictEqual(dm.DM_SIZE_DEFAULT, 'small');
+    assert.deepStrictEqual(dm.normalizeDmSettings(null),
+      { version: dm.DM_SETTINGS_VERSION, mode: dm.DM_MODE_DEFAULT, size: 'small' });
+    assert.strictEqual(dm.normalizeDmSettings({ mode: 'full', size: 'large' }).size, 'large');
+    assert.strictEqual(dm.normalizeDmSettings({ mode: 'full', size: 'xx' }).size, 'small');
+
+    /* 页面接线：data / 持久化 / 轮转方法 / 「我的」页那一行 */
+    assert.ok(/mode: DM_MODE_DEFAULT/.test(vue), 'dm 状态初值要是默认模式（开启）');
+    assert.ok(/size: DM_SIZE_DEFAULT/.test(vue), 'dm 状态要带 size 初值');
+    assert.ok(/version: 2, mode: this\.dm\.mode, size: this\.dm\.size/.test(vue), '持久化要写 size');
+    assert.ok(/this\.dm\.size = s\.size/.test(vue), '读回要还原 size');
+    assert.ok(/return dmSizePx\(this\.dm\.size\);/.test(vue), '字号唯一来源是档位');
+    assert.ok(/onDmSizeToggle\(\)/.test(vue) && /nextDmSize\(this\.dm\.size\)/.test(vue));
+    assert.ok(/class="mine-row"[^>]*@click="onDmSizeToggle"/.test(vue), '「我的」页要有字号行');
+    assert.ok(/dmSizeText/.test(vue));
+  });
+
+  test('danmaku: native 导出表与命令码（player.js / queue.h / jsapi_player2.c 三方对齐）', () => {
+    const fs = require('fs');
+    const p = require('path');
+    const root = p.join(__dirname, '..');
+    const pj = fs.readFileSync(p.join(root, 'src', 'services', 'player.js'), 'utf8');
+    assert.ok(/export async function dmFeed/.test(pj) && /callOptional\('dmFeed'/.test(pj));
+    assert.ok(/export async function dmMode/.test(pj) && /callOptional\('dmMode'/.test(pj));
+    assert.ok(/export async function dmClear/.test(pj) && /callOptional\('dmClear'/.test(pj));
+    const qh = fs.readFileSync(p.join(root, 'native', 'csrc', 'core', 'queue.h'), 'utf8');
+    assert.ok(/PB2_CMD_DM_FEED\s*=\s*14/.test(qh), 'DM_FEED 必须是 14（8 留给兼容，11 起递增）');
+    assert.ok(/PB2_CMD_DM_MODE\s*=\s*15/.test(qh));
+    assert.ok(/PB2_CMD_DM_CLEAR\s*=\s*16/.test(qh));
+    const js = fs.readFileSync(p.join(root, 'native', 'csrc', 'jsapi_player2.c'), 'utf8');
+    assert.ok(/X\("dmFeed", js_dm_feed, 1\)/.test(js), '导出表必须含 dmFeed');
+    assert.ok(/X\("dmMode", js_dm_mode, 2\)/.test(js));
+    assert.ok(/X\("dmClear", js_dm_clear, 0\)/.test(js));
+    const bp = fs.readFileSync(p.join(root, 'native', 'build.ps1'), 'utf8');
+    assert.ok(/video\\dm_overlay\.c/.test(bp), '新源文件必须加进 build.ps1 的 \$p2src');
   });
 
   test('client: getRawJson 不按 code 判失败（字幕文件没有 code）', async () => {

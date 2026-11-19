@@ -77,6 +77,38 @@ typedef enum {
      * JSAPI 线程绝不允许阻塞。
      */
     PB2_CMD_SET_SOUND = 13,
+    /*
+     * ============ 【3.5.14 弹幕】============
+     *
+     * 【为什么弹幕要走 native 烧帧，而不是 UI 层画】
+     * 视频走 kmssink 直送 DRM 平面，实测 `Esmart1-win0` 的 zpos 高于
+     * `Esmart0-win0`（Falcon UI 层）。也就是说：**任何 HTML/DOM 都盖不到
+     * 画面上**。CC 字幕能做成「UI 字幕带」，是因为它从画面里**让出一块
+     * 高度**（video + cc + bar = H 的恒等式）；弹幕要浮在画面上，只能
+     * 把像素写进视频帧本身。
+     *
+     * 挂钩点选在 kmssink **本体** sink pad 的 buffer probe（on_vsink_buffer），
+     * 那里拿到的是 videoscale 之后、与 render-rectangle 等大的最终 NV12
+     * 帧 —— 坐标就是屏幕坐标，不用反推缩放假设。
+     *
+     * 【为什么不用 textoverlay/drawtext】
+     * 本机 GStreamer 根本没装这些插件（`gst-inspect-1.0` 里没有
+     * textoverlay / pango / cairo / freetype / assrender）。v2.7.0 当年的
+     * 弹幕就是靠 drawtext×4，装到这批固件上连元素都创建不出来。
+     *
+     * 【为什么数据要 JS 侧解析、native 只负责画】
+     * seg.so 返回的是 protobuf（明文，未压缩），QuickJS 手写 varint 解析
+     * 很便宜（一片 1400 条 ≈ 160KB，实测 <20ms）；而字体位图缓存、泳道
+     * 分配、每帧合成必须在 native —— 逐帧过 JS 桥等于自杀。
+     *
+     * 分工：
+     *   JS   → dmFeed(文本)  ：整片解析 + 按 idStr 去重 + 拼成紧凑文本
+     *   JS   → dmMode(mode)  ：切换「关闭 / 全屏 / 1-2 / 1-4」
+     *   native → 每帧 dm_render()：泳道分配 + 位图缓存 + NV12 合成
+     */
+    PB2_CMD_DM_FEED = 14, /* ptr -> char*（worker 负责 free；整片弹幕文本） */
+    PB2_CMD_DM_MODE = 15, /* i64 = mode | (fontPx << 8)；mode 见 dm_overlay.h */
+    PB2_CMD_DM_CLEAR = 16, /* 清空已加载的弹幕（切集 / seek 到别的分片） */
     PB2_CMD_QUIT = 10
 } pb2_cmd_type_t;
 

@@ -41,6 +41,7 @@
 #include "core/queue.h"
 #include "session/cmd.h"
 #include "session/session.h"
+#include "video/dm_overlay.h"
 #include "video/kms_plane.h"
 
 /* 3.6.0：X7 Pro 适配 —— 面板列偏移 / kmssink plane-id 由 open 参数下发，
@@ -962,6 +963,91 @@ static JSValue js_list_files(JSContext *ctx, JSValueConst this_val, int argc, JS
     return res;
 }
 
+/*
+ * ============ 【3.5.14 弹幕】三个 JSAPI 导出 ============
+ *
+ * 分工写在 queue.h 的 PB2_CMD_DM_* 注释里：JS 负责「解析 protobuf + 去重 +
+ * 拼文本」，native 负责「字体位图缓存 + 泳道分配 + NV12 合成」。
+ *
+ * 【为什么文本用字符串传，而不是二进制 blob】
+ * 一片弹幕解析完是 1400 条左右，每条 30~80 字节文本，整片约 60~110KB。
+ * QuickJS 侧把一个长字符串交给 JS_ToCString 再 malloc 一次是可接受的
+ * （实测 <1ms）；而如果传 ArrayBuffer，native 侧还得再写一层 JS_GetArrayBuffer
+ * + 手工游标解析，代码多一倍、收益为零 —— 真正的重活（位图绘制）不在解析。
+ *
+ * 【为什么 dmMode 是 (mode, fontPx) 两个参数】
+ * 打包成一个 i64 传给 worker（mode | fontPx<<8），避免「设了模式还没设字号」
+ * 的中间态被 worker 看到。
+ */
+
+/* dmFeed(text) —— 喂入一整片弹幕文本，每行 `id|progress|mode|color|fontsize|content`。 */
+static JSValue js_dm_feed(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    const char *text;
+    char *copy;
+    size_t len;
+    (void)this_val;
+
+    text = arg_str(ctx, argc, argv, 0);
+    if (!text || !text[0]) {
+        if (text) JS_FreeCString(ctx, text);
+        return mk_fail(ctx, "BAD_ARGS", "danmaku text required");
+    }
+    len = strlen(text);
+    /*
+     * 上界 4MB：一片 360 秒正常情况下 100KB 上下，就算遇到「全站最热视频」
+     * 的顶级分片也到不了 1MB。4MB 是防呆 —— 万一 JS 侧把整个视频所有分片
+     * 拼起来传进来，宁可明确拒绝，也不要在 worker 里 malloc 一个几十 MB
+     * 的字符串把 4×A53 的内存压垮。
+     */
+    if (len > (size_t)4 * 1024 * 1024) {
+        JS_FreeCString(ctx, text);
+        return mk_fail(ctx, "TOO_LONG", "danmaku text too long");
+    }
+    /* worker 负责 free，所以这里必须自己 malloc 一份 —— JS_FreeCString 的
+     * 内存归 QuickJS 管，不能跨线程交给 worker 释放。 */
+    copy = (char *)malloc(len + 1);
+    if (!copy) {
+        JS_FreeCString(ctx, text);
+        return mk_fail(ctx, "NO_MEM", "malloc failed");
+    }
+    memcpy(copy, text, len + 1);
+    JS_FreeCString(ctx, text);
+
+    if (pb2_session_cmd(PB2_CMD_DM_FEED, 0, copy) != 0) {
+        /* 队列满：copy 还没交给 worker，这里必须自己 free，否则泄漏。 */
+        free(copy);
+        return mk_fail(ctx, "PLAYER_BUSY", "queue full");
+    }
+    return mk_ok(ctx);
+}
+
+/* dmMode(mode, fontPx) —— mode: 0=关 1=全屏 2=上半 3=上 1/4。 */
+static JSValue js_dm_mode(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    long long mode, font;
+    long long packed;
+    (void)this_val;
+
+    mode = (argc >= 1) ? arg_int(ctx, argc, argv, 0, 0) : 0;
+    font = (argc >= 2) ? arg_int(ctx, argc, argv, 1, 0) : 0;
+    if (mode < 0 || mode > 3) mode = 0;
+    if (font < 0) font = 0;
+    if (font > 200) font = 200;
+    packed = (mode & 0xff) | ((font & 0xffff) << 8);
+    if (pb2_session_cmd(PB2_CMD_DM_MODE, packed, NULL) != 0) {
+        return mk_fail(ctx, "PLAYER_BUSY", "queue full");
+    }
+    return mk_ok(ctx);
+}
+
+/* dmClear() —— 切集 / 跨分片 seek 时清空已加载的弹幕。 */
+static JSValue js_dm_clear(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    if (pb2_session_cmd(PB2_CMD_DM_CLEAR, 0, NULL) != 0) {
+        return mk_fail(ctx, "PLAYER_BUSY", "queue full");
+    }
+    return mk_ok(ctx);
+}
+
 #define PB2_EXPORTS(X) \
     X("open", js_open, 15) \
     X("pause", js_pause, 0) \
@@ -977,6 +1063,9 @@ static JSValue js_list_files(JSContext *ctx, JSValueConst this_val, int argc, JS
     X("setSound", js_set_sound, 1) \
     X("kmsProbe", js_kms_probe, 0) \
     X("logTail", js_log_tail, 1) \
+    X("dmFeed", js_dm_feed, 1) \
+    X("dmMode", js_dm_mode, 2) \
+    X("dmClear", js_dm_clear, 0) \
     X("listFiles", js_list_files, 1)
 
 static int player2_module_init(JSContext *ctx, JSModuleDef *m) {

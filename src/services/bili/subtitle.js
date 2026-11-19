@@ -37,19 +37,83 @@ export function normalizeSubtitleSettings(raw) {
   };
 }
 
-/* 选轨优先级：用户指定 lan > 中文（zh-Hans / ai-zh / zh） > AI 中文 > 第一条。
- * 返回 null 表示没有轨道。 */
-export function pickSubtitleTrack(tracks, preferredLan) {
+/* 选轨优先级：用户指定 lan > 中文（zh-Hans / ai-zh / zh） > AI 中文 > 其余按原序。
+ * 3.5.16：改成返回**有序候选表**而不是单条。
+ *   player/v2 的 subtitle.subtitles 是灰度分桶的动态结果（实测同一 bvid+cid 连
+ *   续 6 次：0 条 / A / 0 条 / B / C / 0 条，四个互不相同的 AI 产物），单个 cid
+ *   可能同时挂着好几条互不对应的 AI 字幕。只取第一条时，一旦拿到的是另一条
+ *   产物，用户看到的就是「字幕和视频完全对不上」。
+ *   于是这里把候选全排出来，由页面按「时长吻合度」逐条试。 */
+export function rankSubtitleTracks(tracks, preferredLan) {
   const list = Array.isArray(tracks) ? tracks.filter((t) => t && t.url) : [];
-  if (!list.length) return null;
+  if (!list.length) return [];
   const want = String(preferredLan || '').trim();
-  if (want) {
-    const hit = list.find((t) => t.lan === want);
-    if (hit) return hit;
-  }
-  const zh = list.find((t) => /^zh([-_]|$)/i.test(t.lan)) || list.find((t) => /^ai-zh/i.test(t.lan));
-  if (zh) return zh;
-  return list[0];
+  const out = [];
+  const push = (t) => {
+    if (!t) return;
+    if (out.some((x) => x.url === t.url)) return;
+    out.push(t);
+  };
+  if (want) list.filter((t) => t.lan === want).forEach(push);
+  list.filter((t) => /^zh([-_]|$)/i.test(t.lan)).forEach(push);
+  list.filter((t) => /^ai-zh/i.test(t.lan)).forEach(push);
+  list.forEach(push);
+  return out;
+}
+
+/* 兼容老调用方：仍返回单条（= 候选表首项），返回 null 表示没有轨道。 */
+export function pickSubtitleTrack(tracks, preferredLan) {
+  const out = rankSubtitleTracks(tracks, preferredLan);
+  return out.length ? out[0] : null;
+}
+
+/* 字幕与视频是否对得上（3.5.16 新增，纯函数）。
+ *
+ * 动机：上游会返回「同一 cid 下属于另一条音轨/另一版剪辑」的 AI 字幕，内容与
+ * 当前画面毫无关系。判定不需要理解语义，只看两条硬指标：
+ *   ① 覆盖度：最后一条 cue 的结束时间 / 视频时长。对得上的字幕基本铺满全片
+ *      （实测正常值 0.95~1.1），错片通常差一个数量级或只剩零头。
+ *   ② 起点：第一条 cue 应落在片头附近（AI 字幕一般 0~5s 起）。实测错片会出现
+ *      首句在 10 分钟视频的第 5 分钟才开始。
+ * 没有视频时长时无法判断，一律放行（ok=false 会让用户彻底没字幕）。
+ * → { ok, ratio, reason } */
+export const SUBTITLE_FIT_MIN = 0.55;
+export const SUBTITLE_FIT_MAX = 2.1;
+/* 判定「与视频对得上」的容差：|末条结束时间/时长 - 1| <= TOL。
+ *
+ * 真机实测（BV1j2sx6PE8p，73s）同一 cid 的三个候选分别是
+ *   ratio 0.78 / 1.56 / 4.19 —— 只有 0.78 是这条音轨的字幕。
+ * 所以不能只设一个「上下限」然后取第一条落在区间里的：要全量打分取
+ * 离 1.0 最近的那条。1.56 这类轻微超尾是 AI 字幕把末句拉长的常见现象，
+ * 依然比错的候选好得多，因此不判死、只降分。 */
+export const SUBTITLE_FIT_TOL = 0.55;
+/* 偏差小于这个值就不必再试下一条（省一次下载，起播更快）。
+ *
+ * 定 0.10 而不是更宽：真机 BV1qenS6REgT 上，正确那条的偏差是 0.04，而
+ * 「内容完全属于另一条音轨」的候选偏差能低到 0.24（ratio 0.76）——
+ * 阈值放 0.25 会让它提前收工，又退回错字幕。宁可多下一次文件。 */
+export const SUBTITLE_FIT_GOOD = 0.1;
+
+export function subtitleFit(cues, durationMs) {
+  const list = Array.isArray(cues) ? cues : [];
+  const dur = Math.floor(Number(durationMs) || 0);
+  if (!list.length) return { ok: false, ratio: 0, dev: 9, reason: 'empty' };
+  if (!(dur > 0)) return { ok: true, ratio: 1, dev: 0, reason: 'no-duration' };
+  const last = list[list.length - 1].toMs;
+  const ratio = last / dur;
+  const dev = Math.abs(ratio - 1);
+  let reason = 'ok';
+  if (ratio < SUBTITLE_FIT_MIN) reason = 'too-short';
+  else if (ratio > SUBTITLE_FIT_MAX) reason = 'too-long';
+  /* 起点太晚（超过全片 1/4 且超过 30s）说明这不是从片头开始的字幕。 */
+  const head = list[0].fromMs;
+  if (reason === 'ok' && head > 30000 && head > dur * 0.25) reason = 'late-start';
+  return {
+    ok: reason === 'ok' && dev <= SUBTITLE_FIT_TOL,
+    ratio: ratio,
+    dev: dev,
+    reason: reason
+  };
 }
 
 /* 上游给的是协议相对 URL（//i0.hdslb.com/...）或带 auth_key 的绝对地址。

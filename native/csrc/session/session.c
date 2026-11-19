@@ -22,6 +22,9 @@
 #include "session/cmd.h"
 #include "source/src_http.h"
 #include "third_party/gst_min.h"
+#include <unistd.h>
+
+#include "video/dm_overlay.h"
 #include "video/kms_plane.h"
 
 /* ---------------- 面板几何（X6 Pro 默认值） ----------------
@@ -531,6 +534,12 @@ typedef struct {
      */
     long long pause_started_ms;
     long long last_pos_ms;
+    /* 【3.5.15 弹幕平滑】见 dm_smooth_pos()。
+     * smooth 是自走的平滑位置，smooth_t 是它上次前进到的时刻，
+     * smooth_valid=0 表示下一帧直接从 last_pos_ms 吸附重来。 */
+    long long dm_smooth;
+    long long dm_smooth_t;
+    int dm_smooth_valid;
     unsigned long long last_abytes;
     /* 【音频停摆看门狗】见 check_audio_stall() */
     unsigned long long audio_stall_ab;      /* 上次看到的 abytes */
@@ -554,6 +563,32 @@ typedef struct {
     int plane_lost_streak;
     int eos;
     int paused;
+    /*
+     * ============ 【3.5.14 弹幕】============
+     *
+     * 这几个字段**故意不解散进上面那堆播放状态里**，因为弹幕与播放生命周期
+     * 是正交的：切集要清弹幕（dm_gen++），但播放不用重建；seek 到同一分片内
+     * 不该清，跨分片才清。把它们和播放状态混在一起，早晚会写出「seek 一下
+     * 弹幕就没了」这类 bug。
+     *
+     * dm_mode   ：PB2_DM_OFF/FULL/HALF/QUARTER（见 video/dm_overlay.h）
+     * dm_font_px：逻辑字号（像素高度），0 = 让 dm_overlay 用默认值
+     * dm_gen    ：弹幕数据代次，dm_clear 时 ++，用于丢弃迟到的旧分片
+     * dm_fed_ms ：最近一次成功喂入的时刻（诊断：能看出是不是根本没数据）
+     * dm_empty_logged：本会话是否已经打过「弹幕已开启但没有数据」的日志
+     */
+    int dm_mode;
+    int dm_font_px;
+    int dm_mode_dirty;      /* 模式/基准字号刚被 JS 改过，等下一帧用换算后的字号下发 */
+    /* 【3.5.15 字号换算】平面缓冲区比屏幕逻辑尺寸大 2~3 倍（kmssink 再做一次
+     * 硬件缩小），所以 JS 给的字号必须按比例放大到缓冲区坐标，否则字会被
+     * 一起缩小到看不清。dm_scale_pct 是"缓冲区逻辑宽 / 屏幕逻辑宽"的百分比，
+     * dm_font_eff 是已经下发给 dm_set_mode 的缓冲区字号（变化才重下发）。 */
+    int dm_scale_pct;
+    int dm_font_eff;
+    unsigned int dm_gen;
+    long long dm_fed_ms;
+    int dm_empty_logged;
 } pb2_worker_t;
 
 static pb2_worker_t g_w;
@@ -2296,10 +2331,253 @@ static int scrub_edge_green(GstPad *pad, void *vbuf) {
  * 这一层。前两轮把处理挂在分支 ghost sink pad 上，那里是 640x360 源帧，
  * 改完还要过一次 lanczos 缩放，等于白改。
  */
+/*
+ * 【3.5.14 弹幕】把弹幕烧进这一帧。
+ *
+ * 【为什么独立成函数，而不是并进 scrub_edge_green】
+ * scrub 的第一条语句就是 `if (!g_w.sw_scale) return 0;` —— 绿边只出现在
+ * X7（走 videoscale），X6 是 kmssink 硬件缩放没有绿边，所以 X6 上整个
+ * scrub 早退。弹幕必须在 X6 上也生效，两者门控条件完全不同，混在一起
+ * 迟早有人把弹幕一起门控掉。
+ *
+ * 【性能红线】本函数每帧都会被调用。所以第一条语句是模式判断，OFF 时
+ * 连 caps 都不取。开启后也只做一次 extract + 一次 fill（与 scrub 同代价，
+ * 266x472 NV12 ≈ 188KB，30fps ≈ 5.6MB/s，4×A53 上可接受；这是 X6 上
+ * 唯一能把像素放到画面上层的办法）。
+ *
+ * 【为什么用 last_pos_ms 而不是自己计时】弹幕位置必须跟视频时钟走，
+ * 否则暂停/seek/倍速全都会错位。last_pos_ms 由 video_loop 用
+ * gst_element_query_position 更新，是模块里唯一的视频时间权威。
+ */
+/* 平滑参数：每帧向真值最多收敛 40ms（30fps 下约 1.3ms/帧的追帧速度，
+ * 肉眼只会看到"略慢一点点"而看不到整段跳动）；偏差超过 1200ms 视为
+ * seek/重建，直接吸附不做慢速追赶；单帧最多按 200ms 推进，防长时间
+ * 卡住后一次性冲出去。 */
+#define PB2_DM_SMOOTH_CORR   40
+#define PB2_DM_SMOOTH_SNAP   1200
+#define PB2_DM_SMOOTH_MAX_DT 200
+
+/*
+ * 【3.5.15 弹幕平滑】给弹幕用的播放位置。
+ *
+ * 为什么不能直接用 last_pos_ms：它由 refresh_position() 更新，而后者跑在
+ * worker 的空闲分支里，节拍是 pb2_cmdq_wait(50) —— 最快 50ms 一次；更糟的是
+ * gst_element_query_position() 在带 sync 的 sink 上返回的是「最后渲染那一帧
+ * 的 PTS」，本身就量化到 33ms。两者叠加，渲染线程看到的 last_pos_ms 是
+ * 「每 50~80ms 跳一下」的台阶，弹幕横移就变成 20Hz 以下的跳格动画
+ * —— 用户报的「横向移动很卡、一顿一顿」就是它。
+ *
+ * 做法：维护一个自走的平滑量。每帧按单调时钟前进，只向真值做「有上限的
+ * 前向收敛」：绝不往回跳（往回跳在画面上就是抖动），也不无节制地追
+ * （否则 seek 之后会滑行一大段）。真值跳变超过 SNAP 阈值时直接吸附。
+ */
+static long long dm_smooth_pos(void) {
+    long long now = pb2_now_ms();
+    long long real = g_w.last_pos_ms;
+    long long dt;
+    long long err;
+
+    if (g_w.paused || g_w.eos || !g_w.pipeline_alive) {
+        g_w.dm_smooth = real;
+        g_w.dm_smooth_t = now;
+        g_w.dm_smooth_valid = 1;
+        return real;                       /* 暂停时弹幕必须定格 */
+    }
+    if (!g_w.dm_smooth_valid) {
+        g_w.dm_smooth = real;
+        g_w.dm_smooth_t = now;
+        g_w.dm_smooth_valid = 1;
+        return real;
+    }
+
+    dt = now - g_w.dm_smooth_t;
+    if (dt < 0) dt = 0;
+    if (dt > PB2_DM_SMOOTH_MAX_DT) dt = PB2_DM_SMOOTH_MAX_DT;
+    g_w.dm_smooth += dt;
+    g_w.dm_smooth_t = now;
+
+    err = real - g_w.dm_smooth;
+    if (err > PB2_DM_SMOOTH_SNAP || err < -PB2_DM_SMOOTH_SNAP) {
+        g_w.dm_smooth = real;              /* seek / 重建 / 起播：直接吸附 */
+    } else if (err > 0) {
+        if (err > PB2_DM_SMOOTH_CORR) g_w.dm_smooth += PB2_DM_SMOOTH_CORR;
+        else g_w.dm_smooth += err;         /* 只往前对齐，绝不往回跳 */
+    }
+    /* err <= 0：平滑量领先真值（query 还没刷新），保持不动等它追上来 */
+    return g_w.dm_smooth;
+}
+
+/*
+ * 【调试】touch /tmp/dm_dump 之后，下一帧合成结果会被原样写到
+ * /tmp/dm_frame.nv12（裸 NV12，无头）。开发机拉回去 `python .tmp/nv12png.py`
+ * 就能转成 PNG 直接看弹幕的大小与位置 —— 因为 KMS 平面不在 miniapp 截图里，
+ * 这是唯一能"看见"烧帧效果的途径。用完即删标记文件，不会连续落盘。
+ * 生产环境没人 touch 这个文件，成本只有每帧一次 access()。
+ */
+static void dm_debug_dump(const unsigned char *p, size_t len, int w, int h) {
+    FILE *fp;
+    if (access("/tmp/dm_dump", F_OK) != 0) return;
+    unlink("/tmp/dm_dump");
+    fp = fopen("/tmp/dm_frame.nv12", "wb");
+    if (!fp) return;
+    fwrite(p, 1, len, fp);
+    fclose(fp);
+    pb2_logf("dm: dump %dx%d %lu bytes", w, h, (unsigned long)len);
+}
+
+/* 【3.5.16 探针】统计 dm_apply 的实际调用次数与「同一 buffer 连续到达」次数。
+ * videorate 会把 30fps 归一到 ~59.88fps，若它按同一 GstBuffer 重复下推，
+ * 我们就会在**同一帧像素**上画两次不同时刻的弹幕 —— 画面上就是用户报的
+ * 「横向移动拉丝残留」。先用数据确认，再决定怎么去重。 */
+static unsigned long long g_dm_calls = 0;
+static unsigned long long g_dm_dup = 0;
+static void *g_dm_last_vbuf = NULL;
+static long long g_dm_probe_ms = 0;
+/* 已经画过弹幕的那个 buffer 对象 + 画它的时刻。
+ * videorate 的复制帧会把同一个 GstBuffer 连推两次，第二遍再画就会在同一块像素上
+ * 叠两个时刻的弹幕 —— 横向移动因此变成拉丝。这里做一次性去重。
+ * 带时间窗（PB2_DM_DUP_WIN_MS）是防 GstBufferPool 回收后复用同一对象指针：
+ * 那时间隔必然远大于一个面板帧，不会被误吞。 */
+static void *g_dm_drawn_vbuf = NULL;
+static long long g_dm_drawn_ms = 0;
+static unsigned long long g_dm_dup_skip = 0;
+#define PB2_DM_DUP_WIN_MS 40
+
+static int dm_apply(GstPad *pad, void *vbuf) {
+    static unsigned char *dm_scratch = NULL;
+    static size_t dm_scratch_cap = 0;
+    GstCaps *caps;
+    GstStructure *st;
+    const char *fmt;
+    int w = 0, h = 0, drawn = 0;
+    size_t total;
+    unsigned char *yp;
+    unsigned char *uv;
+
+    if (!vbuf) return 0;
+
+    /* 探针：无论模式开关都统计（关模式下也能看出 videorate 的放大倍数）。 */
+    g_dm_calls++;
+    if (vbuf == g_dm_last_vbuf) g_dm_dup++;
+    g_dm_last_vbuf = vbuf;
+    {
+        long long nowp = pb2_now_ms();
+        if (g_dm_probe_ms == 0) g_dm_probe_ms = nowp;
+        if (nowp - g_dm_probe_ms >= 5000) {
+            long long span = nowp - g_dm_probe_ms;
+            pb2_logf("dm: probe 5s calls=%llu dup=%llu skip=%llu (%.1f calls/s)",
+                     g_dm_calls, g_dm_dup, g_dm_dup_skip,
+                     (double)g_dm_calls * 1000.0 / (double)span);
+            g_dm_calls = 0;
+            g_dm_dup = 0;
+            g_dm_dup_skip = 0;
+            g_dm_probe_ms = nowp;
+        }
+    }
+
+    if (g_w.dm_mode == PB2_DM_OFF) {
+        g_dm_drawn_vbuf = NULL;
+        return 0;
+    }
+
+    /* videorate 复制帧：同一个 GstBuffer 刚画过，16ms 内又来一次 → 跳过。 */
+    {
+        long long nowd = pb2_now_ms();
+        if (vbuf == g_dm_drawn_vbuf && nowd - g_dm_drawn_ms < PB2_DM_DUP_WIN_MS) {
+            g_dm_dup_skip++;
+            return 0;
+        }
+    }
+
+    caps = gst_pad_get_current_caps(pad);
+    if (!caps) return 0;
+    st = gst_caps_get_structure(caps, 0);
+    if (!st) {
+        gst_caps_unref(caps);
+        return 0;
+    }
+    fmt = gst_structure_get_string(st, "format");
+    gst_structure_get_int(st, "width", &w);
+    gst_structure_get_int(st, "height", &h);
+    gst_caps_unref(caps);
+    /* 只认 NV12：其它格式要么是协商失败的中途态，要么是本项目从没走过的路径。
+     * 静默 return 是刻意的 —— 每帧打日志会把 /tmp/pb2.log 刷爆。 */
+    if (!fmt || strcmp(fmt, "NV12") != 0 || w < 16 || h < 16) return 0;
+
+    total = (size_t)w * h * 3 / 2;
+    if (gst_buffer_get_size(vbuf) < total) return 0;
+
+    if (dm_scratch_cap < total) {
+        unsigned char *p = (unsigned char *)realloc(dm_scratch, total);
+        if (!p) return 0;
+        dm_scratch = p;
+        dm_scratch_cap = total;
+    }
+    if (gst_buffer_extract(vbuf, 0, dm_scratch, total) != (size_t)total) return 0;
+
+    /*
+     * 【3.5.15 字号换算】JS 侧给的是"屏幕上的逻辑像素"，而这里拿到的是
+     * 平面缓冲区（真机 716x1280 vs 逻辑 473x266，约 2.7 倍），kmssink 会把
+     * 缓冲区整体缩小到 render-rectangle。不换算的话 24px 的字最终只剩 9px，
+     * 这就是用户报的"字号有点小，看不清"。
+     * 比例用整数百分比算，避免在 native 里引浮点。
+     */
+    if (g_w.req && g_w.req->w > 0) {
+        /*
+         * 比例 = 缓冲区宽 / 矩形宽。这里**不能**因为 rotate 是 90/270 就换成 h：
+         * 旋转是画在缓冲区内容里的（dm_map 负责），缓冲区本身与矩形同向，
+         * w 对 w、h 对 h。曾经写成 lw = h，于是 480x852 的缓冲区按 852 去比
+         * 266 的矩形，算出 320%，字号被顶到钳位上限 72 —— 屏幕上反而过大。
+         */
+        int pct = w * 100 / g_w.req->w;
+        if (pct < 100) pct = 100;          /* 缓冲区比逻辑还小：不放大 */
+        if (pct > 400) pct = 400;
+        if (pct != g_w.dm_scale_pct) {
+            g_w.dm_scale_pct = pct;
+            g_w.dm_font_eff = 0;           /* 比例变了，强制重算字号 */
+        }
+    }
+    if (g_w.dm_font_px > 0) {
+        int eff = g_w.dm_font_px * (g_w.dm_scale_pct > 0 ? g_w.dm_scale_pct : 100) / 100;
+        if (eff > 72) eff = 72;            /* 位图宽度上限决定的硬钳位 */
+        if (eff != g_w.dm_font_eff || g_w.dm_mode_dirty) {
+            int changed = (eff != g_w.dm_font_eff);
+            g_w.dm_font_eff = eff;
+            g_w.dm_mode_dirty = 0;
+            dm_set_mode(g_w.dm_mode, eff);
+            if (changed) {
+                pb2_logf("dm: 字号换算 %d -> %d（缓冲区 %dx%d 逻辑宽 %d rot=%d）",
+                         g_w.dm_font_px, eff, w, h,
+                         g_w.req ? g_w.req->w : 0, g_w.rotate);
+            }
+        }
+    }
+
+    yp = dm_scratch;
+    uv = yp + (size_t)w * h;
+    drawn = dm_render(yp, uv, w, h, g_w.rotate, dm_smooth_pos(), pb2_now_ms());
+    if (drawn > 0) {
+        gst_buffer_fill(vbuf, 0, dm_scratch, total);
+        g_dm_drawn_vbuf = vbuf;
+        g_dm_drawn_ms = pb2_now_ms();
+    }
+    dm_debug_dump(dm_scratch, total, w, h);
+
+    /* 开启了却没东西可画 —— 每个会话只提示一次，方便区分「没数据」和
+     * 「数据有但时间对不上」这两种完全不同的故障。 */
+    if (drawn == 0 && !g_w.dm_empty_logged && dm_count() == 0) {
+        g_w.dm_empty_logged = 1;
+        pb2_logf("dm: 已开启但当前没有弹幕数据（mode=%d gen=%u）",
+                 g_w.dm_mode, g_w.dm_gen);
+    }
+    return drawn;
+}
+
 static int on_vsink_buffer(GstPad *pad, GstPadProbeInfo *info, void *ud) {
     void *vb = gst_pad_probe_info_get_buffer(info);
     (void)ud;
     if (vb) scrub_edge_green(pad, vb);
+    if (vb) dm_apply(pad, vb);
     return GST_PAD_PROBE_OK;
 }
 
@@ -3312,6 +3590,17 @@ static void do_open(pb2_open_req_t *req) {
              g_w.panel_x_offset + req->x, req->y, req->w, req->h);
     g_w.vcaps_logged = 0;
     g_w.scrub_logged = 0;
+    /*
+     * 【3.5.14 弹幕】新会话 = 新视频，旧弹幕必须掉干净。
+     *
+     * 注意**不动 dm_mode**：用户刚把开关拨到「1/2」，换个视频还是想只看
+     * 上半屏，把模式重置回 OFF 属于替用户做决定。字号同理。
+     * 但数据一定要清 —— 上一次的视频的弹幕贴到新视频上是最刺眼的 bug。
+     */
+    dm_clear();
+    g_w.dm_gen++;
+    g_w.dm_fed_ms = 0;
+    g_w.dm_empty_logged = 0;
     /* videoscale 的输出 caps 必须是偶数宽高（NV12），且与 render-rectangle
      * 严格等大。差 1px 都会让 kmssink 再拉一次，画面比例就毁了。 */
     normalize_video_rect("OPEN");
@@ -3325,6 +3614,9 @@ static void do_open(pb2_open_req_t *req) {
     g_w.paused = 0;
     g_w.t_start = t0;
     g_w.last_pos_ms = req->startMs;
+    g_w.dm_smooth_valid = 0;
+    g_w.dm_smooth = req->startMs;
+    g_w.dm_smooth_t = pb2_now_ms();
     g_w.last_plane_ms = t0;
     g_w.last_marker_ms = 0;
     g_w.last_fps_ms = t0;
@@ -3962,6 +4254,7 @@ static void do_seek(long long target_ms) {
         g_w.late_grace_armed = 0;
         pb2_logf("seek(restart) done total=%lldms base=%lld", pb2_now_ms() - t0, g_w.base_ms);
         g_w.last_pos_ms = clamped;
+        g_w.dm_smooth_valid = 0;           /* seek 落点：弹幕立即吸附 */
         pb2_stats_patch_position(&g_w.stats, clamped, dur);
         pb2_stats_patch_seek(&g_w.stats, 0, clamped);
         pb2_probe_reset(&g_w.probe);
@@ -4075,6 +4368,7 @@ static void do_seek(long long target_ms) {
      */
     if (got_async) {
         g_w.last_pos_ms = clamped;
+        g_w.dm_smooth_valid = 0;           /* seek 落点：弹幕立即吸附 */
         pb2_stats_patch_position(&g_w.stats, clamped, dur);
         pb2_stats_patch_seek(&g_w.stats, 0, clamped);
     } else {
@@ -5019,6 +5313,17 @@ static void reset_session_fields(void) {
     g_w.audio_heals = 0;
     g_w.first_frame_ms = 0;
     g_w.plane_fallback_done = 0;
+    /*
+     * 【3.5.14 弹幕】会话收尾清数据，但**保留开关模式**。
+     *
+     * 用户把弹幕拨到「1/2」之后返回列表、点进另一支视频，期望是「还是 1/2」；
+     * 如果这里把 dm_mode 一起归零，等于每看一支片子都要重拨一次，很难用。
+     * 模式只在两处归 OFF：RELEASE（模块下班）和用户自己拨。
+     */
+    dm_clear();
+    g_w.dm_gen++;
+    g_w.dm_fed_ms = 0;
+    g_w.dm_empty_logged = 0;
 }
 
 static void process_cmd(pb2_cmd_t *c) {
@@ -5087,6 +5392,7 @@ static void process_cmd(pb2_cmd_t *c) {
                  * RESUME 用它把 t_start 往后推，等价于暂停期间时钟不走。
                  */
                 g_w.pause_started_ms = t0;
+                g_w.dm_smooth_valid = 0;   /* 暂停：位置冻结，恢复时重吸附 */
                 pb2_stats_patch_state(&g_w.stats, PB2_STATE_PAUSED);
                 pb2_logf("PAUSE took %lldms", pb2_now_ms() - t0);
             }
@@ -5107,6 +5413,7 @@ static void process_cmd(pb2_cmd_t *c) {
                 }
                 g_w.pause_started_ms = 0;
                 g_w.paused = 0;
+                g_w.dm_smooth_valid = 0;   /* 恢复：重新对齐当前真值 */
                 /*
                  * 【暂停恢复绝不能给迟到宽限】
                  * 恢复瞬间 PTS 全部过期的积压必须被 max-lateness=40 + qos=true
@@ -5442,6 +5749,87 @@ static void process_cmd(pb2_cmd_t *c) {
             }
             break;
         }
+        case PB2_CMD_DM_FEED: {
+            /*
+             * 【3.5.14 弹幕】整片弹幕文本喂进来（一个 360 秒分片，几十 KB）。
+             *
+             * c->ptr 由 JSAPI 线程 malloc、worker 负责 free。**任何分支都要 free**，
+             * 包括提前 return 的错误分支 —— 否则每换一片就漏几十 KB，看一集
+             * 十几片就是几百 KB，长跑必崩。
+             *
+             * 代次语义：文本里自带的是「这一片的全量弹幕」，所以直接替换掉旧的，
+             * 不做累加（累加会让 seek 回头时同一句话叠两遍）。
+             */
+            char *text = (char *)c->ptr;
+            int n;
+            c->ptr = NULL;
+            if (!text) break;
+            /* 模式下关闭时也照常入表：用户随时可能把开关打开，届时不该
+             * 再等一次网络往返。dm_overlay 在 OFF 下不做任何渲染工作。 */
+            n = dm_feed_text(text);
+            free(text);
+            g_w.dm_fed_ms = pb2_now_ms();
+            g_w.dm_empty_logged = 0;
+            pb2_logf("DM_FEED: %d 条 gen=%u mode=%d", n, g_w.dm_gen, g_w.dm_mode);
+            break;
+        }
+        case PB2_CMD_DM_MODE: {
+            /*
+             * 【3.5.14 弹幕】i64 = mode | (fontPx << 8)。
+             *
+             * 打包成一格而不是两格，是因为这两个参数永远同生同死（切换模式时
+             * 字号也要跟着当前窗口高度重算），分开发只会让「设了模式没设字号」
+             * 这种半状态出现。
+             *
+             * 首次开启时才 dm_init()：dlopen cairo/freetype + 加载 CJK 字体
+             * 是几十毫秒的重活，不能放在播放起播路径上。用户不点开关就
+             * 永远不付出这个代价。初始化失败只打一次日志并不再重试
+             * （见 dm_overlay.c），弹幕功能静默关闭，播放不受影响。
+             */
+            int mode = (int)(c->i64 & 0xff);
+            int font_px = (int)((c->i64 >> 8) & 0xffff);
+            if (mode < PB2_DM_OFF || mode > PB2_DM_QUARTER) mode = PB2_DM_OFF;
+            if (mode != PB2_DM_OFF && !dm_ready()) {
+                if (dm_init() != 0) {
+                    pb2_logf("DM_MODE: overlay 初始化失败，弹幕保持关闭");
+                    mode = PB2_DM_OFF;
+                }
+            }
+            g_w.dm_mode = mode;
+            g_w.dm_font_px = font_px;
+            /*
+             * 这里不能直接 dm_set_mode(mode, font_px)：font_px 是 JS 按屏幕
+             * 逻辑像素给的基准值（266 高上算出来 24），真正画在 476x854 缓冲区
+             * 上的字号是 dm_apply 里按比例换算出来的 43。早先在这里直接下发
+             * 基准值，用户每切一次档就把字号打回 24，表现为「刚打开字挺大，
+             * 切一下模式就变小了」。正确做法：只记录 + 置脏，由 dm_apply 带着
+             * 换算值统一下发。OFF 例外 —— 关闭必须立刻生效，不能等下一帧。
+             */
+            if (mode == PB2_DM_OFF) {
+                dm_set_mode(PB2_DM_OFF, g_w.dm_font_px);
+                g_w.dm_mode_dirty = 0;
+            } else {
+                g_w.dm_mode_dirty = 1;
+            }
+            g_w.dm_empty_logged = 0;
+            pb2_logf("DM_MODE: mode=%d font_px=%d count=%d", mode, font_px, dm_count());
+            break;
+        }
+        case PB2_CMD_DM_CLEAR:
+            /*
+             * 【3.5.14 弹幕】切集 / 跨分片 seek 时清空。
+             *
+             * 代次 ++ 是关键：JS 侧拿到 seg.so 是异步的，清空之后可能还有一个
+             * 早先发出的请求在路上。它回来时页面会发现「session.gen 变了」而
+             * 丢弃 —— 但万一漏了，native 侧这一代次至少能在日志里对上，不至于
+             * 出现「上一集的弹幕贴在这一集上」这种无解排查。
+             */
+            dm_clear();
+            g_w.dm_gen++;
+            g_w.dm_fed_ms = 0;
+            g_w.dm_empty_logged = 0;
+            pb2_logf("DM_CLEAR: gen=%u", g_w.dm_gen);
+            break;
         case PB2_CMD_STOP:
             pb2_logf("STOP");
             teardown_pipeline();
@@ -5460,6 +5848,22 @@ static void process_cmd(pb2_cmd_t *c) {
             teardown_pipeline();
             reap_dying();
             reset_session_fields();
+            /*
+             * 【3.5.14 弹幕】RELEASE 是「整个播放模块要下班了」，与 STOP
+             * （只是停这一支）不同：这里要把 dlopen 的 cairo/freetype、
+             * 字体 face、位图缓存全部还回去。
+             *
+             * dm_shutdown() 里把 g_dm.ready 清 0，所以下一次 PB2_CMD_DM_MODE
+             * 会重新 dm_init() —— 用户返回列表再进另一支视频，弹幕照样能用。
+             * 紧接着把模式也归 OFF：一个已经 shutdown 的 overlay 留着
+             * mode=HALF 没有任何意义，反而会在 dm_apply 里白跑一次 caps。
+             */
+            dm_shutdown();
+            g_w.dm_mode = PB2_DM_OFF;
+            g_w.dm_font_px = 0;
+            g_w.dm_mode_dirty = 0;
+    g_w.dm_scale_pct = 0;
+    g_w.dm_font_eff = 0;
             pb2_audio_restore();
             pb2_stats_patch_state(&g_w.stats, PB2_STATE_IDLE);
             break;
@@ -5617,6 +6021,9 @@ static void *worker_main(void *arg) {
     teardown_pipeline();
     reap_dying();
     pb2_audio_restore();
+    /* 【3.5.14 弹幕】线程要退出了，把 dlopen 的库句柄/字体/缓存一并还回去。
+     * 放在这里而不是 teardown_pipeline 里：seek/重建不该重载字体。 */
+    dm_shutdown();
     if (g_w.req) {
         pb2_open_req_free(g_w.req);
         g_w.req = NULL;
