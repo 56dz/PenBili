@@ -987,7 +987,7 @@ import {
 import { fetchPlayerV2, fetchPlayerV2Tracks } from '../../services/bili/player_v2.js';
 import {
   SUBTITLE_SETTINGS_KEY, normalizeSubtitleSettings, pickSubtitleTrack,
-  rankSubtitleTracks, subtitleFit, subtitleKeywordFit,
+  rankSubtitleTracks, subtitleFit, subtitleKeywordFit, SUBTITLE_KW_KEYS,
   SUBTITLE_FIT_GOOD, fetchSubtitleCues, cueAt
 } from '../../services/bili/subtitle.js';
 /* 【播放控件】中列被切成「顶部悬浮条 / 视频洞 / 字幕带 / 控制条」四段，
@@ -1033,6 +1033,21 @@ const EP_TAB_H = 22;
  * 用户看到的就是「字幕和视频对不上」。放大到 8 覆盖整池；每条几十~几百 KB，
  * 并发下载实测 1~1.6s，比挑错字幕可接受得多。 */
 const CC_TRY_MAX = 8;
+/* 【3.5.24】起播拉字幕最多试几轮，以及轮与轮之间的退避。
+ *
+ * 症状（用户）：上一支视频开着字幕，打开下一支时字幕键仍显示「开」，
+ * 画面上却没有字幕；把开关关掉再打开就出来了。
+ *
+ * 根因不是判据太松太紧，而是**只试了一轮**：字幕键显示的是用户偏好 cc.on，
+ * 而画面有没有字幕取决于这一轮有没有真的捞到合格产物。上游 player/v2 的
+ * 字幕列表是灰度分桶的随机结果（实测同一 cid 连发 30 次能拿到 20 份互不
+ * 相同、且多数与本片无关的产物），起播那一轮没捞到就是「开着却没有」；
+ * 用户关开一次恰好等于「再来一轮」，于是又能出了。
+ * 所以把「再来一轮」做进起播流程：一轮不合格就隔一会儿换个池子重试。 */
+const CC_ROUND_MAX = 3;
+const CC_ROUND_GAP_MS = 800;
+/* 后续轮次压低单轮请求数（首轮 9 发），避免三轮 27 发全部打出去撞风控。 */
+const CC_RETRY_TRIES = 5;
 /* 字幕位置最多外推多久：1s 主轮询间隔 + 200ms 余量。超过就说明 tick 被拖住了，
  * 宁可让字幕停一下，也不要它跑到画面前面去。 */
 const CC_EXTRAP_MAX_MS = 1200;
@@ -2919,7 +2934,8 @@ export default {
         return;
       }
       this.cc.tracks = info.subtitles;
-      await this.loadCcCues(myGen, info.subtitles);
+      /* 用户手动关开/切语言时同样走重试流程 —— 一次没捞到不该让用户再点一次。 */
+      await this.pullCcUntilGood(myGen, info);
     },
     /* 3.5.16：候选池逐条试。
      * 上游对同一 cid 会同时挂几条互不对应的 AI 字幕产物（灰度分桶），
@@ -2935,7 +2951,7 @@ export default {
         logWarn('[cc] 无轨道可用 tracks=' + ((tracks && tracks.length) || 0) +
           ' login=' + (this.hasLogin ? 1 : 0));
         await this.applyVideoGeometry('cc');
-        return;
+        return false;
       }
       const s0 = this.play.session;
       const durMs = s0 && s0.durationMs > 0 ? s0.durationMs : 0;
@@ -2968,7 +2984,7 @@ export default {
          * 直接走人，但 loading 只能在「自己仍是最新一发」时复位，否则会把
          * 后来者刚置的 true 打回 false（表现为「字幕加载中」闪一下就没了）。 */
         if (myReq === this.cc.req) this.cc.loading = false;
-        return;
+        return false;
       }
       for (let i = 0; i < rs.length; i++) {
         const t = cands[i];
@@ -2991,7 +3007,35 @@ export default {
           ' ' + fit.reason);
         /* kwFit.keys 太少时判据不可用（ok=false 但并非「不合格」），
          * 这种稿件一律放行，不能因为标题太短就把正确字幕丢掉。 */
-        const kwBad = kwFit.keys >= 5 && !kwFit.ok;
+        /* 【3.5.25】关键词判据分三档，而不是一刀切的硬否决。
+         *
+         * 起因是真机上一支 83 秒的鬼畜稿（BV1mUnm6qEbu《领域展开！谁是最强
+         * 狙击手？》）：**正确字幕是 16 条、覆盖 0.97、偏差 0.02**，长度证据
+         * 几乎完美；但标题是玩梗的（「领域展开」出自咒术回战，正文根本不会
+         * 出现），9 个标题关键词只命中 1 个（「狙击」），kw=0.111。
+         * 旧写法一刀切判它不合格，三轮重试全被拦下 —— 用户看到的就是
+         * 「字幕键开着却没有字幕」。同一支稿子里真正错挂的产物覆盖是
+         * 2.67 / 35.39 / 19.36，长度判据本来就挡得住。
+         *
+         * 但也不能只看长度：BV1tVnb6UEmv《耗时三年！打造最好用的远程串流
+         * 软件》（661s）的候选池里**一份本片的都没有**，其中 267 条那条
+         * 覆盖 0.92、偏差 0.08、kw=0.000 —— 偏差极小却完全是别人的字幕
+         * （开头「这位尊敬的委员」）。所以「偏差小就放行」同样是错的。
+         *
+         * 三档规则：
+         *   ① kw >= SUBTITLE_KW_MIN（0.18）           → 强证据，放行；
+         *   ② 命中 >= 1 个关键词 **且** 偏差 <= GOOD    → 长度+弱关键词，放行；
+         *   ③ 其余（一个关键词都不沾，或偏差偏大）      → 判不合格。
+         * 关键词少于 SUBTITLE_KW_KEYS 时判据不可用，一律放行（标题太短不能
+         * 拿来当证据）。
+         *
+         * 回放四支真实候选池：玩梗稿的正确字幕从「全部被拦」变成放行；
+         * 全错挂的 BV1tVnb6UEmv 仍然一条都不放；污染稿 BV1VQsv6QEhV 漏网的
+         * 214 条（偏差 0.14、仅命中 1 个）被拦下；Sora / Google 送中那两支
+         * 的正确产物照常放行。 */
+        const kwUsable = kwFit.keys >= SUBTITLE_KW_KEYS;
+        const kwBad = kwUsable && !kwFit.ok &&
+          !(kwFit.hit > 0 && fit.dev <= SUBTITLE_FIT_GOOD);
         const good = fit.ok && !kwBad;
         if (!best || (good && !bestGood) ||
             (good === bestGood && fit.dev < best.fit.dev)) {
@@ -3006,7 +3050,7 @@ export default {
         this.cc.status = '字幕下载失败：' + (lastErr || '未知错误');
         logWarn('[cc] ' + this.cc.status);
         await this.applyVideoGeometry('cc');
-        return;
+        return false;
       }
       /* 【3.5.22】候选全都不合格时不要硬塞。
        * 实测 BV1VQsv6QEhV：上游给同一 cid 挂了 20 份互不相关的 AI 产物
@@ -3022,7 +3066,7 @@ export default {
           ' kw=' + best.kw.kw.toFixed(3) + '(' + best.kw.hit + '/' + best.kw.keys + ')' +
           ' -> 不出字幕');
         await this.applyVideoGeometry('cc');
-        return;
+        return false;
       }
       this.cc.lanDoc = best.t.lanDoc;
       this.cc.cid = myCid;
@@ -3043,6 +3087,56 @@ export default {
         (perfect ? ' (perfect)' : '') +
         ' first=' + (c0 ? (c0.fromMs + '-' + c0.toMs + 'ms ' + c0.text.slice(0, 12)) : 'none'));
       await this.applyVideoGeometry('cc');
+      /* 【3.5.24】返回「这一轮到底有没有真的拿到字幕」：
+       * 调用方（pullCcUntilGood）靠它决定要不要换池子重试。
+       * 注意不能只看 cues.length —— 上面几处失败分支也会写 cues=[]，
+       * 只有走到这里才代表选中的这条已通过覆盖率 + 关键词双判据。 */
+      return true;
+    },
+    /* 【3.5.24】「拉字幕」这件事的整体流程：最多 CC_ROUND_MAX 轮，
+     * 每轮 = 抓一批候选池 → 逐条下载打分 → 双判据筛。
+     * 首轮直接复用调用方已经拿到的 player/v2 结果（省一次往返）；
+     * 后续轮次重新抓池子 —— 池子是随机的，换一个池子往往就有了。
+     *
+     * 返回 true 表示字幕已落库；false 表示所有轮次都没捞到合格产物，
+     * 此时 this.cc.status 里有一句给用户看的原因。
+     */
+    async pullCcUntilGood(myGen, firstInfo) {
+      const s = this.play.session;
+      if (!s || s.live || !this.cc.on) return false;
+      let info = firstInfo;
+      for (let round = 1; round <= CC_ROUND_MAX; round++) {
+        if (this.gen !== myGen) return false;
+        if (info && info.ok) {
+          this.cc.tracks = info.subtitles;
+          if (await this.loadCcCues(myGen, info.subtitles)) return true;
+        } else {
+          logWarn('[cc] 第 ' + round + ' 轮 player/v2 失败: ' +
+            ((info && info.message) || '未知'));
+        }
+        if (round >= CC_ROUND_MAX) break;
+        if (this.gen !== myGen) return false;
+        logWarn('[cc] 第 ' + round + '/' + CC_ROUND_MAX + ' 轮没捞到合格字幕，换池子重试');
+        await this.sleep(CC_ROUND_GAP_MS * round);
+        if (this.gen !== myGen) return false;
+        let mixinKey = '';
+        try {
+          const m = await ensureMixinResult(this.makeCtx(myGen));
+          if (m.ok) mixinKey = m.key;
+        } catch (e) { /* WBI 只用于回退，拿不到就直连 */ }
+        if (this.gen !== myGen) return false;
+        try {
+          info = await fetchPlayerV2Tracks(this.client, s.bvid, s.cid, {
+            mixinKey: mixinKey,
+            nowSec: () => Math.floor(Date.now() / 1000),
+            tries: CC_RETRY_TRIES
+          });
+        } catch (e) {
+          logWarn('[cc] 重试 player/v2 异常: ' + ((e && e.message) || e));
+          info = { ok: false, message: (e && e.message) || '请求异常' };
+        }
+      }
+      return false;
     },
     /* 上下让位量（逻辑像素）+ 全屏标记。native 的 render-rectangle 与 falcon
      * 挖洞同源；全屏标记让 play_session 把信箱盒子的 x/width 也换成整个视口
@@ -3364,8 +3458,23 @@ export default {
         nowSec: () => Math.floor(Date.now() / 1000)
       });
       if (this.gen !== myGen) return;
+      /* 【3.5.24】首轮 player/v2 就失败（风控 / 网络抖）时，
+       * 旧代码直接 return，字幕一律没机会 —— 而字幕键显示的是用户偏好 cc.on，
+       * 于是又出现「开着却没有」。先让重试流程把池子再抓几轮，再决定要不要报错。 */
+      if (this.cc.on && !info.ok) {
+        try {
+          await this.pullCcUntilGood(myGen, info);
+        } catch (e) {
+          logWarn('[cc] 起播拉字幕异常: ' + ((e && e.message) || e));
+        }
+        if (this.gen !== myGen) return;
+      }
       if (!info.ok) {
-        this.cc.status = '字幕/互动信息获取失败';
+        /* 重试也没救回来、且一句字幕都没有时才报这句；
+         * 如果重试期间已经拿到字幕（info 只是这一发失败），不能覆盖掉状态。 */
+        if (!this.cc.cues.length && !this.cc.status) {
+          this.cc.status = '字幕/互动信息获取失败';
+        }
         logWarn('[extras] player/v2 fail: ' + info.message);
         return;
       }
@@ -3380,7 +3489,15 @@ export default {
        * 用户希望字幕默认不开（与弹幕相反），因此这里不再代人做决定：
        * 只有 this.cc.on 为真（用户自己在左列点了字幕键，或在「我的」里开过并已持久化）
        * 才去拉字幕文件。拉不到也不回退开关 —— 让 ccSettingHint 把原因写出来。 */
-      if (this.cc.on) await this.loadCcCues(myGen, info.subtitles);
+      /* 【3.5.24】这里不再直接 loadCcCues 一次算数：一轮没捞到就换池子重试。
+       * 用户看到的「字幕键开着却没有字幕、关开一次才出」就是一轮不够导致的。 */
+      if (this.cc.on) {
+        try {
+          await this.pullCcUntilGood(myGen, info);
+        } catch (e) {
+          logWarn('[cc] 起播拉字幕异常: ' + ((e && e.message) || e));
+        }
+      }
       if (info.interactive) {
         logWarn('[interact] graph_version=' + info.graphVersion + ' bvid=' + s.bvid);
         await this.startInteractive(myGen, info.graphVersion, item);

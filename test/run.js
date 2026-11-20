@@ -5222,6 +5222,48 @@ async function main() {
     assert.ok(sub.SUBTITLE_FIT_GOOD < 0.2, '提前收工阈值必须比错片的 0.24 更严');
   });
 
+  test('页面接线: 长度证据极强时不因关键词弱而误杀正确字幕（3.5.25）', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const vue = fs.readFileSync(path.join(__dirname, '..', 'src', 'pages', 'index', 'index.vue'), 'utf8');
+    /* 真机回归（BV1mUnm6qEbu《领域展开！谁是最强狙击手？》，83s）：
+     * 正确字幕 16 条、覆盖 0.97、偏差 0.03，但标题是玩梗的 —— 9 个标题关键词
+     * 只命中 1 个（kw=0.111）。旧写法直接判不合格，用户看到「开着却没有字幕」。
+     * 现在偏差 <= SUBTITLE_FIT_GOOD 时不看关键词。 */
+    /* 真机反例 A（BV1mUnm6qEbu，83s 鬼畜稿，标题玩梗）：正确字幕 16 条、
+     * 覆盖 0.97、偏差 0.02，但 9 个标题关键词只命中 1 个（kw=0.111）。
+     * 一刀切会误杀 → 命中 >=1 且偏差 <= GOOD 时必须放行。 */
+    assert.ok(/kwFit\.hit > 0 && fit\.dev <= SUBTITLE_FIT_GOOD/.test(vue),
+      '命中至少一个关键词且偏差极小时要放行（否则玩梗标题的正确字幕被误杀）');
+    /* 真机反例 B（BV1tVnb6UEmv，661s，池子里一份本片的都没有）：267 条那条
+     * 覆盖 0.92、偏差 0.08 却 kw=0.000 → 「偏差小就放行」同样错。
+     * 所以豁免必须同时要求「至少命中一个关键词」。 */
+    assert.ok(/kwFit\.hit > 0/.test(vue),
+      '偏差小时放行仍要求命中至少一个关键词，否则错挂产物会被放过');
+  });
+
+  test('页面接线: 起播拉字幕要换池子重试（3.5.24 开着字幕却没有字幕）', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const vue = fs.readFileSync(path.join(__dirname, '..', 'src', 'pages', 'index', 'index.vue'), 'utf8');
+    /* 症状：上一支开着字幕，打开下一支时按钮仍显示「开」但画面没有字幕，
+     * 关掉再打开才出。根因是起播只试了一轮池子，而上游分桶是随机的。
+     * 修法：initExtras / reloadCc 都走 pullCcUntilGood，多轮换池子。 */
+    assert.ok(/async pullCcUntilGood\(myGen, firstInfo\)/.test(vue),
+      '必须有 pullCcUntilGood 这个多轮重试入口');
+    assert.ok(/const CC_ROUND_MAX = 3;/.test(vue), '最多重试 3 轮');
+    assert.ok(/await this\.pullCcUntilGood\(myGen, info\);/.test(vue),
+      'initExtras 必须走重试流程，不能只 loadCcCues 一次');
+    assert.ok(/if \(await this\.loadCcCues\(myGen, info\.subtitles\)\) return true;/.test(vue),
+      '一轮真的拿到字幕才收工');
+    /* loadCcCues 必须在成功路径返回 true、在各失败路径返回 false，
+     * 重试流程靠这个返回值判断要不要换池子。 */
+    const okTail = vue.indexOf("' first=' + (c0 ?");
+    assert.ok(okTail > 0, '定位 loadCcCues 成功日志失败');
+    assert.ok(/\breturn true;/.test(vue.slice(okTail, okTail + 700)),
+      'loadCcCues 成功路径必须 return true');
+  });
+
   test('页面接线: 字幕候选全不合格时不出字幕（3.5.22 上游字幕污染）', () => {
     const fs = require('fs');
     const path = require('path');
@@ -5235,11 +5277,16 @@ async function main() {
       '不合格时必须清空 cues 并说明原因');
     assert.ok(/const kwFit = subtitleKeywordFit\(r\.cues,/.test(vue),
       '3.5.23 必须调用标题关键词判据');
-    assert.ok(/const kwBad = kwFit\.keys >= 5 && !kwFit\.ok;/.test(vue),
-      '关键词样本太少时要放行（不能因为标题短就丢字幕）');
+    assert.ok(/subtitleKeywordFit, SUBTITLE_KW_KEYS,/.test(vue),
+      'SUBTITLE_KW_KEYS 必须从 subtitle.js 导入，否则运行期 ReferenceError');
+    assert.ok(/const kwUsable = kwFit\.keys >= SUBTITLE_KW_KEYS;/.test(vue),
+      '关键词判据可用性要单独判断（样本太少时一律放行）');
+    assert.ok(/const kwBad = kwUsable && !kwFit\.ok &&/.test(vue),
+      'kwBad 必须以 kwUsable 为前置条件');
     const seg = vue.slice(vue.indexOf('if (!best.good) {'), vue.indexOf('if (!best.good) {') + 700);
     assert.ok(/this\.cc\.cid = myCid;/.test(seg), '归属 cid 仍要记（避免下次误判为串片）');
-    assert.ok(/return;/.test(seg), '不合格分支必须早退，不落到下面写 cc.cues');
+    assert.ok(/return false;/.test(seg),
+      '不合格分支必须早退（3.5.24 起返回 false），不落到下面写 cc.cues');
   });
 
   test('player/v2: 字幕分桶导致偶发空列表 → 多取几次合并候选', async () => {
