@@ -135,8 +135,12 @@ function mergeTracks(merged, seen, list) {
  * opts: { mixinKey?, nowSec?, tries?, wantTracks?, shouldStop? }
  * → { ok:true, subtitles, tries, interactive, graphVersion, ... } | { ok:false, ... }
  */
-export const PLAYER_V2_TRIES = 5;
-export const PLAYER_V2_WANT = 4;
+/* 【3.5.22】实测同一 cid 的 AI 字幕产物池 >=6 条（并发 8 次拿到 6 个不同 url），
+ * 而其中只有 2 条是真正属于这一片音轨的（末条时间戳 / 时长 == 1.00）。
+ * 取 4 条时经常整池里一条对的都没捞到，所以把抓取次数放到 9（第 1 发探路 + 8 发并发）。
+ * 单次 player/v2 约 1.1s，9 发并发实测 0.6~0.9s，起播感知不到。 */
+export const PLAYER_V2_TRIES = 9;
+export const PLAYER_V2_WANT = 8;
 /* 保留给调用方显式限速用（默认 0：并发发，不排队等）。 */
 export const PLAYER_V2_GAP_MS = 0;
 

@@ -5211,10 +5211,35 @@ async function main() {
     /* 边界常量必须与页面注释一致 */
     assert.strictEqual(sub.SUBTITLE_FIT_MIN, 0.55);
     assert.strictEqual(sub.SUBTITLE_FIT_MAX, 2.1);
-    assert.strictEqual(sub.SUBTITLE_FIT_TOL, 0.55);
+    assert.strictEqual(sub.SUBTITLE_FIT_TOL, 0.30);
+    /* 短片上正确产物 dev 可达 0.22，阈值得容得下；错片 dev 0.52 必须被判掉 */
+    assert.ok(sub.subtitleFit([{ fromMs: 0, toMs: 73000 * 0.78, text: 'x' }], 73000).ok,
+      'ratio 0.78 的短片正确产物必须判合格');
+    assert.ok(!sub.subtitleFit([{ fromMs: 0, toMs: 1716202 * 0.48, text: 'x' }], 1716202).ok,
+      'ratio 0.48 的错挂产物必须判不合格');
     assert.ok(sub.SUBTITLE_FIT_GOOD < sub.SUBTITLE_FIT_TOL);
     /* 0.24 偏差的候选（实测是错的那版）不能被当成「够好」而提前收工 */
     assert.ok(sub.SUBTITLE_FIT_GOOD < 0.2, '提前收工阈值必须比错片的 0.24 更严');
+  });
+
+  test('页面接线: 字幕候选全不合格时不出字幕（3.5.22 上游字幕污染）', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const vue = fs.readFileSync(path.join(__dirname, '..', 'src', 'pages', 'index', 'index.vue'), 'utf8');
+    /* 实测 BV1VQsv6QEhV：30 次请求拿到 20 份互不相关的 AI 产物，
+     * 最好那条 dev 也超阈值 —— 此时必须清空 cues 并给出可读原因，
+     * 不能「退回首条」把错片塞给用户。 */
+    /* 3.5.23 起「不合格」= 覆盖率不过 **或** 标题关键词命中率不过（good）。 */
+    assert.ok(/if \(!best\.good\) \{/.test(vue), '必须有「候选全不合格」分支');
+    assert.ok(/this\.cc\.cues = \[\];[\s\S]{0,200}?上游字幕与视频不符/.test(vue),
+      '不合格时必须清空 cues 并说明原因');
+    assert.ok(/const kwFit = subtitleKeywordFit\(r\.cues,/.test(vue),
+      '3.5.23 必须调用标题关键词判据');
+    assert.ok(/const kwBad = kwFit\.keys >= 5 && !kwFit\.ok;/.test(vue),
+      '关键词样本太少时要放行（不能因为标题短就丢字幕）');
+    const seg = vue.slice(vue.indexOf('if (!best.good) {'), vue.indexOf('if (!best.good) {') + 700);
+    assert.ok(/this\.cc\.cid = myCid;/.test(seg), '归属 cid 仍要记（避免下次误判为串片）');
+    assert.ok(/return;/.test(seg), '不合格分支必须早退，不落到下面写 cc.cues');
   });
 
   test('player/v2: 字幕分桶导致偶发空列表 → 多取几次合并候选', async () => {
@@ -5253,8 +5278,8 @@ async function main() {
     const client3 = { request: async () => ({ ok: false, stage: 'api', code: -403, message: '风控' }) };
     const r3 = await pv2.fetchPlayerV2Tracks(client3, 'BV1UE411y7Wy', 127486603, { gapMs: 1 });
     /* 默认轮数要够多：实测 6 轮才凑齐 4 个候选 */
-    assert.strictEqual(pv2.PLAYER_V2_TRIES, 5);
-    assert.strictEqual(pv2.PLAYER_V2_WANT, 4);
+    assert.strictEqual(pv2.PLAYER_V2_TRIES, 9);
+    assert.strictEqual(pv2.PLAYER_V2_WANT, 8);
     assert.ok(!r3.ok && r3.code === -403);
     /* 参数非法沿用 fetchPlayerV2 的校验 */
     const r4 = await pv2.fetchPlayerV2Tracks(client3, 'nope', 1, { gapMs: 1 });
@@ -5270,7 +5295,7 @@ async function main() {
     assert.ok(/rankSubtitleTracks\(tracks, this\.cc\.lan\)/.test(vue), '候选要按语言排序');
     assert.ok(/subtitleFit\(r\.cues, durMs\)/.test(vue), '必须用覆盖度判定');
     assert.ok(/fit\.dev < best\.fit\.dev/.test(vue), '候选必须按偏差最小选，不是先到先得');
-    assert.ok(/const CC_TRY_MAX = 4;/.test(vue), '候选上限要够（实测同一 cid 有 3~6 个产物）');
+    assert.ok(/const CC_TRY_MAX = 8;/.test(vue), '候选上限要够（实测同一 cid 产物池 >=6，取 4 会整池捞不到对的）');
     /* 全部候选都对不上时不能把字号 / cues 清空到用户没字幕 */
     const from = vue.indexOf('async loadCcCues(myGen, tracks)');
     const to = vue.indexOf('/* 上下让位量', from);
@@ -5300,9 +5325,19 @@ async function main() {
     /* 代次提前返回不能把 loading 一直挂着 */
     const at = vue.indexOf('const rs = await Promise.all(tasks);');
     assert.ok(at > 0, '找不到并发下载段');
-    const seg = vue.slice(at, at + 600);
-    assert.ok(/if \(this\.gen !== myGen\) \{[\s\S]{0,200}?this\.cc\.loading = false;/.test(seg),
-      '代次变化提前返回前必须复位 loading');
+    const seg = vue.slice(at, at + 800);
+    /* 【3.5.21】守卫从「仅代次」升级成「代次 + 请求序号」：同一 gen 内
+     * initExtras 与 onCcToggle→reloadCc 会并发，只判 gen 挡不住晚到的旧请求。 */
+    assert.ok(/if \(this\.gen !== myGen \|\| myReq !== this\.cc\.req\)/.test(seg),
+      '并发下载回来必须同时校验代次与请求序号');
+    assert.ok(/if \(myReq === this\.cc\.req\) this\.cc\.loading = false;/.test(seg),
+      '只有仍是最新一发请求时才允许复位 loading');
+    /* 【3.5.21 字幕串片】cues 必须记归属 cid，显示前校验它属于当前 session。 */
+    assert.ok(/ccOwned\(\) \{[\s\S]{0,260}?this\.cc\.cid === cur/.test(vue),
+      '必须有「cues 归属当前 cid」的判据');
+    assert.ok(/if \(!this\.ccActive \|\| !this\.ccOwned\) return '';/.test(vue),
+      'subtitleText 必须先过归属判据再取句子');
+    assert.ok(/this\.cc\.cid = myCid;/.test(vue), '成功落库时必须记下 cid');
   });
 
   test('subtitle: 下载纯 JSON（无 code 字段）→ cues', async () => {

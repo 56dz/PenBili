@@ -987,7 +987,8 @@ import {
 import { fetchPlayerV2, fetchPlayerV2Tracks } from '../../services/bili/player_v2.js';
 import {
   SUBTITLE_SETTINGS_KEY, normalizeSubtitleSettings, pickSubtitleTrack,
-  rankSubtitleTracks, subtitleFit, SUBTITLE_FIT_GOOD, fetchSubtitleCues, cueAt
+  rankSubtitleTracks, subtitleFit, subtitleKeywordFit,
+  SUBTITLE_FIT_GOOD, fetchSubtitleCues, cueAt
 } from '../../services/bili/subtitle.js';
 /* 【播放控件】中列被切成「顶部悬浮条 / 视频洞 / 字幕带 / 控制条」四段，
  * 四段之和恒等于视口高；native 的 render-rectangle 用同一份数字收缩。
@@ -1027,10 +1028,11 @@ const QR_QUIET = 4;
  * 右列总高 253（body）+ 27（输入框），这条 22 从 body 里扣 —— 评论少看一行，
  * 换来「分P / 合集」永远在视线里。不加高整列：那 22px 会从视频区抢。 */
 const EP_TAB_H = 22;
-/* 字幕候选最多试几条：实测同一 cid 会挂 3~6 个互不相同的 AI 产物，
- * 每条都要下一次字幕文件（几十~几百 KB）。取 4 是在「找准」与「起播别太久」
- * 之间的折中；一旦某条偏差 <= SUBTITLE_FIT_GOOD 就立刻收工，正常只下一次。 */
-const CC_TRY_MAX = 4;
+/* 【3.5.22】字幕候选最多试几条。实测同一 cid 的 AI 产物池 >=6（并发 8 次拿到
+ * 6 个互不相同 url，只有 2 条 ratio=1.00），取 4 经常整池捞不到对的那条，
+ * 用户看到的就是「字幕和视频对不上」。放大到 8 覆盖整池；每条几十~几百 KB，
+ * 并发下载实测 1~1.6s，比挑错字幕可接受得多。 */
+const CC_TRY_MAX = 8;
 /* 字幕位置最多外推多久：1s 主轮询间隔 + 200ms 余量。超过就说明 tick 被拖住了，
  * 宁可让字幕停一下，也不要它跑到画面前面去。 */
 const CC_EXTRAP_MAX_MS = 1200;
@@ -1251,7 +1253,14 @@ export default {
         lanDoc: '',
         status: '',
         loading: false,
-        posMs: 0
+        posMs: 0,
+        /* 【3.5.21】cues 归属的 cid。cues 脱离了「属于哪个视频」就必然串片：
+         * 只要上一支视频的 cues 还在、新视频已经在播，渲染出来的就是
+         * 「新画面 + 旧字幕」。subtitleText() 用 ccOwned 校验这个字段。 */
+        cid: 0,
+        /* 每次拉取的字幕请求序号：同一 gen 内两次调用（initExtras 与
+         * onCcToggle→reloadCc）靠它分先后，晚到的旧请求不能覆盖新结果。 */
+        req: 0
       },
       /* 【3.5.14】弹幕：模式持久化在 bili_dm_settings，列表按 6 分钟分片拉取。
        * 为什么必须烧进视频帧：KMS 平面里视频层（Esmart1-win0, zpos=2）
@@ -1447,6 +1456,14 @@ export default {
     ccActive() {
       return this.cc.on && this.cc.cues.length > 0 && !this.isLivePlay && this.mode === 'play';
     },
+    /* 【3.5.21】cues 是否属于**当前这支视频**。
+     * 这个判据只挡「显示哪一句」，不进 ccActive —— 后者同时决定底部字幕带的
+     * 高度（bands.cc），换片瞬间翻成 false 会让视频矩形变高并触发 setVideoRect，
+     * native 侧那是走 seek 重建整条管线（黑屏 0.4~0.6s），代价远大于收益。 */
+    ccOwned() {
+      const cur = (this.play.session && this.play.session.cid) || 0;
+      return cur > 0 && this.cc.cid === cur;
+    },
     /* 【已下线】全屏态。用户 m20514：主播放界面已经填充满了，全屏按钮与
      * 整块面板都拆了。现在的沉浸态是 ui.side（点画面藏/显左右两列），
      * 它不改中列宽高，只把字幕盒子按整个视口居中（见 bandPx / buildVideoRect）。
@@ -1632,7 +1649,8 @@ export default {
       return { marginLeft: this.loadAnim.dx + 'px' };
     },
     subtitleText() {
-      return this.ccActive ? cueAt(this.cc.cues, this.cc.posMs) : '';
+      if (!this.ccActive || !this.ccOwned) return '';
+      return cueAt(this.cc.cues, this.cc.posMs);
     },
     ccStatusLine() {
       if (!this.cc.on) return 'CC 字幕：关';
@@ -2682,6 +2700,8 @@ export default {
       this.cc.status = '';
       this.cc.loading = false;
       this.cc.posMs = 0;
+      this.cc.cid = 0;
+      this.cc.req = 0;
       /* 弹幕：模式持久化、数据不持久化 —— 换一集还该按原模式显示，
        * 但上一个稿子的弹幕必须清干净（否则会看到别人视频的弹幕）。 */
       this.resetDm();
@@ -2910,6 +2930,7 @@ export default {
       const cands = rankSubtitleTracks(tracks, this.cc.lan);
       if (!cands.length) {
         this.cc.cues = [];
+        this.cc.cid = 0;
         this.cc.status = this.hasLogin ? '该稿件暂无 CC 字幕' : '无字幕 · 登录后可看 AI 字幕';
         logWarn('[cc] 无轨道可用 tracks=' + ((tracks && tracks.length) || 0) +
           ' login=' + (this.hasLogin ? 1 : 0));
@@ -2918,10 +2939,18 @@ export default {
       }
       const s0 = this.play.session;
       const durMs = s0 && s0.durationMs > 0 ? s0.durationMs : 0;
+      /* 本支视频的 cid：整条链都只认同一个，最后写进 cc.cid 作为归属凭证。 */
+      const myCid = (s0 && s0.cid) || 0;
+      /* 请求序号：同一 gen 内可能有两路并发（initExtras 自动拉 +
+       * 用户点字幕键触发的 reloadCc）。只有最后一发的落库。 */
+      const myReq = ++this.cc.req;
       const limit = Math.min(cands.length, CC_TRY_MAX);
       this.cc.loading = true;
       let best = null;
       let bestFit = null;
+      /* 【3.5.23】best 是否「双判据都合格」。只在同合格档内比 dev，
+       * 避免为了一条覆盖率极好但内容无关的产物放弃合格的那条。 */
+      let bestGood = false;
       let lastErr = '';
       /* 候选**并发**下载再统一打分，取「末条结束时间/视频时长」离 1.0 最近的那条。
        * 依据：
@@ -2934,10 +2963,11 @@ export default {
       const tasks = [];
       for (let i = 0; i < limit; i++) tasks.push(fetchSubtitleCues(this.client, cands[i].url));
       const rs = await Promise.all(tasks);
-      if (this.gen !== myGen) {
-        /* 代次已变（用户又切了一集）：直接走人，但 loading 必须复位，
-         * 否则「字幕加载中」会一直挂着，永远不再重试。 */
-        this.cc.loading = false;
+      if (this.gen !== myGen || myReq !== this.cc.req) {
+        /* 代次已变（用户又切了一集），或同一代次里已经有了更新的一发请求：
+         * 直接走人，但 loading 只能在「自己仍是最新一发」时复位，否则会把
+         * 后来者刚置的 true 打回 false（表现为「字幕加载中」闪一下就没了）。 */
+        if (myReq === this.cc.req) this.cc.loading = false;
         return;
       }
       for (let i = 0; i < rs.length; i++) {
@@ -2949,28 +2979,67 @@ export default {
           continue;
         }
         const fit = subtitleFit(r.cues, durMs);
+        /* 【3.5.23】第二判据：标题关键词命中率。
+         * 覆盖率只能挡「长度不对」的产物，挡不住「长度刚好却完全无关」的
+         * 上游错挂（真机见过 ratio 1.11 的美食视频挂在 AI 稿件上）。
+         * 实测（title-only，7 支稿件）：正确产物 kw 0.25~0.857，
+         * 错挂产物 <=0.143 —— 取 0.18 正好分开。 */
+        const kwFit = subtitleKeywordFit(r.cues, (s0 && s0.title) || '');
         logWarn('[cc] 候选 ' + (i + 1) + '/' + limit + ' ' + t.lan + ' ' + r.count +
-          ' cues 覆盖=' + fit.ratio.toFixed(2) + ' 偏差=' + fit.dev.toFixed(2) + ' ' + fit.reason);
-        if (!best || fit.dev < best.fit.dev) best = { t: t, r: r, fit: fit };
+          ' cues 覆盖=' + fit.ratio.toFixed(2) + ' 偏差=' + fit.dev.toFixed(2) +
+          ' kw=' + kwFit.kw.toFixed(3) + '(' + kwFit.hit + '/' + kwFit.keys + ')' +
+          ' ' + fit.reason);
+        /* kwFit.keys 太少时判据不可用（ok=false 但并非「不合格」），
+         * 这种稿件一律放行，不能因为标题太短就把正确字幕丢掉。 */
+        const kwBad = kwFit.keys >= 5 && !kwFit.ok;
+        const good = fit.ok && !kwBad;
+        if (!best || (good && !bestGood) ||
+            (good === bestGood && fit.dev < best.fit.dev)) {
+          best = { t: t, r: r, fit: fit, kw: kwFit, good: good };
+          bestGood = good;
+        }
       }
       this.cc.loading = false;
       if (!best) {
         this.cc.cues = [];
+        this.cc.cid = 0;
         this.cc.status = '字幕下载失败：' + (lastErr || '未知错误');
         logWarn('[cc] ' + this.cc.status);
         await this.applyVideoGeometry('cc');
         return;
       }
+      /* 【3.5.22】候选全都不合格时不要硬塞。
+       * 实测 BV1VQsv6QEhV：上游给同一 cid 挂了 20 份互不相关的 AI 产物
+       * （蚂蝗/唐僧/刘三少…），最好的那条 dev 也 > SUBTITLE_FIT_TOL。
+       * 与其显示一句完全无关的话，不如明确告诉用户「这首没字幕」。 */
+      if (!best.good) {
+        this.cc.lanDoc = '';
+        this.cc.cid = myCid;
+        this.cc.cues = [];
+        this.cc.status = '该稿件暂无可用 CC 字幕（上游字幕与视频不符）';
+        logWarn('[cc] 候选全部不合格 best=' + best.t.lan + ' ' + best.r.count +
+          ' cues 覆盖=' + best.fit.ratio.toFixed(2) + ' 偏差=' + best.fit.dev.toFixed(2) +
+          ' kw=' + best.kw.kw.toFixed(3) + '(' + best.kw.hit + '/' + best.kw.keys + ')' +
+          ' -> 不出字幕');
+        await this.applyVideoGeometry('cc');
+        return;
+      }
       this.cc.lanDoc = best.t.lanDoc;
+      this.cc.cid = myCid;
       this.cc.cues = best.r.cues;
       bestFit = best.fit;
-      this.cc.status = bestFit && bestFit.ok ? '' : '字幕可能与本视频不完全对应';
+      /* 走到这里 best.good 已为 true（覆盖率与关键词双合格），但覆盖度仍可能
+       * 只是「勉强落在容差内」（dev 到 0.30）。这种仍要给可见提示，
+       * 别让用户以为字幕一定对得上。 */
+      this.cc.status = bestFit && bestFit.dev > SUBTITLE_FIT_GOOD
+        ? '字幕可能与本视频不完全对应' : '';
       /* SUBTITLE_FIT_GOOD 只用来区分「几乎完美」与「勉强对得上」，两者都不再重试；
        * 留这个判据是为了让日志能一眼看出这次是不是真的找准了。 */
       const perfect = bestFit && bestFit.ok && bestFit.dev <= SUBTITLE_FIT_GOOD;
       const c0 = best.r.cues[0] || null;
       logWarn('[cc] loaded ' + best.r.count + ' cues lang=' + best.t.lan +
         ' host=' + (best.r.host || '?') + ' fit=' + (bestFit ? bestFit.reason : '?') +
+        ' kw=' + best.kw.kw.toFixed(3) + '(' + best.kw.hit + '/' + best.kw.keys + ')' +
         (perfect ? ' (perfect)' : '') +
         ' first=' + (c0 ? (c0.fromMs + '-' + c0.toMs + 'ms ' + c0.text.slice(0, 12)) : 'none'));
       await this.applyVideoGeometry('cc');
@@ -5024,6 +5093,11 @@ export default {
       await closeSession(this.makeCtx(myGen));
       this.mode = 'browse';
       this.play = idlePlay();
+      /* 【3.5.21】退出播放页就把字幕/弹幕的会话数据清干净。
+       * 以前这里只换 play，cc.cues 会一路留到下一次 onPlayItem 的
+       * resetExtras —— 中间这段「有字幕数据但没有正在播的视频」的窗口
+       * 正是「A 的字幕配 B 的画面」这类串片缺陷的温床。 */
+      this.resetExtras();
       logWarn('[bili] back to browse');
     },
     /* ---------- 扫码登录 ---------- */

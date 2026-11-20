@@ -86,13 +86,81 @@ export const SUBTITLE_FIT_MAX = 2.1;
  * 所以不能只设一个「上下限」然后取第一条落在区间里的：要全量打分取
  * 离 1.0 最近的那条。1.56 这类轻微超尾是 AI 字幕把末句拉长的常见现象，
  * 依然比错的候选好得多，因此不判死、只降分。 */
-export const SUBTITLE_FIT_TOL = 0.55;
+/* 【3.5.22】「对得上」的判断门槛。真机实测两组数：
+ *   正确产物：多数 dev 0.00~0.05，但短片上正确那条也可以是 0.22
+ *            （BV1j2sx6PE8p 73s，ratio 0.78 —— 尾部 22% 本来就没字幕）；
+ *   错挂产物：dev 0.35~0.90（Sora 那支片挑中 ratio 0.48 → dev 0.52）。
+ * 取 0.30 正好把两类分开。注意这个常量只决定提示文案与 ok 标记，
+ * 真正「选哪一条」靠候选池里 dev 最小，不靠它。 */
+export const SUBTITLE_FIT_TOL = 0.30;
 /* 偏差小于这个值就不必再试下一条（省一次下载，起播更快）。
  *
  * 定 0.10 而不是更宽：真机 BV1qenS6REgT 上，正确那条的偏差是 0.04，而
  * 「内容完全属于另一条音轨」的候选偏差能低到 0.24（ratio 0.76）——
  * 阈值放 0.25 会让它提前收工，又退回错字幕。宁可多下一次文件。 */
 export const SUBTITLE_FIT_GOOD = 0.1;
+
+/* 【3.5.23】标题关键词命中率：挡「长度对但内容完全无关」的上游错挂产物。
+ *
+ * 为什么需要第二个判据：subtitleFit 只看「末条结束时间 / 视频时长」，
+ * 而错挂的产物里有一批长度恰好也接近 1.0（实测有 ratio 1.28 / 1.11 的
+ * 完全无关字幕），单靠覆盖率分不开。
+ *
+ * 判据来源：把标题拆成英文词（长度 ≥ 3）与中文 bigram 当关键词，看字幕
+ * 全文命中多少。真机 7 支稿件实测（只用标题、不用简介）：
+ *   正确产物 kw = 0.25 / 0.357 / 0.667 / 0.750 / 0.857
+ *   错挂产物 kw <= 0.143（多数 0.000~0.053）
+ * 取 0.18 正好落在两类之间。中文标题通常能出 12~32 个 bigram，
+ * 纯英文标题也有 5~19 个词，样本量足够。 */
+export const SUBTITLE_KW_MIN = 0.18;
+
+/* 命中率低于阈值时算不合格所需的最少关键词数：太少的标题（比如只有一个词）
+ * 统计噪声太大，宁可放行也不要误杀正确字幕。 */
+export const SUBTITLE_KW_KEYS = 5;
+
+const KW_STOP = ['the', 'and', 'com', 'www', 'http', 'https', 'for', 'you', 'with'];
+
+/* 把标题拆成关键词集合。英文取整词并转小写，中文取相邻两字（bigram）——
+ * 不分词也能抓到「梁文锋」「岁月史书」这类专名，且实现只有十几行。 */
+export function subtitleKeywords(title) {
+  const t = String(title || '');
+  const out = {};
+  const n = { c: 0 };
+  const push = (k) => {
+    if (!k || out[k]) return;
+    out[k] = 1;
+    n.c += 1;
+  };
+  const latin = t.match(/[A-Za-z][A-Za-z0-9+#.]{1,20}/g) || [];
+  for (let i = 0; i < latin.length; i++) {
+    const w = latin[i].toLowerCase();
+    if (w.length >= 3 && KW_STOP.indexOf(w) < 0) push(w);
+  }
+  const runs = t.match(/[\u4e00-\u9fff]+/g) || [];
+  for (let i = 0; i < runs.length; i++) {
+    const r = runs[i];
+    for (let j = 0; j + 1 < r.length; j++) push(r.substring(j, j + 2));
+  }
+  return { keys: out, count: n.c };
+}
+
+/* → { ok, kw, hit, keys }
+ * ok=false 表示「判据不可用」（标题太短/关键词太少），调用方应放行而不是拒绝。 */
+export function subtitleKeywordFit(cues, title) {
+  const k = subtitleKeywords(title);
+  if (k.count < SUBTITLE_KW_KEYS) return { ok: false, kw: 0, hit: 0, keys: k.count };
+  const list = Array.isArray(cues) ? cues : [];
+  let text = '';
+  for (let i = 0; i < list.length; i++) text += (list[i].text || '') + ' ';
+  const low = text.toLowerCase();
+  let hit = 0;
+  const ks = Object.keys(k.keys);
+  for (let i = 0; i < ks.length; i++) {
+    if (low.indexOf(ks[i]) >= 0) hit += 1;
+  }
+  const kw = hit / k.count;
+  return { ok: kw >= SUBTITLE_KW_MIN, kw: kw, hit: hit, keys: k.count };
+}
 
 export function subtitleFit(cues, durationMs) {
   const list = Array.isArray(cues) ? cues : [];
