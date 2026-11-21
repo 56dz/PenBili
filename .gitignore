@@ -38,3 +38,7 @@ Thumbs.db
 
 # Python 运行时缓存
 __pycache__/
+
+# 编译调试符号
+*.pdb
+

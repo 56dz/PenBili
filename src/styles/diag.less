@@ -1,0 +1,175 @@
+@import "var.less";
+
+// 链路自检页（diag）样式 —— 从原 base.less 拆出，只服务 pages/diag。
+// 坐标全部来自 X6 Pro 真机截屏 + cfg.json：逻辑 960x266（详见 app.js DESIGN_WIDTH 说明）。
+// 布局：左列 608px = 视频洞（与首页 play-col 同宽，见 services/screen.js::VIDEO_COL_WIDTH）；
+// 右列 352px = 步骤面板。
+.page {
+  width: 960px;
+  height: 266px;
+  flex-direction: row;
+  background-color: @background-color;
+}
+
+.video-col {
+  width: 608px;
+  height: 266px;
+}
+
+.video-hole {
+  width: 608px;
+  height: 266px;
+  background-color: rgba(0, 0, 0, 0);
+}
+
+.video-idle {
+  width: 608px;
+  height: 266px;
+  justify-content: center;
+  align-items: center;
+}
+
+.video-idle-text {
+  font-size: 14px;
+  color: @text-color-dim;
+}
+
+.panel {
+  width: 352px;
+  height: 266px;
+  flex-direction: column;
+  padding-left: 10px;
+  padding-right: 8px;
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+
+.head {
+  height: 22px;
+  flex-direction: row;
+  align-items: center;
+}
+
+.title {
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0px;
+  font-size: 15px;
+  color: @text-color;
+  lines: 1;
+  text-overflow: ellipsis;
+}
+
+.head-meta {
+  font-size: 11px;
+  color: @text-color-dim;
+}
+
+.steps {
+  flex-direction: column;
+}
+
+.row {
+  height: 21px;
+  flex-direction: row;
+  align-items: center;
+}
+
+.glyph {
+  width: 16px;
+  font-size: 13px;
+  color: @text-color-dim;
+}
+
+.label {
+  width: 74px;
+  font-size: 13px;
+  color: @text-color;
+  lines: 1;
+  text-overflow: ellipsis;
+}
+
+.detail {
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0px;
+  font-size: 12px;
+  color: @text-color-dim;
+  lines: 1;
+  text-overflow: ellipsis;
+}
+
+// 状态着色全部用扁平单类（运行时不保证后代选择器支持）
+.g-running {
+  color: @accent;
+}
+
+.d-running {
+  color: @accent;
+}
+
+.g-ok {
+  color: #4caf7d;
+}
+
+.g-fail {
+  color: @danger;
+}
+
+.d-fail {
+  color: @danger;
+}
+
+.g-skip {
+  color: @text-color-dim;
+}
+
+.d-skip {
+  color: @text-color-dim;
+}
+
+.l-skip {
+  color: @text-color-dim;
+}
+
+.foot {
+  margin-top: 4px;
+  height: 30px;
+  flex-direction: row;
+  align-items: center;
+}
+
+.summary {
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0px;
+  font-size: 12px;
+  color: @text-color;
+  lines: 2;
+  text-overflow: ellipsis;
+}
+
+.btn {
+  width: 72px;
+  height: 28px;
+  margin-left: 8px;
+  border-radius: 6px;
+  background-color: @accent-dim;
+  align-items: center;
+  justify-content: center;
+}
+
+.btn-dim {
+  background-color: @card-border-color;
+}
+
+.btn-text {
+  width: 72px;
+  font-size: 14px;
+  color: #ffffff;
+  text-align: center;
+}
+
+.btn:active {
+  opacity: 0.6;
+}

@@ -1,0 +1,24 @@
+{
+ "code": 0,
+ "message": "0",
+ "ttl": 1,
+ "data": {
+  "isLogin": true,
+  "face": "https://example.com/face/placeholder.jpg",
+  "level_info": {
+   "current_level": 6,
+   "current_min": 28800,
+   "current_exp": 52689,
+   "next_exp": "--"
+  },
+  "mid": 100000001,
+  "money": 172.4,
+  "uname": "示例用户",
+  "vipStatus": 1,
+  "vipType": 2,
+  "wbi_img": {
+   "img_url": "https://i0.hdslb.com/bfs/wbi/653657f524a547ac981ded72ea172057.png",
+   "sub_url": "https://i0.hdslb.com/bfs/wbi/6e4909c702f846728e64f6007736a338.png"
+  }
+ }
+}

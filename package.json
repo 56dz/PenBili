@@ -1,0 +1,45 @@
+{
+  "name": "bili-app",
+  "appName": "PenBili",
+  "appid": "8002026110200001",
+  "version": "4.0.2",
+  "icon": "app_icon.png",
+  "description": "PenBili S6 Pro 分支（有道词典笔 S6 Pro，CV1826/armv7/640x260）：推荐/热门 + 视频/图文/直播三栏搜索 + 软解 DASH 播放 + 分P/合集 + CC 字幕 + 互动视频 + 图文阅读 + 点赞投币收藏 + 评论区 + 扫码登录（不含弹幕）",
+  "quickjs": {
+    "version": "20200705",
+    "bigNum": false
+  },
+  "simulator": {
+    "path": "",
+    "page": ""
+  },
+  "single-js-bundle": false,
+  "scripts": {
+    "build": "node ../env/node_modules/aiot-vue-cli/src/cli.js -q -p",
+    "setup": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/setup-build-env.ps1",
+    "build:dev": "node ../env/node_modules/aiot-vue-cli/src/cli.js",
+    "build:prod": "node ../env/node_modules/aiot-vue-cli/src/cli.js -c -q -p",
+    "native": "powershell -NoProfile -ExecutionPolicy Bypass -File native/build.ps1",
+    "scale": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/scale.ps1",
+    "scale:normal": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/scale.ps1 -FontScale 1.0",
+    "test": "node test/s6pro.js",
+    "icon": "python tools/make_icon_v2.py favicon.ico tools/icon_colors.json && node tools/make_icon_v2.js",
+    "deploy": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/deploy.ps1"
+  },
+  "keywords": [
+    "youdao",
+    "dictionary-pen",
+    "falcon",
+    "miniapp",
+    "bilibili",
+    "bili-app"
+  ],
+  "dependencies": {
+    "falcon-ui": "1.0.3"
+  },
+  "devDependencies": {
+    "@resvg/resvg-js": "^2.6.2",
+    "jsqr": "^1.4.0",
+    "qrcode": "^1.5.4"
+  }
+}
