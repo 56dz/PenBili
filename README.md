@@ -4,7 +4,7 @@
 
 这是一款跑在有道词典笔上的 B 站客户端，用有道自家的 Falcon 小程序框架（QuickJS + Vue 2 单文件组件）写成。屏幕只有 960×266 点，指甲盖大小，所以我按 iPad 版 B 站的骨架重做了界面，把推荐、搜索、播放、评论、图文、直播全塞进这一个页面里。
 
-当前版本 `3.5.25`，支持 **X6 Pro / X7 Pro**（RK3562，aarch64）。X5 分支已停止维护。
+当前版本 `3.5.26`，支持 **X6 Pro / X7 Pro**（RK3562，aarch64）。X5 分支已停止维护。
 X7 Pro 的播放器适配（黑屏修复、设备参数运行时自适应）见 [`docs/x7pro-adaptation.md`](docs/x7pro-adaptation.md)；
 播放页控件（左列控制键 / 右列常驻进度条 / 字幕带分段、单击沉浸、双击暂停、自动收起、加载动画）见
 [`docs/player-chrome.md`](docs/player-chrome.md)；控制条视觉、"点两下画面跑偏"、
@@ -14,7 +14,7 @@ X7 Pro 的播放器适配（黑屏修复、设备参数运行时自适应）见 
 分 P / 合集见 [`docs/video-pages-season.md`](docs/video-pages-season.md)，
 双机型（x6/x7/diag）构建见 [`docs/build-variants.md`](docs/build-variants.md)。
 
-![version](https://img.shields.io/badge/version-3.5.25-blue)
+![version](https://img.shields.io/badge/version-3.5.26-blue)
 ![license](https://img.shields.io/badge/license-GPL--3.0-green)
 
 代码与安装包双仓同步：[GitCode](https://gitcode.com/dz56dz/PenBili)（国内推荐）· [GitHub](https://github.com/56dz/PenBili)。
@@ -490,6 +490,21 @@ adb shell "grep -a 'Esmart1-win0' -A9 /sys/kernel/debug/dri/0/summary"
   用四支稿件真实候选池回放：玩梗稿的正确字幕从「全部被拦」变成放行，全错挂
   的那支仍然一条不放，污染稿漏网的 214 条（偏差 0.14、仅命中 1 个）被拦下，
   Google 送中那支的正确产物照常放行。
+
+  【3.5.26】上面两版都没能让「字幕键开着」这件事变得可信，于是换个更简单的
+  口径：**字幕每支视频进入时默认关闭，需要手动打开**。此前 `cc.on` 是跨视频
+  持久化的用户偏好，而字幕内容来自上游 `player/v2` 的随机分桶候选池（同一
+  cid 每次请求返回的产物都不同），于是「上一支开着 → 开下一支时开关显示开」
+  恒成立，挑不到合格产物时就变成「显示打开但实际没有」。现在 `onPlayItem`
+  在 `resetExtras()` 之后把 `cc.on` 置回 `false`，开关只描述**这一支视频**
+  现在有没有字幕，不再跨视频继承；`lan`（语言偏好）与 `keepOnSegment`
+  （互动视频同稿换片段）照旧保留。
+  这个开关同时**不再落盘**：`saveCcSettings` 只写 `lan` / `keepOnSegment`，
+  `loadCcSettings` 一律把 `on` 读成 `false`（存盘版本号 1 → 2）。否则升级上来
+  的老用户存盘里还留着 `on:true`，「我的」页就一直显示「开」，而每支视频进来
+  又都被重置成关，显示和语义彻底脱节。
+  「我的」页的状态提示也改了：字幕关着时直接说明「字幕每支视频默认关闭，
+  播放后点左列『字幕』键才会加载本稿的 CC 字幕」，不再让用户猜。
   详见 [`docs/danmaku.md`](docs/danmaku.md)
 - **未登录时 B 站字幕列表恒为空**（CC 字幕/AI 字幕需要 `SESSDATA`）；互动视频节点匿名态
   `story_list` 只有起始模块，登录后才能用服务端进度回溯，本项目改为本地历史快照回退

@@ -1591,6 +1591,13 @@ export default {
           (this.cc.status || '重新打开视频会再试一次') + '。';
       }
       if (this.cc.status) return this.cc.status + '。换一个带 CC 字幕的视频试试。';
+      /* 【3.5.26】字幕每支视频默认关闭（用户 m25913 要求），所以「没有字幕」
+       * 最常见的原因就是还没点开关 —— 提示必须先把这句说出来，
+       * 否则用户又会以为坏了。 */
+      if (!this.cc.on && this.mode !== 'play') {
+        return '字幕每支视频默认关闭，播放后点左列「字幕」键才会加载本稿的 CC 字幕。';
+      }
+      if (!this.cc.on) return '字幕当前关闭。点左列「字幕」键即可加载本稿的 CC 字幕。';
       return '播放视频后，这里会显示该稿件的字幕状态（无 CC 字幕 / 下载失败原因）。';
     },
     /* 左列最后那一行提示。优先显示播放提示（定位中/加载中/音画不同步恢复中…）；
@@ -1928,7 +1935,6 @@ export default {
     this._rectKey = '';      // 上一次**成功下发**的物理矩形（去重/防连点抖动用）
     this._tapAt = 0;         // 上一次被接受的点击时刻（60ms 内的重复事件丢弃）
     this._tapT = 0;          // 单击延时句柄（两击之内被取消 = 双击）
-    this._ccSaved = null;    // null = 用户从没显式开关过字幕（决定要不要自动打开）
     this._loadTimer = 0; // 加载动画定时器（120ms 一帧，只在 loading 期间跑）
     this.mixinMemo = {}; // WBI 密钥会话级缓存（播放与搜索共享）
     this.client = createClient({});
@@ -2591,8 +2597,21 @@ export default {
       }
       const myGen = ++this.gen;
       this.stopPoll();
-      /* 换片即清空上一条的字幕与互动会话（cc.on/lan 是用户设置，保留）。 */
+      /* 换片即清空上一条的字幕与互动会话。 */
       this.resetExtras();
+      /* 【3.5.26】字幕一律**每支视频默认关闭**，想要就手动点「字幕」。
+       *
+       * 用户 m25913：「还是不行啊，你要不直接改为每个视频进入默认关闭字幕，
+       * 需要手动打开」。在这之前 cc.on 是跨视频持久化的偏好，于是「上一支
+       * 开着 → 开下一支时开关显示开」始终成立；而字幕内容来自上游
+       * player/v2 的随机分桶候选池（同一 cid 每次返回的产物都不同），
+       * 开关亮着却挑不到合格产物时，用户看到的就是「显示打开但实际没有」。
+       * 与其继续和上游池子较劲，不如让开关的语义回归它本来的意思：
+       * 它只描述**这一支视频现在有没有字幕**，不再跨视频继承。
+       *
+       * lan 仍保留（用户选过语言就沿用到下一支），keepOnSegment 也保留
+       * （互动视频同稿换片段不算「新视频」）。 */
+      this.cc.on = false;
       this.mode = 'play';
       // 换视频即清空上一条的评论上下文
       this.replies = [];
@@ -2730,27 +2749,32 @@ export default {
         leadMs: 0, questionMs: 0, waiting: false, dismissed: false
       };
     },
+    /* 【3.5.26】字幕开关**不再落盘**。
+     * 它现在的语义是「这一支视频现在开不开字幕」（用户 m25913 要求每支视频
+     * 默认关闭），跨会话没有意义。只存语言偏好与「互动视频换片段是否保持」。
+     * 存了反而有害：下次启动 loadCcSettings 会把 on 读回来，「我的」页就
+     * 显示成「开」而实际没在播任何东西 —— 正是用户抱怨的那种不一致。 */
     saveCcSettings() {
       setJson(SUBTITLE_SETTINGS_KEY, {
-        version: 1, on: this.cc.on, lan: this.cc.lan,
+        version: 2, lan: this.cc.lan,
         keepOnSegment: this.cc.keepOnSegment
       });
     },
     async loadCcSettings() {
       const raw = await getJson(SUBTITLE_SETTINGS_KEY, null);
       const s = normalizeSubtitleSettings(raw);
-      this.cc.on = s.on;
+      /* 【3.5.26】**不读 on**：即便老版本存盘里留着 on:true（3.5.25 及以前
+       * 是跨视频持久化的），这里也一律按关处理 —— 否则升级上来的老用户
+       * 「我的」页会一直显示「开」，而每支视频进来又都被重置成关。 */
+      this.cc.on = false;
       this.cc.lan = s.lan;
       this.cc.keepOnSegment = s.keepOnSegment;
-      /* 用户**显式**选过没有？null = 从没动过这个开关。
-       * 没动过 + 该稿有字幕轨道 → 起播后自动打开（见 initExtras）：
-       * 真机反馈「字幕无法显示」，其中一半原因是它默认关着、开关又小，
-       * 用户根本不知道该去哪儿点。显式关过一次就永远尊重（存盘里有 on:false）。 */
-      this._ccSaved = raw && typeof raw === 'object' && 'on' in raw ? (raw.on === true) : null;
     },
+    /* 【3.5.26】字幕开关的语义已经收窄成「**这一支视频**现在开不开字幕」：
+     * 每进一支新稿件 onPlayItem 都会把它置回 false（用户 m25913 要求默认关闭）。
+     * 所以这里不再需要考虑「跨视频继承」—— 点一下就是这支视频开，再点就关。 */
     async onCcToggle() {
       this.cc.on = !this.cc.on;
-      this._ccSaved = this.cc.on; // 从这一刻起"用户选过了"，不再自动打开
       this.saveCcSettings();
       if (this.mode !== 'play' || this.isLivePlay) return;
       if (this.cc.on && !this.cc.cues.length) {
@@ -3484,11 +3508,11 @@ export default {
        * 「字幕无法显示」绝大多数时候断在这一行，而不是渲染。 */
       logWarn('[cc] player/v2 tracks=' + info.subtitles.length +
         ' login=' + (this.hasLogin ? 1 : 0) + ' ccOn=' + (this.cc.on ? 1 : 0));
-      /* 【3.5.19】字幕默认**关闭**。
-       * 旧版行为：_ccSaved === null（用户从没动过开关）且稿子有轨道就自动打开。
-       * 用户希望字幕默认不开（与弹幕相反），因此这里不再代人做决定：
-       * 只有 this.cc.on 为真（用户自己在左列点了字幕键，或在「我的」里开过并已持久化）
-       * 才去拉字幕文件。拉不到也不回退开关 —— 让 ccSettingHint 把原因写出来。 */
+      /* 【3.5.26】字幕**每支视频默认关闭**（用户 m25913）。
+       * 只有 this.cc.on 为真 —— 也就是用户在这支视频里自己点了左列的「字幕」键
+       * —— 才去拉字幕文件。on 既不跨视频继承、也不落盘（见 saveCcSettings），
+       * 所以这里不需要再判断「用户有没有显式选过」。拉不到也不回退开关：
+       * 让 ccSettingHint 把原因写出来。 */
       /* 【3.5.24】这里不再直接 loadCcCues 一次算数：一轮没捞到就换池子重试。
        * 用户看到的「字幕键开着却没有字幕、关开一次才出」就是一轮不够导致的。 */
       if (this.cc.on) {

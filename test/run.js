@@ -5242,6 +5242,24 @@ async function main() {
       '偏差小时放行仍要求命中至少一个关键词，否则错挂产物会被放过');
   });
 
+  test('页面接线: 每支视频进入时字幕默认关闭（3.5.26）', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const vue = fs.readFileSync(path.join(__dirname, '..', 'src', 'pages', 'index', 'index.vue'), 'utf8');
+    /* 用户 m25913：「改为每个视频进入默认关闭字幕，需要手动打开」。
+     * 之前 cc.on 跨视频持久化，开关会显示成上一支的状态 —— 上游候选池是随机
+     * 分桶的，挑不到合格产物时就成了「显示开却没有字幕」。 */
+    const i = vue.indexOf('async onPlayItem(item)');
+    assert.ok(i > 0, 'onPlayItem 必须存在');
+    const seg = vue.slice(i, i + 2600);
+    assert.ok(/this\.resetExtras\(\);/.test(seg), 'onPlayItem 里要先 resetExtras');
+    assert.ok(/this\.cc\.on = false;/.test(seg),
+      'onPlayItem 必须把字幕关掉（每支视频默认关闭）');
+    /* 顺序也要对：先清场再关开关，否则 resetExtras 之后的赋值可能被覆盖 */
+    assert.ok(seg.indexOf('this.resetExtras();') < seg.indexOf('this.cc.on = false;'),
+      'cc.on=false 必须在 resetExtras 之后');
+  });
+
   test('页面接线: 起播拉字幕要换池子重试（3.5.24 开着字幕却没有字幕）', () => {
     const fs = require('fs');
     const path = require('path');
