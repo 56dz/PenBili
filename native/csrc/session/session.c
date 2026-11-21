@@ -6,7 +6,6 @@
 #include "session.h"
 
 #include <errno.h>
-#include <dlfcn.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdatomic.h>
@@ -22,18 +21,9 @@
 #include "session/cmd.h"
 #include "source/src_http.h"
 #include "third_party/gst_min.h"
-#include <unistd.h>
-
-#include "video/dm_overlay.h"
 #include "video/kms_plane.h"
 
-/* ---------------- 面板几何（X6 Pro 默认值） ----------------
- * 【X7 Pro 适配】这两个宏只是"老版本 JS 不传设备参数时"的兜底默认值。
- * 实际值在 do_open() 里由 req->panelOffset / req->planeId 覆盖，并写进
- * g_w.panel_x_offset / g_w.kms_plane_id；所有建链与 SET_RECT 都读 g_w。
- * X7 Pro 的面板带是 280 宽（列偏移 100），且 plane 76 不一定可用，
- * device_profile.js 会下发 panelOffset=100 / planeId=-1（kmssink 自动选平面）。
- */
+/* ---------------- 面板几何（与 player.c 保持一致） ---------------- */
 #define PB2_PANEL_X_OFFSET 107
 #define PB2_KMS_PLANE_ID 76
 #define PB2_PANEL_RATE "1497/25"
@@ -405,41 +395,6 @@ typedef struct {
     pb2_open_req_t *req;
     int rotate;
     char rect[64];
-    /* 设备自适应：面板列偏移与 kmssink plane-id（见 session.h 的字段注释） */
-    int panel_x_offset;
-    int kms_plane_id;
-    /* 显式 plane-id 抢不到平面时，是否已经退回到「让 kmssink 自选」（每会话一次） */
-    int plane_fallback_done;
-    /* 1 = 解码后插 videoscale，把 buffer 缩到窗口大小（平面无需缩放能力） */
-    int sw_scale;
-    /* videoscale 输出相对 rect 的百分比（100 = 等大）；见 session.h */
-    int buf_scale;
-    /* 全屏 cover 的裁切量（物理像素，左右/上下各裁这么多）；见 session.h */
-    int crop_x;
-    int crop_y;
-    /* 【第二十九轮 v6】首帧时打一次 sink 实际协商到的 caps。
-     * 排查绿边只需要一行：buffer 尺寸与 render-rect 是否相等。
-     * 每次 OPEN 清零。 */
-    int vcaps_logged;
-    /* 【第三十轮】边缘绿修正：首帧打一次统计，之后不再刷日志。 */
-    int scrub_logged;
-    /*
-     * 音频设备被占（alsasink 打不开）时的降级状态：
-     *   audio_off        = 本会话**主动**关了音频（不是片源本身没音轨）
-     *   audio_retry_stage = 0 未重试 / 1 已带音频重试一次 / 2 已降级为无声
-     * 见 open_audio_retry()。
-     */
-    int audio_off;
-    int audio_retry_stage;
-    /* 音频兜底需要重开一次（与 want_plane_retry 同机制，但带延时） */
-    int want_audio_retry;
-    int reopen_delay_ms;
-    /*
-     * OPEN 阶段就失败（抢不到平面 / set_state(PLAYING) FAILURE）时的重试意图。
-     * 由 do_open 置位、process_cmd 读取：进程内**不能**直接递归 do_open，
-     * 因为它开头会 free(g_w.req) —— 那正是我们要复用的请求对象。
-     */
-    int want_plane_retry;
 
     /* seek debounce */
     long long seek_target;
@@ -534,27 +489,12 @@ typedef struct {
      */
     long long pause_started_ms;
     long long last_pos_ms;
-    /* 【3.5.15 弹幕平滑】见 dm_smooth_pos()。
-     * smooth 是自走的平滑位置，smooth_t 是它上次前进到的时刻，
-     * smooth_valid=0 表示下一帧直接从 last_pos_ms 吸附重来。 */
-    long long dm_smooth;
-    long long dm_smooth_t;
-    int dm_smooth_valid;
     unsigned long long last_abytes;
     /* 【音频停摆看门狗】见 check_audio_stall() */
     unsigned long long audio_stall_ab;      /* 上次看到的 abytes */
     long long audio_stall_ms;                /* abytes 最后一次变化的时刻 */
     unsigned long long audio_stall_frames0;  /* abytes 最后一次变化时的视频帧数 */
     int audio_stall_heals;                   /* 本会话已自愈次数 */
-    /*
-     * 【无声自愈】见 check_audio_stall() 的 ① ②。
-     *   first_frame_ms：本会话首帧上屏的时刻（frame_epoch_ms 清零那一刻写入）。
-     *                   「多久没声音」只能从这里算 —— frame_epoch_ms 归零后就没有
-     *                   "起算点"了，用 t_start 会把 seek/重建的时间也算进去。
-     *   audio_heals    ：为「有音轨却完全没声」重建管线的次数（每会话上限 2）。
-     */
-    long long first_frame_ms;
-    int audio_heals;
     long long last_plane_ms;
     long long last_marker_ms;
     long long last_fps_ms;
@@ -563,32 +503,6 @@ typedef struct {
     int plane_lost_streak;
     int eos;
     int paused;
-    /*
-     * ============ 【3.5.14 弹幕】============
-     *
-     * 这几个字段**故意不解散进上面那堆播放状态里**，因为弹幕与播放生命周期
-     * 是正交的：切集要清弹幕（dm_gen++），但播放不用重建；seek 到同一分片内
-     * 不该清，跨分片才清。把它们和播放状态混在一起，早晚会写出「seek 一下
-     * 弹幕就没了」这类 bug。
-     *
-     * dm_mode   ：PB2_DM_OFF/FULL/HALF/QUARTER（见 video/dm_overlay.h）
-     * dm_font_px：逻辑字号（像素高度），0 = 让 dm_overlay 用默认值
-     * dm_gen    ：弹幕数据代次，dm_clear 时 ++，用于丢弃迟到的旧分片
-     * dm_fed_ms ：最近一次成功喂入的时刻（诊断：能看出是不是根本没数据）
-     * dm_empty_logged：本会话是否已经打过「弹幕已开启但没有数据」的日志
-     */
-    int dm_mode;
-    int dm_font_px;
-    int dm_mode_dirty;      /* 模式/基准字号刚被 JS 改过，等下一帧用换算后的字号下发 */
-    /* 【3.5.15 字号换算】平面缓冲区比屏幕逻辑尺寸大 2~3 倍（kmssink 再做一次
-     * 硬件缩小），所以 JS 给的字号必须按比例放大到缓冲区坐标，否则字会被
-     * 一起缩小到看不清。dm_scale_pct 是"缓冲区逻辑宽 / 屏幕逻辑宽"的百分比，
-     * dm_font_eff 是已经下发给 dm_set_mode 的缓冲区字号（变化才重下发）。 */
-    int dm_scale_pct;
-    int dm_font_eff;
-    unsigned int dm_gen;
-    long long dm_fed_ms;
-    int dm_empty_logged;
 } pb2_worker_t;
 
 static pb2_worker_t g_w;
@@ -616,26 +530,6 @@ static pthread_cond_t g_done_cv = PTHREAD_COND_INITIALIZER;
 #define PB2_AUDIO_STALL_FRAMES 30   /* 同期视频至少涨这么多帧才算「只有音频停」 */
 #define PB2_AUDIO_STALL_HEALS  2    /* 每会话最多自愈次数 */
 
-/*
- * 【沉默自愈】「有音轨却完全没声音」的两条判据与配额。
- *
- * 用户反馈（2026-11-07）：「有概率没有声音」。真机上音频链有两条静默失败路径，
- * 都不会报错、视频照播：
- *   ① ffmpeg 的 `-map 1:a?`（第二路 DASH 音频）是**可选映射**：audio URL 403 /
- *      域名抽风 / 首字节超时，ffmpeg 不报错、直接只输出视频轨 → matroskademux
- *      永远不 emit audio pad → g_w.abranch 恒 0（hasAudio=0）。
- *   ② audio pad 到了、分支也建起来了，但 alsasink 打不开（device 被别的进程占着、
- *      bluealsa PCM 还没就绪）→ 分支报错后自毁，abytes 恒 0。
- * 两种都是「重开一次就好」的瞬时故障，所以这里做有限次数的原地重建（走 seek 路径，
- * 位置不变），而不是把无声状态一直甩给用户。
- *
- * 时间窗 4.5s / 24 帧：起播门已经等过 branch（最多 15s），首帧之后 4.5 秒
- * （≈24 帧 @30fps 的余量）还没有任何音频数据，就不可能是"正常但慢"了。
- */
-#define PB2_AUDIO_START_GRACE_MS 4500
-#define PB2_AUDIO_START_FRAMES   24
-#define PB2_AUDIO_HEALS          2
-
 static char *xstrdup(const char *s) {
     size_t n;
     char *p;
@@ -657,28 +551,6 @@ void pb2_open_req_free(pb2_open_req_t *req) {
     free(req);
 }
 
-/*
- * 深拷贝一份 open 请求（平铺字段 + 字符串）。
- *
- * 【为什么需要】OPEN 失败要重试一次（平面兜底），但 do_open 的第一件事之一
- * 就是 `pb2_open_req_free(g_w.req)` —— 那正是调用方传进来的同一个对象。
- * 直接 do_open(req) 第二次会在第一句把 req 释放掉，随后读到已释放内存。
- * 所以在重试前先复制一份：新对象交给 do_open，旧对象由它按原逻辑回收。
- */
-static pb2_open_req_t *open_req_dup(const pb2_open_req_t *src) {
-    pb2_open_req_t *r;
-    if (!src) return NULL;
-    r = (pb2_open_req_t *)calloc(1, sizeof(*r));
-    if (!r) return NULL;
-    *r = *src;
-    r->input = src->input ? strdup(src->input) : NULL;
-    r->input2 = src->input2 ? strdup(src->input2) : NULL;
-    r->userAgent = src->userAgent ? strdup(src->userAgent) : NULL;
-    r->referer = src->referer ? strdup(src->referer) : NULL;
-    r->audioDevice = src->audioDevice ? strdup(src->audioDevice) : NULL;
-    return r;
-}
-
 static int is_http(const char *s) {
     return s && (strncmp(s, "http://", 7) == 0 || strncmp(s, "https://", 8) == 0);
 }
@@ -687,51 +559,6 @@ static int rotation_for_transpose(int t) {
     if (t == 1) return 90;
     if (t == 3) return 180;
     return 270; /* t == 2，JS 恒传 */
-}
-
-/*
- * 【3.5.6 第十八轮：为什么 rotation 仍然交给 decoder】
- *
- * 真机反馈「视频被压成一条、周围全是绿幕」，并给出关键对照：
- * 自检页的 A/B/C/D 四档里 **B 和 D 正常，A 和 C 是绿幕**。
- * 四档的差别只有 swScale：A/C = 1（横帧，videoscale 输出 rect 互换后的
- * 448x252），B/D = 2（竖帧，videoscale 输出 rect 本身 252x448）。
- *
- * 结论：这台机器的 mppvideodec **真的会把 buffer 转成竖帧**，
- * 所以 swScale=1 那条「互换」路径等于把已经转正的竖帧再按横帧缩一次，
- * kmssink 拿到 448x252 的横 buffer 去贴 252x448 的竖窗口 —— 只有一部分行
- * 被写入，其余是 plane 未初始化内存（YUV 全 0 = 正是用户看到的绿）。
- *
- * 因此：
- *   · 默认档改成 swScale=2（B 档，竖帧），这是真机验证过能用的那条；
- *   · 这里不再把 rotation 置 0、也不插 videoflip —— 曾尝试用显式
- *     videoflip 替代 decoder 的旋转意图，但 B 档已经证明现有链路是对的，
- *     贸然改管线只会让 A 档从"绿幕"变成"黑屏"（videoflip 缺插件时
- *     parse_bin 直接失败），得不偿失。
- *   · swScale=0（X6 Pro）照旧：rotation 交给 mppvideodec + kmssink 硬件旋转。
- */
-static int decoder_rotation(void) {
-    return g_w.rotate;
-}
-
-/*
- * 【X7 Pro 适配】kmssink 的 plane-id 片段。
- *
- * X6 Pro 传 "plane-id=76 "，X7 Pro 传空串（planeId=-1）：不写这个属性时
- * kmssink 会自己从 CRTC 的空闲 overlay plane 里挑一个，不会因为写死的 id
- * 在该机型上不存在而让整条视频分支 parse_bin 失败 / 抢不到平面 → 黑屏。
- *
- * 返回值指向 worker 独占的静态缓冲（g_w 只在 worker 线程访问），调用方
- * 必须在同一次 desc 拼接里用完，不要跨 tick 保存。
- */
-static const char *kms_plane_arg(void) {
-    static char arg[48];
-    if (g_w.kms_plane_id < 0) {
-        arg[0] = '\0';
-    } else {
-        snprintf(arg, sizeof(arg), "plane-id=%d ", g_w.kms_plane_id);
-    }
-    return arg;
 }
 
 /*
@@ -808,31 +635,6 @@ static const char *pad_caps_name(GstPad *pad, char *buf, size_t cap, int *mpegve
     return name;
 }
 
-/*
- * 【3.5.6 排障】读 demuxer pad 上的**编码尺寸**（SPS 解析后的 width/height）。
- * 只读，不参与任何判断 —— 目的是让日志页能直接看到「源帧到底是横还是竖」，
- * 不用再靠用户描述画面有没有被压扁。
- */
-static void pad_caps_size(GstPad *pad, int *w_out, int *h_out) {
-    GstCaps *caps = gst_pad_get_current_caps(pad);
-    GstStructure *st;
-    int w = 0, h = 0;
-    if (w_out) *w_out = 0;
-    if (h_out) *h_out = 0;
-    if (!caps) caps = gst_pad_query_caps(pad, NULL);
-    if (!caps) return;
-    if (gst_caps_get_size(caps) >= 1) {
-        st = gst_caps_get_structure(caps, 0);
-        if (st) {
-            if (!gst_structure_get_int(st, "width", &w)) w = 0;
-            if (!gst_structure_get_int(st, "height", &h)) h = 0;
-        }
-    }
-    gst_caps_unref(caps);
-    if (w_out) *w_out = w;
-    if (h_out) *h_out = h;
-}
-
 static GstElement *parse_bin(const char *desc) {
     GError *err = NULL;
     GstElement *b = gst_parse_bin_from_description(desc, 1, &err);
@@ -855,9 +657,6 @@ static GstElement *parse_bin(const char *desc) {
  */
 static int on_video_buffer(GstPad *pad, GstPadProbeInfo *info, void *ud);
 static int on_video_src_probe(GstPad *pad, GstPadProbeInfo *info, void *ud);
-/* 【第三十二轮】挂在 kmssink **本体**的 sink pad 上：这里才是缩放后的
- * 256x448 buffer，边缘绿线在这一层。ghost sink pad 上只有 640x360 源帧。 */
-static int on_vsink_buffer(GstPad *pad, GstPadProbeInfo *info, void *ud);
 static int on_audio_buffer(GstPad *pad, GstPadProbeInfo *info, void *ud);
 static int on_audio_list(GstPad *pad, GstPadProbeInfo *info, void *ud);
 /* 起播/seek 后的迟到宽限（实现见 check_plane 之前） */
@@ -1088,247 +887,6 @@ static void live_rebuild_pipeline(const char *why) {
     }
 }
 
-/*
- * 【3.5.6 比例修复】把 render-rectangle 的宽高对齐到偶数。
- *
- * g_w.rect 是面板坐标下的**旋转后**矩形（例如 X7 Pro 16:9 -> <100,274,253,450>），
- * 253 是奇数。NV12 的 UV 平面按半宽采样，video/x-raw,width=253 是非法 caps：
- * videoscale 要么协商失败、要么悄悄输出别的尺寸，kmssink 再按 rect 拉伸一次，
- * 画面就被二次变形。对齐到偶数后 buffer 尺寸与 render-rectangle 严格相等，
- * 平面完全不需要缩放能力（1:1 上屏）。
- */
-static void normalize_video_rect(const char *tag) {
-    int x = 0, y = 0, w = 0, h = 0, nx, ny, nw, nh;
-    if (!g_w.sw_scale) return;
-    if (sscanf(g_w.rect, "<%d,%d,%d,%d>", &x, &y, &w, &h) != 4) return;
-    /* 【3.5.6 第二十九轮】起点也要对齐偶数。
-     * 只对齐宽高不够：y=271（奇）时 UV 相位错位，横屏视频左侧会出现
-     * 一条纯绿细线。向上取偶，最多挪 1px；宽高向下取偶。 */
-    nx = (x + 1) & ~1;
-    ny = (y + 1) & ~1;
-    nw = w & ~1;
-    nh = h & ~1;
-    if (nw < 2 || nh < 2) return;
-    if (nx == x && ny == y && nw == w && nh == h) return;
-    snprintf(g_w.rect, sizeof(g_w.rect), "<%d,%d,%d,%d>", nx, ny, nw, nh);
-    pb2_logf("%s: rect aligned to even x/y/size -> %s", tag, g_w.rect);
-}
-
-/*
- * ============ 运行时改矩形：优先走 GstVideoOverlay ============
- *
- * 【为什么需要它】见 PB2_CMD_SET_RECT 里的棘轮注释：`render-rectangle` 是
- * write-only 属性，kmssink 只在自己 reconfigure（分配 plane）那一刻读它。
- * 于是"放大"在运行期根本无效，只能把管线过一次 READY —— 对边下边播的架构
- * 等价于重新拉流（500ms 黑屏）。用户点一下画面想看大一点，结果是黑一下再回来，
- * 连点两下就更容易停在中间态（真机反馈「点两下屏幕后视频跑到下方 / 只露半截」）。
- *
- * 正道是 GstVideoOverlay 接口的 set_render_rectangle()：它直接调用 sink 的实现，
- * kmssink 收到后自己重配 plane，不依赖属性重读、不需要重建管线、放大缩小都有效。
- * 参考系统播放器也是同一套做法（dlopen libgstvideo + dlsym）。
- *
- * 这里同样 dlopen/dlsym：libgstvideo 不是链接期依赖（构建只链 libgstreamer 存根），
- * 运行时它一定在（kmssink 自己就依赖它）。拿不到就返回 0，调用方回落到老的
- * 属性路径 —— 行为与之前逐字节一致，不会因为一个新 API 把能用的设备搞坏。
- */
-typedef int (*pb2_overlay_set_rect_fn)(void *overlay, int x, int y, int w, int h);
-static pb2_overlay_set_rect_fn g_overlay_set_rect = NULL;
-static int g_overlay_probed = 0;
-
-static pb2_overlay_set_rect_fn pb2_overlay_fn(void) {
-    if (g_overlay_probed) return g_overlay_set_rect;
-    g_overlay_probed = 1;
-    void *h = dlopen("libgstvideo-1.0.so.0", RTLD_LAZY | RTLD_GLOBAL);
-    if (!h) h = dlopen("libgstvideo-1.0.so", RTLD_LAZY | RTLD_GLOBAL);
-    if (h) {
-        g_overlay_set_rect =
-            (pb2_overlay_set_rect_fn)dlsym(h, "gst_video_overlay_set_render_rectangle");
-    }
-    pb2_logf("overlay api: %s",
-             g_overlay_set_rect ? "gst_video_overlay_set_render_rectangle OK"
-                                : "unavailable (fallback: render-rectangle property)");
-    return g_overlay_set_rect;
-}
-
-/* 把 g_w.rect（"<x,y,w,h>"，已做偶数对齐）交给 overlay 接口。
- * → 1 = sink 受理（矩形已生效），0 = 没有接口 / sink 拒绝，调用方走老路径。 */
-static int overlay_apply_rect(void) {
-    pb2_overlay_set_rect_fn fn = pb2_overlay_fn();
-    int x = 0, y = 0, w = 0, h = 0;
-    if (!fn) return 0;
-    if (!g_w.vsink_el) return 0;
-    if (sscanf(g_w.rect, "<%d,%d,%d,%d>", &x, &y, &w, &h) != 4) return 0;
-    if (w < 2 || h < 2) return 0;
-    return fn(g_w.vsink_el, x, y, w, h) ? 1 : 0;
-}
-
-/*
- * videorate 之后的收尾片段（不含前导空格，以 " ! " 结尾），供两条建链路径共用：
- *   - pad-added 动态分支（demuxer 抛 pad）
- *   - 裸流固定分支（live 的 .flv/.ts：filesrc ! parse ! decode ! ...）
- *
- * sw_scale 非 0 时插 videoscale，让 kmssink 拿到与窗口等大的 buffer，
- * 平面不需要缩放能力 —— X7 Pro 上不必再赌 plane-id。
- * 顺序必须在 videorate 之后：先统一帧率，再缩放，避免逐帧 renegotiate。
- *
- * 【3.5.6：这里曾经是"压扁"的根因】
- *   mppvideodec rotation=270 给的是**旋转意图**（最终由 kmssink 在面板坐标系
- *   里转 90 度上屏），videoscale 看到的仍然是解码出来的**横向帧** 1920x1080。
- *   g_w.rect 却是旋转后的物理竖矩形 253x450 —— 旧代码直接把横帧缩到 253x450，
- *   等于把 16:9 硬拉成 9:16 竖条；源比例越偏离，拉伸越不一样（真机现象：
- *   「视频被压扁了，播放比例不同的视频被压扁的程度不一样」）。
- *
- *   正确目标 = rect 宽高互换后的横向尺寸 450x252：横帧等比缩到它，
- *   kmssink 转 90 度后正好是 252x450，与 render-rectangle 1:1 对齐。
- *
- * sw_scale 取值：
- *   0 = 不插 videoscale（X6 Pro，硬件缩放，行为与 3.5.5 逐字节相同）
- *   1 = 插 videoscale 且按 rotate 自动互换（X7 Pro 默认）
- *   2 = 插 videoscale 但不互换（回退开关：某些固件的 mppvideodec 会**真的**
- *       把 buffer 转成竖帧，那时不该互换。storage 覆盖 {"swScale":2} 即可，
- *       不用重新打包）
- */
-static void video_post_rate_desc(char *out, size_t cap) {
-    int x = 0, y = 0, w = 0, h = 0, tw, th, bs;
-    if (!g_w.sw_scale) {
-        /* 与 3.5.5（X6 Pro）完全同构，旋转与缩放全交给 kmssink。
-         * 日志里明确写出这一行，真机截图才能确认档位真的生效了。 */
-        pb2_logf("video: hw scale, NO videoscale (rect=%s rotate=%d)",
-                 g_w.rect, g_w.rotate);
-        snprintf(out, cap, "video/x-raw,framerate=%s ! ", PB2_PANEL_RATE);
-        return;
-    }
-    if (sscanf(g_w.rect, "<%d,%d,%d,%d>", &x, &y, &w, &h) != 4 ||
-        w < 2 || h < 2) {
-        snprintf(out, cap, "video/x-raw,framerate=%s ! ", PB2_PANEL_RATE);
-        return;
-    }
-    tw = w & ~1;
-    th = h & ~1;
-    if ((g_w.sw_scale == 1 || g_w.sw_scale == 3) && (g_w.rotate == 90 || g_w.rotate == 270)) {
-        int t = tw;
-        tw = th;
-        th = t;
-    }
-    /*
-     * 【3.5.6 第四轮：真正能改变画面大小的旋钮】
-     * 真机四档截图里 out=253x450 完全没变、画面始终只占挖洞区一小块 ——
-     * X7 Pro 自选的 overlay 平面疑似只做 1:1 贴 buffer：改 render-rectangle
-     * 对它的显示尺寸毫无作用。只有把送进 sink 的 buffer 等比放大，画面才会
-     * 跟着变大。矩形本身保持与挖洞区等大、不越出面板，kmssink 不会拒绝。
-     *
-     * 等比放大（宽高同乘）不会引入比例变形；偶数化是 NV12 的硬性要求。
-     * 100 = 与矩形等大，等同旧行为（X6 Pro 永远走这条）。
-     */
-    bs = (g_w.buf_scale >= 50 && g_w.buf_scale <= 400) ? g_w.buf_scale : 100;
-    if (bs != 100) {
-        tw = (tw * bs + 50) / 100;
-        th = (th * bs + 50) / 100;
-        tw &= ~1;
-        th &= ~1;
-        if (tw > 4096) tw = 4096;
-        if (th > 4096) th = 4096;
-    }
-    if (tw < 2 || th < 2) {
-        snprintf(out, cap, "video/x-raw,framerate=%s ! ", PB2_PANEL_RATE);
-        return;
-    }
-    /* sw_scale=3 是 3.5.6 第十四轮加的**回退档**：插 videoscale 但用默认
-     * bilinear。真机若发现「画面变形」与 lanczos 相关（同一条流、同一个矩形，
-     * 只换算法就变），storage 覆盖 bili_device_profile = {"swScale":3} 即可，
-     * 不用重装包。 */
-    const char *method = (g_w.sw_scale == 3) ? "" : " method=lanczos";
-    /* 【第十八轮】不再插 videoflip：真机证明 swScale=2（B 档，竖帧）本来就对，
-     * 绿幕只出现在 swScale=1（横帧）档。默认档已改成 2，这条路径保持原样。 */
-    pb2_logf("video: videoscale -> %dx%d%s (panel rect %dx%d, rotate=%d, mode=%d, buf=%d%%)",
-             tw, th, method, w, h, g_w.rotate, g_w.sw_scale, bs);
-    /*
-     * 【3.5.6 第十四轮：为什么必须指定 method】
-     * 真机反馈「视频播放有一些糊，就算是 360p 的也不应该这么糊」。
-     * videoscale 的 method 默认是 **bilinear**，而这里的缩小倍率非常大：
-     * 1080p 源 (1920x1080) → 面板上的 444x250，缩小 4.3 倍。双线性在这种
-     * 倍率下**不做任何抗锯齿预滤波**，每 4.3 个输入像素只取 2x2，等于抽点：
-     * 细节被丢掉，边缘出现锯齿，观感就是"糊"。
-     *
-     * lanczos 是 6-tap 且**按缩放比例扩展 support**（相当于先低通再重采样），
-     * 大倍率缩小时能保住线条和文字边缘。代价是 CPU：每输出像素约 36 次
-     * 采样，444x250@30fps 大约 1.2 亿次/秒 —— RK 这颗 U 跑得动，但如果某台
-     * 固件上出现持续丢帧，把这里换回 "videoscale"（不加 method）即可，
-     * 那是旧行为（bilinear），一像素画质换一点余量。
-     * 日志里打出 method 是为了真机一眼能确认这条改动生效了。
-     */
-    /*
-     * 【pixel-aspect-ratio=1/1 是必须写死的】
-     * caps 里不写 PAR 时，videoscale 会把源 caps 的 PAR 原样带下来；而
-     * kmssink 的 force-aspect-ratio=false 只跳过了"我算信箱"，并不跳过
-     * "按 PAR 拉伸" —— 一旦源带了个非 1:1 的 PAR（部分转码稿是真的有），
-     * 画面就会横向/纵向被拉，而矩形尺寸完全正确、日志里一点异常都看不出。
-     * 这里显式钉成方形像素，把这条路彻底堵掉。
-     */
-    /*
-     * 【3.5.6 第二十五轮：不要 add-borders —— 它补的边是绿色】
-     *
-     * 第二十四轮曾用 `add-borders=true` 把信箱交给 videoscale（等价参考系统播放器的
-     * force-aspect-ratio）。真机上竖屏稿件左右出现大片**绿幕**：videoscale 补边
-     * 时按 YUV 全 0 填充，而 NV12 的 (0,0,0) 是绿色，不是黑色。横屏 16:9 只补
-     * 11px 看不出来，竖屏要补 150px，一眼就是绿。
-     *
-     * 现在信箱重新由 JS 算（playVideoRectsFor 的 fit），矩形 = 画面本身，
-     * plane 窗口与 buffer 等大，**没有边可补**；画面之外的黑色由 Falcon 的
-     * UI 层提供（hole 之外的 fb 黑）。这里回到最朴素的"缩到窗口大小"。
-     *
-     * sw_scale=0（X6 Pro 的硬件缩放路径）不插 videoscale，不受影响。
-     */
-    /*
-     * 【3.5.6 第二十六轮：全屏 cover】
-     * 普通态 crop=0/0，走下面那条逐字节不变的老路径。
-     * 全屏横屏时 JS 算出「等比放大后要裁掉多少」，这里让 videoscale 先输出
-     * 完整的大画面，再用 videocrop 裁到窗口大小 —— 画面填满整个视口，
-     * 比例保持不变，也不依赖 kmssink 的缩放能力（仍 1:1 贴 buffer）。
-     */
-    if ((g_w.crop_x > 0 || g_w.crop_y > 0) && g_w.sw_scale) {
-        int cw = tw + 2 * g_w.crop_x;
-        int ch = th + 2 * g_w.crop_y;
-        cw &= ~1;
-        ch &= ~1;
-        if (cw > 2 && ch > 2 && cw <= 4096 && ch <= 4096) {
-            pb2_logf("video: cover -> videoscale %dx%d, videocrop x=%d y=%d -> %dx%d",
-                     cw, ch, g_w.crop_x, g_w.crop_y, tw, th);
-            snprintf(out, cap,
-                     "videoscale%s ! "
-                     "video/x-raw,width=%d,height=%d,framerate=%s,"
-                     "pixel-aspect-ratio=1/1 ! "
-                     "videocrop left=%d right=%d top=%d bottom=%d ! ",
-                     method, cw, ch, PB2_PANEL_RATE,
-                     g_w.crop_x, g_w.crop_x, g_w.crop_y, g_w.crop_y);
-            return;
-        }
-    }
-    /*
-     * 【3.5.6 第二十九轮 v8：不裁切，画面按原生比例直接缩到窗口】
-     *
-     * v5~v7 曾在这里插 `videocrop left/right/top/bottom=16`，想切掉解码帧
-     * 最外圈那条绿线（H.264 的 1080 按 16 宏块对齐解成 1088，多出的 8 行
-     * 没人写 = YUV 全 0，而 NV12 的 0 是绿色不是黑色）。
-     *
-     * 这条路放弃，理由是它治不了本：
-     *   · 裁多少只能猜（8 / 16 / 32 视片源而定），裁多一刀砍掉真画面；
-     *   · 要在 do_open 里配"建失败就去掉裁切重建"，每起播多赔一次管线构建
-     *     —— 用户已经反馈"打开视频慢了一些"；
-     *   · 绿线来自源帧内容，等比缩放只会把它一起缩小，裁切只是把可见区域
-     *     往里挪，换一个尺寸又会从别的边露出来。
-     *
-     * 现在这里回到最朴素的一条：源帧等比缩到窗口，pixel-aspect-ratio 钉死
-     * 1:1。矩形由 JS 按视频原生宽高比算（playVideoRectsFor 的 fit），
-     * 送进 sink 的 buffer 宽高比 = 片源宽高比 = 窗口宽高比，全程不拉不裁。
-     */
-    snprintf(out, cap,
-             "videoscale%s ! "
-             "video/x-raw,width=%d,height=%d,framerate=%s,"
-             "pixel-aspect-ratio=1/1 ! ",
-             method, tw, th, PB2_PANEL_RATE);
-}
-
 static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
     char capsbuf[128];
     const char *cn;
@@ -1336,10 +894,7 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
     GstPad *sink;
     int rc;
     int mpegversion = 0;
-    /* 1024 在加了 videoscale/caps 之后余量变小（desc 是拼接出来的），
-     * 这里放大并加截断检查 —— 被截断的 desc 会 parse_bin 失败，
-     * 症状就是「整片黑」，日志里却看不出原因。 */
-    char desc[1280];
+    char desc[1024];
     char fpscap[64];
 
     (void)el;
@@ -1366,11 +921,6 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
     }
 
     if (strncmp(cn, "video/", 6) == 0) {
-        int src_w = 0, src_h = 0;
-        pad_caps_size(pad, &src_w, &src_h);
-        pb2_logf("pad-added: source=%dx%d (encoded) rotate=%d rect=%s swScale=%d buf=%d%%",
-                 src_w, src_h, g_w.rotate, g_w.rect, g_w.sw_scale,
-                 (g_w.buf_scale >= 50 && g_w.buf_scale <= 400) ? g_w.buf_scale : 100);
         /*
          * 【P1-3】队列上限按源类型选：
          *   点播 -> 8s/6MB（为了装下 seek 时 demuxer 把落后一路推进到对齐点
@@ -1450,22 +1000,10 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
          * videorate 把源帧率归一到面板率（30fps -> 59.88fps，复制帧）。
          * 曾怀疑它复制帧时复用 buffer 造成闪白，实测旁路掉反而更差
          * （40s 内 3 组 vs 1 组），故保留。
-         *
-         * 【3.6.3】sw_scale=1 时再插一级 videoscale，把 buffer 直接缩到窗口
-         * 大小（req->w x req->h）。这样 kmssink 拿到的 buffer 与 render-rectangle
-         * 等大，**不需要平面具备缩放能力** —— X7 Pro 上不用再赌 plane-id。
-         * 顺序必须在 videorate 之后：先统一帧率再缩放，避免 videoscale 被
-         * 逐帧 renegotiate。规格尺寸用旋转后的渲染矩形（mppvideodec 的
-         * rotation 已把画面转正，rect 也是按转正后的宽高算出来的）。
          */
-        char vrate[320];
-        char vpost[256];
-        video_post_rate_desc(vpost, sizeof(vpost));
-        snprintf(vrate, sizeof(vrate), " videorate ! %s", vpost);
-        if (g_w.sw_scale && g_w.req) {
-            pb2_logf("video: software scale -> %dx%d (plane needs no scaler)",
-                     g_w.req->w, g_w.req->h);
-        }
+        char vrate[160];
+        snprintf(vrate, sizeof(vrate),
+                 " videorate ! video/x-raw,framerate=%s ! ", PB2_PANEL_RATE);
         /*
          * skip-vsync=true：不等 page flip 完成就立刻提交下一帧。
          * 实测把它关掉（skip-vsync=false）闪白次数无差异（1 组 vs 1 组），
@@ -1516,7 +1054,7 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
                      "h264parse ! mppvideodec rotation=%d%s ! "
                      "%s"
                      "%s"
-                     "kmssink name=vsink %sdriver-name=rockchip sync=true "
+                     "kmssink name=vsink plane-id=%d driver-name=rockchip sync=true "
                      /*
                       * 默认严格（PB2_MAX_LATENESS / qos=true）。起播时的
                       * 迟到宽限由 arm_late_grace() 在 set_state(PLAYING) 之后
@@ -1531,7 +1069,7 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
                      "max-lateness=%d qos=%s force-aspect-ratio=false %s %s %s "
                      "render-rectangle=%s",
                      qbufs, qbytes, qns,
-                     decoder_rotation(), mpperr, fpscap, vrate, kms_plane_arg(),
+                     g_w.rotate, mpperr, fpscap, vrate, PB2_KMS_PLANE_ID,
                      late_ms, qos_s, tsoff, skip_s, syncmode, g_w.rect);
         } else if (strstr(cn, "h265") || strstr(cn, "hevc")) {
             snprintf(desc, sizeof(desc),
@@ -1540,7 +1078,7 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
                      "h265parse ! mppvideodec rotation=%d%s ! "
                      "%s"
                      "%s"
-                     "kmssink name=vsink %sdriver-name=rockchip sync=true "
+                     "kmssink name=vsink plane-id=%d driver-name=rockchip sync=true "
                      /*
                       * 默认严格（PB2_MAX_LATENESS / qos=true）。起播时的
                       * 迟到宽限由 arm_late_grace() 在 set_state(PLAYING) 之后
@@ -1555,23 +1093,15 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
                      "max-lateness=%d qos=%s force-aspect-ratio=false %s %s %s "
                      "render-rectangle=%s",
                      qbufs, qbytes, qns,
-                     decoder_rotation(), mpperr, fpscap, vrate, kms_plane_arg(),
+                     g_w.rotate, mpperr, fpscap, vrate, PB2_KMS_PLANE_ID,
                      late_ms, qos_s, tsoff, skip_s, syncmode, g_w.rect);
         } else {
             pb2_logf("pad-added: unsupported video caps %s", cn);
             return;
         }
-        pb2_logf("pad-added: video desc late=%d qos=%s %s mpp:%s swscale=%d rotate=%d rect=%s",
-                 late_ms, qos_s,
+        pb2_logf("pad-added: video desc late=%d qos=%s %s mpp:%s", late_ms, qos_s,
                  tsoff[0] ? tsoff : "(no ts-offset)",
-                 mpperr[0] ? mpperr : "(vendor defaults)", g_w.sw_scale,
-                 g_w.rotate, g_w.rect);
-        if (strlen(desc) >= sizeof(desc) - 1) {
-            pb2_logf("pad-added: video desc TRUNCATED at %u bytes -> abort branch",
-                     (unsigned)strlen(desc));
-            pb2_stats_patch_error(&g_w.stats, PB2_E_PIPELINE, "video desc truncated");
-            return;
-        }
+                 mpperr[0] ? mpperr : "(vendor defaults)");
         bin = parse_bin(desc);
         if (!bin) {
             pb2_stats_patch_error(&g_w.stats, PB2_E_PIPELINE, "video branch build failed");
@@ -1748,28 +1278,6 @@ static void on_pad_added(GstElement *el, GstPad *pad, void *data) {
          */
         g_w.vsink_el = gst_bin_get_by_name((GstBin *)bin, "vsink");
         g_w.vsink_el_owned = 1;
-        /*
-         * 【第三十二轮】边缘处理的 probe 必须挂在 **kmssink 本体的 sink pad**。
-         *
-         * 真机日志（2026-11-15 22:49）：
-         *   video: sink caps 640x360, render-rect <0,496,256,448>
-         *   video: software scale -> 256x448 method=lanczos
-         * 挂在分支 ghost sink pad 上的 on_video_buffer 拿到的是**源帧 640x360**，
-         * 前两轮在那里改边缘全白费：videoscale 之后才是绿线所在的 256x448。
-         * 这里拿到内部 "vsink"（kmssink）元素的 sink pad，单独挂一个 probe。
-         *
-         * 挂得比 ghost pad 那个晚（要等 bin 建好才能 get_by_name），首帧可能
-         * 漏掉，但绿边每帧都在，从第二帧起就生效。
-         */
-        if (g_w.vsink_el) {
-            GstPad *kp = gst_element_get_static_pad(g_w.vsink_el, "sink");
-            if (kp) {
-                gst_pad_add_probe(kp, GST_PAD_PROBE_TYPE_BUFFER,
-                                  on_vsink_buffer, NULL, NULL);
-                gst_object_unref(kp);
-                pb2_logf("video: edge probe on kmssink sink pad");
-            }
-        }
         /* 【P0-4】成功连上之后才置位 */
         g_w.vbranch = 1;
         g_w.vbranch_ready_ms = pb2_now_ms();
@@ -2177,434 +1685,10 @@ static int on_video_src_probe(GstPad *pad, GstPadProbeInfo *info, void *ud) {
     return GST_PAD_PROBE_OK;
 }
 
-/*
- * 【第三十一轮】边缘绿：不判颜色，直接用内侧像素把最外圈盖掉。
- *
- * 真机日志（2026-11-15）：
- *   video: sink caps 256x448, render-rect <0,496,256,448>
- *   video: edge scrub 0 px (green -> black)
- *   [KMS] format NV12, dst rect[256 x 448], pitch 256
- *
- * 两条结论：
- *   1) caps == render-rect == plane，平面被 buffer 铺满，绿**不在**平面未覆盖区，
- *      只能是 buffer 最外圈的像素值。上一版按「YUV 全 0 = 绿」去判色，结果
- *      0 px —— 说明这圈绿不是 YUV(0,0,0)，而是别的颜色值（可能是 videoscale
- *      边界插值、色彩空间转换或驱动合成后的结果）。再猜阈值只会再错一次。
- *   2) 既然绿确定在最外圈，就**不再判颜色**：把最外 EDGE_SCRUB 圈整圈替换成
- *      往内第 EDGE_SCRUB 行/列的像素（边缘 clamp 延伸）。
- *
- * 这样做比「涂黑」更好：没有黑框，画面看起来是自然延伸到边；不裁切、不改
- * 几何、不动比例，只重写最外 8 个像素环。源片 640x360、缩放后 256x448，
- * 8px 只占画面宽的 3%。
- *
- * 读写走 gst_buffer_extract / gst_buffer_fill（**不用 GstMapInfo**：按
- * gst_min.h 的铁律，自己抄结构体布局迟早栈越界）。extract 失败就直接跳过，
- * 这一步永远不能影响播放。
- *
- * 首帧打一行诊断：最外圈里 Y 最小 / V 最小的原始 YUV，万一绿还在，下一轮
- * 就有真实数值可用，不用再靠拍照颜色反推。
- */
-#define EDGE_SCRUB 8
-
-static int scrub_edge_green(GstPad *pad, void *vbuf) {
-    static unsigned char *scratch = NULL;
-    static size_t scratch_cap = 0;
-    GstCaps *caps;
-    GstStructure *st;
-    const char *fmt;
-    int w = 0, h = 0, e, row, col, fixed = 0;
-    int minY = 256, minV = 256;
-    int minY_u = 0, minY_v = 0, minV_y = 0, minV_u = 0;
-    size_t total;
-    unsigned char *yp;
-    unsigned char *uv;
-
-    if (!vbuf) return 0;
-    /*
-     * 【合并 PR #5 时的性能门控】绿边只出现在 X7 Pro（走 videoscale +
-     * 自选 overlay 平面，驱动把不在 16 网格上的矩形圆整，多出来的区域
-     * 没有 buffer 写入 = YUV 0 = 绿）。X6 Pro 是 kmssink 硬件缩放，
-     * 矩形给多大填多大，**不会**有绿边。
-     *
-     * 而 scrub 的代价是每帧 2 次全帧拷贝（extract + fill）：
-     * X6 的 240x427 NV12 = 153720 B，30fps 就是 9.22 MB/s 纯内存带宽，
-     * 在 4 核 A35 上白烧。所以 swScale==0（硬件缩放机型）直接跳过。
-     */
-    if (!g_w.sw_scale) return 0;
-    caps = gst_pad_get_current_caps(pad);
-    if (!caps) return 0;
-    st = gst_caps_get_structure(caps, 0);
-    if (!st) {
-        gst_caps_unref(caps);
-        return 0;
-    }
-    fmt = gst_structure_get_string(st, "format");
-    gst_structure_get_int(st, "width", &w);
-    gst_structure_get_int(st, "height", &h);
-    gst_caps_unref(caps);
-    if (!fmt || strcmp(fmt, "NV12") != 0 || w < 16 || h < 16) {
-        /* 不能再静默返回：第三十一轮日志里连 `edge clamp` 一行都没有，
-         * 就是因为源帧 format 不是 "NV12" 直接 return 了，白跑一整轮。 */
-        if (!g_w.scrub_logged) {
-            g_w.scrub_logged = 1;
-            pb2_logf("video: edge clamp SKIP fmt=%s %dx%d",
-                     fmt ? fmt : "(null)", w, h);
-        }
-        return 0;
-    }
-
-    /* NV12 = Y(w*h) + 交错 UV(w*h/2) */
-    total = (size_t)w * h * 3 / 2;
-    if (gst_buffer_get_size(vbuf) < total) {
-        if (!g_w.scrub_logged) {
-            g_w.scrub_logged = 1;
-            pb2_logf("video: edge clamp SKIP buf too small (%zu < %zu) %dx%d",
-                     gst_buffer_get_size(vbuf), total, w, h);
-        }
-        return 0;
-    }
-
-    if (scratch_cap < total) {
-        unsigned char *p = (unsigned char *)realloc(scratch, total);
-        if (!p) return 0;
-        scratch = p;
-        scratch_cap = total;
-    }
-    if (gst_buffer_extract(vbuf, 0, scratch, total) != total) {
-        if (!g_w.scrub_logged) {
-            g_w.scrub_logged = 1;
-            pb2_logf("video: edge clamp SKIP extract failed %dx%d", w, h);
-        }
-        return 0;
-    }
-
-    e = EDGE_SCRUB;
-    if (e * 2 >= w) e = w / 4;
-    if (e * 2 >= h) e = h / 4;
-    if (e < 1) return 0;
-
-    yp = scratch;
-    uv = yp + (size_t)w * h;
-    for (row = 0; row < h; row++) {
-        int edge_row = (row < e) || (row >= h - e);
-        /* 取源行：往内 clamp 到 [e, h-1-e]，一定落在未被改写的内部区域 */
-        int sr = row < e ? e : (row >= h - e ? h - 1 - e : row);
-        for (col = 0; col < w; col++) {
-            int yi, ui, syi, sui, sc;
-            unsigned char Y, U, V;
-            if (!edge_row && col >= e && col < w - e) {
-                col = w - e - 1;
-                continue;
-            }
-            yi = row * w + col;
-            /* NV12 的 UV 是 2x2 下采样、U/V 交错，每行 w 字节 */
-            ui = (row >> 1) * w + (col & ~1);
-            Y = yp[yi];
-            U = uv[ui];
-            V = uv[ui + 1];
-            if (Y < minY) { minY = Y; minY_u = U; minY_v = V; }
-            if (V < minV) { minV = V; minV_y = Y; minV_u = U; }
-
-            sc = col < e ? e : (col >= w - e ? w - 1 - e : col);
-            syi = sr * w + sc;
-            sui = (sr >> 1) * w + (sc & ~1);
-            yp[yi] = yp[syi];
-            uv[ui] = uv[sui];
-            uv[ui + 1] = uv[sui + 1];
-            fixed++;
-        }
-    }
-    if (fixed > 0) gst_buffer_fill(vbuf, 0, scratch, total);
-    if (!g_w.scrub_logged) {
-        g_w.scrub_logged = 1;
-        pb2_logf("video: edge clamp %dx%d E=%d px=%d minY=(%d,%d,%d) minV=(%d,%d,%d)",
-                 w, h, e, fixed, minY, minY_u, minY_v, minV_y, minV_u, minV);
-    }
-    return fixed;
-}
-
-/*
- * 【第三十二轮】kmssink **本体** sink pad 上的 probe。
- *
- * 这里拿到的才是 videoscale 之后、与 render-rectangle 等大的最终 buffer
- * （真机 256x448 NV12，KMS plane 也是 256x448 / pitch 256）。边缘绿线在
- * 这一层。前两轮把处理挂在分支 ghost sink pad 上，那里是 640x360 源帧，
- * 改完还要过一次 lanczos 缩放，等于白改。
- */
-/*
- * 【3.5.14 弹幕】把弹幕烧进这一帧。
- *
- * 【为什么独立成函数，而不是并进 scrub_edge_green】
- * scrub 的第一条语句就是 `if (!g_w.sw_scale) return 0;` —— 绿边只出现在
- * X7（走 videoscale），X6 是 kmssink 硬件缩放没有绿边，所以 X6 上整个
- * scrub 早退。弹幕必须在 X6 上也生效，两者门控条件完全不同，混在一起
- * 迟早有人把弹幕一起门控掉。
- *
- * 【性能红线】本函数每帧都会被调用。所以第一条语句是模式判断，OFF 时
- * 连 caps 都不取。开启后也只做一次 extract + 一次 fill（与 scrub 同代价，
- * 266x472 NV12 ≈ 188KB，30fps ≈ 5.6MB/s，4×A53 上可接受；这是 X6 上
- * 唯一能把像素放到画面上层的办法）。
- *
- * 【为什么用 last_pos_ms 而不是自己计时】弹幕位置必须跟视频时钟走，
- * 否则暂停/seek/倍速全都会错位。last_pos_ms 由 video_loop 用
- * gst_element_query_position 更新，是模块里唯一的视频时间权威。
- */
-/* 平滑参数：每帧向真值最多收敛 40ms（30fps 下约 1.3ms/帧的追帧速度，
- * 肉眼只会看到"略慢一点点"而看不到整段跳动）；偏差超过 1200ms 视为
- * seek/重建，直接吸附不做慢速追赶；单帧最多按 200ms 推进，防长时间
- * 卡住后一次性冲出去。 */
-#define PB2_DM_SMOOTH_CORR   40
-#define PB2_DM_SMOOTH_SNAP   1200
-#define PB2_DM_SMOOTH_MAX_DT 200
-
-/*
- * 【3.5.15 弹幕平滑】给弹幕用的播放位置。
- *
- * 为什么不能直接用 last_pos_ms：它由 refresh_position() 更新，而后者跑在
- * worker 的空闲分支里，节拍是 pb2_cmdq_wait(50) —— 最快 50ms 一次；更糟的是
- * gst_element_query_position() 在带 sync 的 sink 上返回的是「最后渲染那一帧
- * 的 PTS」，本身就量化到 33ms。两者叠加，渲染线程看到的 last_pos_ms 是
- * 「每 50~80ms 跳一下」的台阶，弹幕横移就变成 20Hz 以下的跳格动画
- * —— 用户报的「横向移动很卡、一顿一顿」就是它。
- *
- * 做法：维护一个自走的平滑量。每帧按单调时钟前进，只向真值做「有上限的
- * 前向收敛」：绝不往回跳（往回跳在画面上就是抖动），也不无节制地追
- * （否则 seek 之后会滑行一大段）。真值跳变超过 SNAP 阈值时直接吸附。
- */
-static long long dm_smooth_pos(void) {
-    long long now = pb2_now_ms();
-    long long real = g_w.last_pos_ms;
-    long long dt;
-    long long err;
-
-    if (g_w.paused || g_w.eos || !g_w.pipeline_alive) {
-        g_w.dm_smooth = real;
-        g_w.dm_smooth_t = now;
-        g_w.dm_smooth_valid = 1;
-        return real;                       /* 暂停时弹幕必须定格 */
-    }
-    if (!g_w.dm_smooth_valid) {
-        g_w.dm_smooth = real;
-        g_w.dm_smooth_t = now;
-        g_w.dm_smooth_valid = 1;
-        return real;
-    }
-
-    dt = now - g_w.dm_smooth_t;
-    if (dt < 0) dt = 0;
-    if (dt > PB2_DM_SMOOTH_MAX_DT) dt = PB2_DM_SMOOTH_MAX_DT;
-    g_w.dm_smooth += dt;
-    g_w.dm_smooth_t = now;
-
-    err = real - g_w.dm_smooth;
-    if (err > PB2_DM_SMOOTH_SNAP || err < -PB2_DM_SMOOTH_SNAP) {
-        g_w.dm_smooth = real;              /* seek / 重建 / 起播：直接吸附 */
-    } else if (err > 0) {
-        if (err > PB2_DM_SMOOTH_CORR) g_w.dm_smooth += PB2_DM_SMOOTH_CORR;
-        else g_w.dm_smooth += err;         /* 只往前对齐，绝不往回跳 */
-    }
-    /* err <= 0：平滑量领先真值（query 还没刷新），保持不动等它追上来 */
-    return g_w.dm_smooth;
-}
-
-/*
- * 【调试】touch /tmp/dm_dump 之后，下一帧合成结果会被原样写到
- * /tmp/dm_frame.nv12（裸 NV12，无头）。开发机拉回去 `python .tmp/nv12png.py`
- * 就能转成 PNG 直接看弹幕的大小与位置 —— 因为 KMS 平面不在 miniapp 截图里，
- * 这是唯一能"看见"烧帧效果的途径。用完即删标记文件，不会连续落盘。
- * 生产环境没人 touch 这个文件，成本只有每帧一次 access()。
- */
-static void dm_debug_dump(const unsigned char *p, size_t len, int w, int h) {
-    FILE *fp;
-    if (access("/tmp/dm_dump", F_OK) != 0) return;
-    unlink("/tmp/dm_dump");
-    fp = fopen("/tmp/dm_frame.nv12", "wb");
-    if (!fp) return;
-    fwrite(p, 1, len, fp);
-    fclose(fp);
-    pb2_logf("dm: dump %dx%d %lu bytes", w, h, (unsigned long)len);
-}
-
-/* 【3.5.16 探针】统计 dm_apply 的实际调用次数与「同一 buffer 连续到达」次数。
- * videorate 会把 30fps 归一到 ~59.88fps，若它按同一 GstBuffer 重复下推，
- * 我们就会在**同一帧像素**上画两次不同时刻的弹幕 —— 画面上就是用户报的
- * 「横向移动拉丝残留」。先用数据确认，再决定怎么去重。 */
-static unsigned long long g_dm_calls = 0;
-static unsigned long long g_dm_dup = 0;
-static void *g_dm_last_vbuf = NULL;
-static long long g_dm_probe_ms = 0;
-/* 已经画过弹幕的那个 buffer 对象 + 画它的时刻。
- * videorate 的复制帧会把同一个 GstBuffer 连推两次，第二遍再画就会在同一块像素上
- * 叠两个时刻的弹幕 —— 横向移动因此变成拉丝。这里做一次性去重。
- * 带时间窗（PB2_DM_DUP_WIN_MS）是防 GstBufferPool 回收后复用同一对象指针：
- * 那时间隔必然远大于一个面板帧，不会被误吞。 */
-static void *g_dm_drawn_vbuf = NULL;
-static long long g_dm_drawn_ms = 0;
-static unsigned long long g_dm_dup_skip = 0;
-#define PB2_DM_DUP_WIN_MS 40
-
-static int dm_apply(GstPad *pad, void *vbuf) {
-    static unsigned char *dm_scratch = NULL;
-    static size_t dm_scratch_cap = 0;
-    GstCaps *caps;
-    GstStructure *st;
-    const char *fmt;
-    int w = 0, h = 0, drawn = 0;
-    size_t total;
-    unsigned char *yp;
-    unsigned char *uv;
-
-    if (!vbuf) return 0;
-
-    /* 探针：无论模式开关都统计（关模式下也能看出 videorate 的放大倍数）。 */
-    g_dm_calls++;
-    if (vbuf == g_dm_last_vbuf) g_dm_dup++;
-    g_dm_last_vbuf = vbuf;
-    {
-        long long nowp = pb2_now_ms();
-        if (g_dm_probe_ms == 0) g_dm_probe_ms = nowp;
-        if (nowp - g_dm_probe_ms >= 5000) {
-            long long span = nowp - g_dm_probe_ms;
-            pb2_logf("dm: probe 5s calls=%llu dup=%llu skip=%llu (%.1f calls/s)",
-                     g_dm_calls, g_dm_dup, g_dm_dup_skip,
-                     (double)g_dm_calls * 1000.0 / (double)span);
-            g_dm_calls = 0;
-            g_dm_dup = 0;
-            g_dm_dup_skip = 0;
-            g_dm_probe_ms = nowp;
-        }
-    }
-
-    if (g_w.dm_mode == PB2_DM_OFF) {
-        g_dm_drawn_vbuf = NULL;
-        return 0;
-    }
-
-    /* videorate 复制帧：同一个 GstBuffer 刚画过，16ms 内又来一次 → 跳过。 */
-    {
-        long long nowd = pb2_now_ms();
-        if (vbuf == g_dm_drawn_vbuf && nowd - g_dm_drawn_ms < PB2_DM_DUP_WIN_MS) {
-            g_dm_dup_skip++;
-            return 0;
-        }
-    }
-
-    caps = gst_pad_get_current_caps(pad);
-    if (!caps) return 0;
-    st = gst_caps_get_structure(caps, 0);
-    if (!st) {
-        gst_caps_unref(caps);
-        return 0;
-    }
-    fmt = gst_structure_get_string(st, "format");
-    gst_structure_get_int(st, "width", &w);
-    gst_structure_get_int(st, "height", &h);
-    gst_caps_unref(caps);
-    /* 只认 NV12：其它格式要么是协商失败的中途态，要么是本项目从没走过的路径。
-     * 静默 return 是刻意的 —— 每帧打日志会把 /tmp/pb2.log 刷爆。 */
-    if (!fmt || strcmp(fmt, "NV12") != 0 || w < 16 || h < 16) return 0;
-
-    total = (size_t)w * h * 3 / 2;
-    if (gst_buffer_get_size(vbuf) < total) return 0;
-
-    if (dm_scratch_cap < total) {
-        unsigned char *p = (unsigned char *)realloc(dm_scratch, total);
-        if (!p) return 0;
-        dm_scratch = p;
-        dm_scratch_cap = total;
-    }
-    if (gst_buffer_extract(vbuf, 0, dm_scratch, total) != (size_t)total) return 0;
-
-    /*
-     * 【3.5.15 字号换算】JS 侧给的是"屏幕上的逻辑像素"，而这里拿到的是
-     * 平面缓冲区（真机 716x1280 vs 逻辑 473x266，约 2.7 倍），kmssink 会把
-     * 缓冲区整体缩小到 render-rectangle。不换算的话 24px 的字最终只剩 9px，
-     * 这就是用户报的"字号有点小，看不清"。
-     * 比例用整数百分比算，避免在 native 里引浮点。
-     */
-    if (g_w.req && g_w.req->w > 0) {
-        /*
-         * 比例 = 缓冲区宽 / 矩形宽。这里**不能**因为 rotate 是 90/270 就换成 h：
-         * 旋转是画在缓冲区内容里的（dm_map 负责），缓冲区本身与矩形同向，
-         * w 对 w、h 对 h。曾经写成 lw = h，于是 480x852 的缓冲区按 852 去比
-         * 266 的矩形，算出 320%，字号被顶到钳位上限 72 —— 屏幕上反而过大。
-         */
-        int pct = w * 100 / g_w.req->w;
-        if (pct < 100) pct = 100;          /* 缓冲区比逻辑还小：不放大 */
-        if (pct > 400) pct = 400;
-        if (pct != g_w.dm_scale_pct) {
-            g_w.dm_scale_pct = pct;
-            g_w.dm_font_eff = 0;           /* 比例变了，强制重算字号 */
-        }
-    }
-    if (g_w.dm_font_px > 0) {
-        int eff = g_w.dm_font_px * (g_w.dm_scale_pct > 0 ? g_w.dm_scale_pct : 100) / 100;
-        if (eff > 72) eff = 72;            /* 位图宽度上限决定的硬钳位 */
-        if (eff != g_w.dm_font_eff || g_w.dm_mode_dirty) {
-            int changed = (eff != g_w.dm_font_eff);
-            g_w.dm_font_eff = eff;
-            g_w.dm_mode_dirty = 0;
-            dm_set_mode(g_w.dm_mode, eff);
-            if (changed) {
-                pb2_logf("dm: 字号换算 %d -> %d（缓冲区 %dx%d 逻辑宽 %d rot=%d）",
-                         g_w.dm_font_px, eff, w, h,
-                         g_w.req ? g_w.req->w : 0, g_w.rotate);
-            }
-        }
-    }
-
-    yp = dm_scratch;
-    uv = yp + (size_t)w * h;
-    drawn = dm_render(yp, uv, w, h, g_w.rotate, dm_smooth_pos(), pb2_now_ms());
-    if (drawn > 0) {
-        gst_buffer_fill(vbuf, 0, dm_scratch, total);
-        g_dm_drawn_vbuf = vbuf;
-        g_dm_drawn_ms = pb2_now_ms();
-    }
-    dm_debug_dump(dm_scratch, total, w, h);
-
-    /* 开启了却没东西可画 —— 每个会话只提示一次，方便区分「没数据」和
-     * 「数据有但时间对不上」这两种完全不同的故障。 */
-    if (drawn == 0 && !g_w.dm_empty_logged && dm_count() == 0) {
-        g_w.dm_empty_logged = 1;
-        pb2_logf("dm: 已开启但当前没有弹幕数据（mode=%d gen=%u）",
-                 g_w.dm_mode, g_w.dm_gen);
-    }
-    return drawn;
-}
-
-static int on_vsink_buffer(GstPad *pad, GstPadProbeInfo *info, void *ud) {
-    void *vb = gst_pad_probe_info_get_buffer(info);
-    (void)ud;
-    if (vb) scrub_edge_green(pad, vb);
-    if (vb) dm_apply(pad, vb);
-    return GST_PAD_PROBE_OK;
-}
-
 static int on_video_buffer(GstPad *pad, GstPadProbeInfo *info, void *ud) {
+    (void)pad;
     (void)info;
     (void)ud;
-
-    /*
-     * 【第二十九轮 v6】首帧打一次 sink 实际协商到的 buffer 尺寸。
-     * 绿边排查唯一缺的就是这一行：如果 caps 与 render-rect 相等，绿必来自
-     * 源帧边缘（裁源即可）；如果不等，就是平面/管线尺寸对不上，得改别处。
-     */
-    if (!g_w.vcaps_logged) {
-        GstCaps *caps = gst_pad_get_current_caps(pad);
-        if (caps) {
-            GstStructure *st = gst_caps_get_structure(caps, 0);
-            int cw = 0, ch = 0;
-            if (st && gst_structure_get_int(st, "width", &cw) &&
-                gst_structure_get_int(st, "height", &ch) && cw > 0 && ch > 0) {
-                g_w.vcaps_logged = 1;
-                pb2_logf("video: sink caps %dx%d, render-rect %s", cw, ch, g_w.rect);
-            }
-            gst_caps_unref(caps);
-        }
-    }
-    /* 【第三十二轮】这里**不再**做边缘处理：这个 pad 上是 640x360 源帧，
-     * 改它没用。见 on_vsink_buffer（挂在 kmssink 本体 sink pad）。 */
     atomic_fetch_add_explicit(&g_w.probe.frames, 1, memory_order_relaxed);
     atomic_store_explicit(&g_w.probe.lastFrameMs, pb2_now_ms(), memory_order_relaxed);
 
@@ -2617,9 +1701,6 @@ static int on_video_buffer(GstPad *pad, GstPadProbeInfo *info, void *ud) {
     if (g_w.frame_epoch_ms > 0) {
         long long wait = pb2_now_ms() - g_w.frame_epoch_ms;
         g_w.frame_epoch_ms = 0;
-        /* 首帧时刻单独记一份：check_audio_stall 的「迟迟没有声音」要用它当基准。
-         * frame_epoch_ms 一清零就没有起算点了（它的语义是"还在等首帧"）。 */
-        g_w.first_frame_ms = pb2_now_ms();
         if (!g_w.first_frame_logged) {
             g_w.first_frame_logged = 1;
             /*
@@ -3251,15 +2332,13 @@ static int build_pipeline(pb2_open_req_t *req, int src_already_open) {
                                   strstr(g_w.src.location, "hevc"))
                                      ? "h265parse"
                                      : "h264parse";
-            char vpost[256];
-            video_post_rate_desc(vpost, sizeof(vpost));
             n = snprintf(desc, sizeof(desc),
                          "filesrc location=\"%s\" ! %s ! mppvideodec rotation=%d ! "
-                         "videorate ! %s"
-                         "kmssink name=vsink %sdriver-name=rockchip sync=true "
+                         "videorate ! video/x-raw,framerate=%s ! "
+                         "kmssink name=vsink plane-id=%d driver-name=rockchip sync=true "
                          "max-lateness=%d qos=true force-aspect-ratio=false "
                          "skip-vsync=true render-rectangle=%s",
-                         loc1, parser, decoder_rotation(), vpost, kms_plane_arg(),
+                         loc1, parser, g_w.rotate, PB2_PANEL_RATE, PB2_KMS_PLANE_ID,
                          PB2_MAX_LATENESS, g_w.rect);
             g_w.vbranch = 1; /* 固定分支，不走 pad-added */
             raw_fixed = 1;
@@ -3403,137 +2482,6 @@ parse_it:
 
 /* ============================ open ============================ */
 
-/*
- * 非阻塞取一条 bus ERROR 并格式化成文本。返回 1 = 取到了。
- *
- * 【为什么必须在 do_open 内部自己取】
- * worker 的 poll_bus() 只在主循环里跑，而 do_open 的起播缓冲门是**阻塞**
- * 轮询（最长 4s）。这 4s 里管线报的错（典型：「Failed to get plane 76」）
- * 没有任何人读 bus，于是：
- *   - 日志里看不到真实原因；
- *   - lastError 一直是 0，最后被 set_state(PLAYING) 的 FAILURE 覆盖成
- *     一句毫无信息量的 "set_state(PLAYING) failed"。
- * 真机 3.6.2 的日志就是这个样子（见 docs/x7pro-adaptation.md §3.6）。
- */
-static int peek_bus_error(char *out, size_t cap) {
-    GstMessage *msg;
-    GError *ge = NULL;
-    char *dbg = NULL;
-
-    if (!g_w.bus || !out || cap < 2) return 0;
-    msg = gst_bus_timed_pop_filtered(g_w.bus, (GstClockTime)0, GST_MESSAGE_ERROR);
-    if (!msg) return 0;
-    out[0] = '\0';
-    gst_message_parse_error(msg, &ge, &dbg);
-    if (ge) {
-        snprintf(out, cap, "%s%s%s",
-                 ge->message ? ge->message : "bus error",
-                 (dbg && dbg[0]) ? " | " : "",
-                 (dbg && dbg[0]) ? dbg : "");
-        g_error_free(ge);
-    } else {
-        snprintf(out, cap, "bus error");
-    }
-    if (dbg) g_free(dbg);
-    gst_message_unref(msg);
-    return 1;
-}
-
-/*
- * OPEN 失败的统一出口：能兜底就兜底，不能就报错。
- *
- * 兜底条件 = 本次用了**显式 plane-id** 且还没兜过。做法是把意图记在
- * g_w.want_plane_retry 上交给 process_cmd —— 不能在 do_open 里递归调用
- * 自己：它开头会 pb2_open_req_free(g_w.req)，而 g_w.req 正是这里要复用的
- * 请求对象，递归第一句就 use-after-free。
- */
-static int open_fail_or_retry(const char *why) {
-    if (!g_w.plane_fallback_done && g_w.kms_plane_id > 0) {
-        g_w.plane_fallback_done = 1;
-        g_w.want_plane_retry = 1;
-        pb2_logf("OPEN fail (%s) with plane-id=%d -> retry once with auto plane + videoscale",
-                 why, g_w.kms_plane_id);
-        /* 回 OPENING：JS 侧看到的是「还在起播」，不会弹错 */
-        pb2_stats_patch_error(&g_w.stats, PB2_E_NONE, "");
-        pb2_stats_patch_state(&g_w.stats, PB2_STATE_OPENING);
-        teardown_pipeline();
-        g_w.frame_epoch_ms = 0;
-        return 1; /* 已安排重试 */
-    }
-    pb2_stats_patch_error(&g_w.stats, PB2_E_OPEN_FAILED, why);
-    pb2_stats_patch_state(&g_w.stats, PB2_STATE_ERROR);
-    teardown_pipeline();
-    g_w.frame_epoch_ms = 0;
-    return 0;
-}
-
-/* 这条 bus 错误是不是「音频设备打不开」类？ */
-static int is_audio_bus_error(const char *msg) {
-    char low[256];
-    size_t i;
-    if (!msg) return 0;
-    for (i = 0; i + 1 < sizeof(low) && msg[i]; i++) {
-        char c = msg[i];
-        low[i] = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
-    }
-    low[i] = '\0';
-    /* 真机文案："Could not open audio device for playback. Device is being
-     * used by another application." / 资源路径 /ext/alsa/gst-alsasink */
-    if (strstr(low, "audio device") || strstr(low, "alsasink") || strstr(low, "alsa") ||
-        strstr(low, "pcm") || strstr(low, "could not open audio")) {
-        return 1;
-    }
-    return 0;
-}
-
-/*
- * 音频设备被占时的降级路径。
- *
- * 真机现象（2026-11-08 00:25 日志）：
- *   start gate: bus error in 705ms (v=1/1 frames=4 ...)
- *   bus error -> Could not open audio device for playback.
- *                Device is being used by another application.
- * 视频分支 855ms 就上屏了，**画面完全正常**，但 alsasink 打不开 → 整条管线
- * 被错误终止 → 用户看到「播放错误」。这就是「有概率没声音」的真身：
- * 设备被系统/上一个会话占着的概率性事件。
- *
- * 策略（最多两次重建）：
- *   第一次：等 400ms 再带音频重开（alsasink 关闭/系统提示音结束后通常就能开）
- *   第二次：仍然被占 -> 关掉音频只播视频，并在 status().audioOff 上报，
- *           页面提示「无声：音频设备被占用」。画面绝不因此中断。
- */
-static int open_audio_retry(void) {
-    if (g_w.audio_retry_stage == 0) {
-        g_w.audio_retry_stage = 1;
-        g_w.want_audio_retry = 1;
-        g_w.reopen_delay_ms = 400; /* 给上一个 alsasink/系统提示音释放的时间 */
-        pb2_logf("OPEN audio: device busy -> retry in 400ms (video was fine)");
-        pb2_stats_patch_error(&g_w.stats, PB2_E_NONE, "");
-        pb2_stats_patch_state(&g_w.stats, PB2_STATE_OPENING);
-        teardown_pipeline();
-        g_w.frame_epoch_ms = 0;
-        return 1;
-    }
-    if (g_w.audio_retry_stage == 1) {
-        g_w.audio_retry_stage = 2;
-        g_w.audio_off = 1;
-        g_w.want_audio_retry = 1;
-        g_w.reopen_delay_ms = 0;
-        pb2_logf("OPEN audio: still busy -> continue VIDEO-ONLY (audioOff=1)");
-        pb2_stats_patch_error(&g_w.stats, PB2_E_NONE, "");
-        pb2_stats_patch_state(&g_w.stats, PB2_STATE_OPENING);
-        teardown_pipeline();
-        g_w.frame_epoch_ms = 0;
-        return 1;
-    }
-    /* 已经降级为无音频还报音频错？按普通失败处理，避免死循环 */
-    pb2_stats_patch_error(&g_w.stats, PB2_E_OPEN_FAILED, "open: audio device busy");
-    pb2_stats_patch_state(&g_w.stats, PB2_STATE_ERROR);
-    teardown_pipeline();
-    g_w.frame_epoch_ms = 0;
-    return 0;
-}
-
 static void do_open(pb2_open_req_t *req) {
     long long t0 = pb2_now_ms();
     GstState cur = 0;
@@ -3561,62 +2509,14 @@ static void do_open(pb2_open_req_t *req) {
     /* 参数落库 */
     g_w.req = req;
     g_w.rotate = rotation_for_transpose(req->transpose);
-    /*
-     * 【X7 Pro 适配】设备显示参数在每次 OPEN 时重新取，确保 seek 重建、
-     * 直播重连都用同一套值。老版本 JS 不传（panelOffset=-1/planeId=0）时
-     * 与 X6 Pro 行为逐字节一致。
-     */
-    g_w.panel_x_offset = (req->panelOffset >= 0) ? req->panelOffset : PB2_PANEL_X_OFFSET;
-    g_w.kms_plane_id = (req->planeId == 0) ? PB2_KMS_PLANE_ID : req->planeId;
-    g_w.sw_scale = (req->swScale >= 1 && req->swScale <= 3) ? req->swScale : 0;
-    g_w.buf_scale = (req->bufScale >= 50 && req->bufScale <= 400) ? req->bufScale : 100;
-    g_w.crop_x = (req->cropX > 0 && req->cropX <= 2048) ? req->cropX : 0;
-    g_w.crop_y = (req->cropY > 0 && req->cropY <= 2048) ? req->cropY : 0;
-    /*
-     * 【平面兜底重试】上一次 OPEN 已经判定「显式平面不可用」。这次不再用它，
-     * 直接切「自动挑平面 + 软件缩放」。注意必须写在上面两行之后 ——
-     * 否则会被请求里的 planeId 覆盖回去，重试等于没做。
-     */
-    if (g_w.want_plane_retry) {
-        g_w.want_plane_retry = 0;
-        g_w.kms_plane_id = -1;
-        g_w.sw_scale = 1;
-        pb2_logf("OPEN retry: force planeId=auto + videoscale");
-    }
-    pb2_logf("OPEN device profile: panelXOffset=%d planeId=%s swScale=%d bufScale=%d%%",
-             g_w.panel_x_offset, g_w.kms_plane_id < 0 ? "auto" : "fixed", g_w.sw_scale,
-             g_w.buf_scale);
     snprintf(g_w.rect, sizeof(g_w.rect), "<%d,%d,%d,%d>",
-             g_w.panel_x_offset + req->x, req->y, req->w, req->h);
-    g_w.vcaps_logged = 0;
-    g_w.scrub_logged = 0;
-    /*
-     * 【3.5.14 弹幕】新会话 = 新视频，旧弹幕必须掉干净。
-     *
-     * 注意**不动 dm_mode**：用户刚把开关拨到「1/2」，换个视频还是想只看
-     * 上半屏，把模式重置回 OFF 属于替用户做决定。字号同理。
-     * 但数据一定要清 —— 上一次的视频的弹幕贴到新视频上是最刺眼的 bug。
-     */
-    dm_clear();
-    g_w.dm_gen++;
-    g_w.dm_fed_ms = 0;
-    g_w.dm_empty_logged = 0;
-    /* videoscale 的输出 caps 必须是偶数宽高（NV12），且与 render-rectangle
-     * 严格等大。差 1px 都会让 kmssink 再拉一次，画面比例就毁了。 */
-    normalize_video_rect("OPEN");
-    /* 排障必备：逻辑矩形 + 真正下发的面板矩形。自检页「日志」里能看到，
-     * 对不上就是「画面贴边/被裁」的直接证据。 */
-    pb2_logf("OPEN rect: logical=%d,%d,%d,%d -> panel %s (offset=%d)",
-             req->x, req->y, req->w, req->h, g_w.rect, g_w.panel_x_offset);
+             PB2_PANEL_X_OFFSET + req->x, req->y, req->w, req->h);
     g_w.seek_target = req->startMs;
     g_w.seek_pending = 0;
     g_w.eos = 0;
     g_w.paused = 0;
     g_w.t_start = t0;
     g_w.last_pos_ms = req->startMs;
-    g_w.dm_smooth_valid = 0;
-    g_w.dm_smooth = req->startMs;
-    g_w.dm_smooth_t = pb2_now_ms();
     g_w.last_plane_ms = t0;
     g_w.last_marker_ms = 0;
     g_w.last_fps_ms = t0;
@@ -3651,20 +2551,6 @@ static void do_open(pb2_open_req_t *req) {
     g_w.audio_stall_ms = 0;
     g_w.audio_stall_frames0 = 0;
     g_w.audio_stall_heals = 0; /* 每个新会话重新给满音频自愈配额 */
-    /*
-     * 【无声回归】OPEN 也必须重置下面三个，不能只依赖 STOP/RELEASE 的
-     * reset_session_fields()：
-     *   - audio_heals：上一支视频救满 2 次后如果不 STOP 直接开下一支，
-     *     配额会被带过去 → 新视频一次都不救，还可能被 audioDead 误报。
-     *   - first_frame_ms：不清就会沿用上一支的首帧时刻，新视频的音轨若
-     *     慢启动会被「首帧后 4.5s 没声音」当场判死。
-     *   - plane_fallback_done：上一次 OPEN 触发过「显式平面不可用 → 自选」
-     *     后，下次 OPEN 会重新用平面 76；标志不复位就再也没有兜底，
-     *     表现是同一台机器「第一支能放，后面全黑」。
-     */
-    g_w.audio_heals = 0;
-    g_w.first_frame_ms = 0;
-    g_w.plane_fallback_done = 0;
     /* 【P1-18】帧率上限：0 = 不限制，>0 时在 mppvideodec 之后插 videorate max-rate */
     g_w.fps_cap = req->fpsCap;
 
@@ -3773,8 +2659,7 @@ static void do_open(pb2_open_req_t *req) {
      */
     if (pb2_mute_enabled()) pb2_mixer_pre_mute();
 
-    int built = build_pipeline(req, 0);
-    if (built != 0) {
+    if (build_pipeline(req, 0) != 0) {
         /*
          * 【P0-1】建管线失败也要走 teardown：build_pipeline 内部可能已经
          * 打开了 src（pb2_src_open 成功但 gst_parse_launch 失败），
@@ -3842,9 +2727,9 @@ static void do_open(pb2_open_req_t *req) {
     pb2_logf("set_state(PAUSED) -> %d (+%lldms)", sr, pb2_now_ms() - t0);
 
     if (sr == GST_STATE_CHANGE_FAILURE) {
-        pb2_logf("set_state(PAUSED) FAILURE -> %s",
-                 open_fail_or_retry("set_state(PAUSED) failed") ? "retrying with auto plane"
-                                                                : "error");
+        pb2_stats_patch_error(&g_w.stats, PB2_E_OPEN_FAILED, "set_state(PAUSED) failed");
+        pb2_stats_patch_state(&g_w.stats, PB2_STATE_ERROR);
+        teardown_pipeline();
         return;
     }
 
@@ -3854,10 +2739,6 @@ static void do_open(pb2_open_req_t *req) {
                               : PB2_START_GATE_TIMEOUT_MS;
         int want_audio = req->audio ? 1 : 0;
         int ready = 0;
-        int gate_err = 0;             /* 1 = 门内读到 bus ERROR，提前中止 */
-        int audio_err = 0;            /* 1 = 错误来自音频设备（可降级，不判死） */
-        char errbuf[192];
-        errbuf[0] = '\0';
         /*
          * 诊断覆盖：/tmp/pb2_startgate 写毫秒数可改超时（0 = 关闭缓冲门，
          * 用于 A/B 对比「加门 vs 不加门」的起播表现）。
@@ -3874,60 +2755,24 @@ static void do_open(pb2_open_req_t *req) {
             int v_ok = g_w.vbranch &&
                        atomic_load_explicit(&g_w.probe.frames, memory_order_relaxed) > 0;
             int a_ok = want_audio ? g_w.abranch : 1;
-            /*
-             * 【3.6.3 关键】门内必须自己读 bus ERROR。
-             * 抢不到平面时管线会在几十毫秒内报错（sink 起不来），但 worker
-             * 正卡在这个循环里，poll_bus() 根本没机会跑 —— 于是 4s 白等，
-             * 最后报成 "set_state(PLAYING) failed"，真实原因丢失。
-             * 这里一旦读到错误就立刻中止，并把原文带进兜底/报错。
-             */
-            if (peek_bus_error(errbuf, sizeof(errbuf))) {
-                pb2_logf("start gate: bus error -> %s", errbuf);
-                /*
-                 * 【音频错误不判死整条管线】alsasink 打不开（设备被占）时
-                 * 视频分支往往已经出帧了（真机：855ms 就上屏）。此时把整条
-                 * 管线判 ERROR，用户丢掉的是**画面**，代价远大于收益。
-                 * 先交给 open_audio_retry() 走「等 400ms 重试 → 不行就无声」。
-                 */
-                if (is_audio_bus_error(errbuf)) { audio_err = 1; break; }
-                /*
-                 * 直播不在 OPEN 阶段判死：直播的断流/错误归 live_reconnect
-                 * 管（它有重连上限），这里判 ERROR 反而会让用户看到
-                 * 「播放错误」而失去自动恢复的机会。继续等到门超时即可。
-                 */
-                if (!g_w.is_live) { gate_err = 1; break; }
-                pb2_sleep_ms(20);
-                continue;
-            }
             if (v_ok && a_ok) { ready = 1; break; }
             pb2_sleep_ms(20);
         }
         pb2_logf("start gate: %s in %lldms (v=%d/%lld frames=%lld a=%d/%d want_audio=%d)",
-                 gate_err ? "bus-error" : (ready ? "both ready" : "timeout"),
+                 ready ? "both ready" : "timeout",
                  pb2_now_ms() - t_gate,
                  g_w.vbranch ? 1 : 0, (long long)1,
                  (long long)atomic_load_explicit(&g_w.probe.frames, memory_order_relaxed),
                  g_w.abranch ? 1 : 0, want_audio, want_audio);
-        if (audio_err) {
-            open_audio_retry();
-            return;
-        }
-        if (gate_err) {
-            /* 走统一出口：显式平面时自动切 auto+videoscale 重来一次 */
-            open_fail_or_retry(errbuf);
-            return;
-        }
     }
 
     sr = gst_element_set_state(g_w.pipe, GST_STATE_PLAYING);
     pb2_logf("set_state(PLAYING) -> %d (+%lldms)", sr, pb2_now_ms() - t0);
 
     if (sr == GST_STATE_CHANGE_FAILURE) {
-        /* 显式 plane-id 抢不到平面时，这里就是第一现场（PAUSED 异步阶段
-         * sink 起不来 → 返回 FAILURE）。统一出口会先兜底一次再决定报错。 */
-        pb2_logf("set_state(PLAYING) FAILURE -> %s",
-                 open_fail_or_retry("set_state(PLAYING) failed") ? "retrying with auto plane"
-                                                                 : "error");
+        pb2_stats_patch_error(&g_w.stats, PB2_E_OPEN_FAILED, "set_state(PLAYING) failed");
+        pb2_stats_patch_state(&g_w.stats, PB2_STATE_ERROR);
+        teardown_pipeline();
         return;
     }
 
@@ -3979,13 +2824,15 @@ static void do_open(pb2_open_req_t *req) {
                          "(v=%d a=%d) -> treat as playing",
                          sr, cur, pend, g_w.vbranch ? 1 : 0, g_w.abranch ? 1 : 0);
             } else {
-                pb2_logf("OPEN failed: preroll %s (sr=%d cur=%d pend=%d v=%d/%lld a=%d/%d)",
+                pb2_logf("OPEN failed: preroll %s (sr=%d cur=%d pend=%d v=%d/%d a=%d/%d) -> error",
                          sr == GST_STATE_CHANGE_ASYNC ? "timeout" : "failure", sr,
                          cur, pend,
                          g_w.vbranch ? 1 : 0,
                          (long long)atomic_load_explicit(&g_w.probe.frames, memory_order_relaxed),
                          g_w.abranch ? 1 : 0, want_a);
-                open_fail_or_retry("open: preroll timeout");
+                pb2_stats_patch_error(&g_w.stats, PB2_E_TIMEOUT, "open: preroll timeout");
+                pb2_stats_patch_state(&g_w.stats, PB2_STATE_ERROR);
+                teardown_pipeline();
                 return;
             }
         }
@@ -4254,7 +3101,6 @@ static void do_seek(long long target_ms) {
         g_w.late_grace_armed = 0;
         pb2_logf("seek(restart) done total=%lldms base=%lld", pb2_now_ms() - t0, g_w.base_ms);
         g_w.last_pos_ms = clamped;
-        g_w.dm_smooth_valid = 0;           /* seek 落点：弹幕立即吸附 */
         pb2_stats_patch_position(&g_w.stats, clamped, dur);
         pb2_stats_patch_seek(&g_w.stats, 0, clamped);
         pb2_probe_reset(&g_w.probe);
@@ -4368,7 +3214,6 @@ static void do_seek(long long target_ms) {
      */
     if (got_async) {
         g_w.last_pos_ms = clamped;
-        g_w.dm_smooth_valid = 0;           /* seek 落点：弹幕立即吸附 */
         pb2_stats_patch_position(&g_w.stats, clamped, dur);
         pb2_stats_patch_seek(&g_w.stats, 0, clamped);
     } else {
@@ -5036,31 +3881,6 @@ static void check_first_frame(void) {
         return;
     }
 
-    /*
-     * 【平面兜底】显式 plane-id 在这台机器上可能不可用。
-     *
-     * DRM plane id 由内核按 DT 分配，换固件就可能变；显式 id 失效的典型表现
-     * 不是"报错"，而是「分支建好了、一帧 buffer 都不来」（sink 抢不到平面，
-     * pad 不激活 → 反压）。4s（远早于 15s 超时）还没有帧就退回「不写
-     * plane-id，让 kmssink 自选」重建一次，每会话只做一次。
-     *
-     * 与上面 seek 重试的区别：那个针对「demuxer 不推 buffer」（vsrc_logged=0），
-     * 这个针对「显式平面不可用」，两者可以叠加，各自只做一次。
-     */
-    if (!g_w.plane_fallback_done && g_w.kms_plane_id > 0 &&
-        g_w.frame_epoch_ms > 0 && now - g_w.frame_epoch_ms >= 4000) {
-        g_w.plane_fallback_done = 1;
-        pb2_logf("first frame: none in %lldms with plane-id=%d -> fallback to auto plane",
-                 now - g_w.frame_epoch_ms, g_w.kms_plane_id);
-        g_w.kms_plane_id = -1;
-        g_w.seek_target = g_w.last_pos_ms > 0 ? g_w.last_pos_ms : 0;
-        g_w.seek_pending = 1;
-        g_w.seek_last_ms = pb2_now_ms() - PB2_SEEK_DEBOUNCE_MS - 1;
-        g_w.frame_epoch_ms = pb2_now_ms();
-        g_w.seek_retry_issued = 1;   /* 告知 do_seek：这次不能清零计数器 */
-        return;
-    }
-
     if (now - g_w.frame_epoch_ms >= PB2_FIRST_FRAME_TIMEOUT_MS) {
         pb2_logf("first frame failed: no frame in %dms (alive=%d vbranch=%d) -> error",
                  PB2_FIRST_FRAME_TIMEOUT_MS, g_w.pipeline_alive, g_w.vbranch);
@@ -5145,86 +3965,21 @@ static void check_audio_stall(void) {
     unsigned long long ab;
     unsigned long long fr;
     long long now;
-    long long seen;
 
     if (!g_w.pipeline_alive || !g_w.pipe) return;
+    if (!g_w.abranch) return;                 /* 根本没有音频分支（无音轨/建失败） */
     if (!g_w.req || !g_w.req->audio) return;  /* 本来就要求不要音频 */
     if (g_w.paused || g_w.eos) return;
     if (g_w.is_live) return;                  /* 直播自己有 live_reconnect */
     if (g_w.frame_epoch_ms > 0) return;       /* 还在等首帧，交给 check_first_frame */
     if (g_w.seek_pending) return;             /* 已经在重建了 */
+    if (g_w.audio_stall_heals >= PB2_AUDIO_STALL_HEALS) return;
 
     now = pb2_now_ms();
     ab = atomic_load_explicit(&g_w.probe.abytes, memory_order_relaxed);
     fr = atomic_load_explicit(&g_w.probe.frames, memory_order_relaxed);
-    seen = g_w.first_frame_ms > 0 ? now - g_w.first_frame_ms : -1;
 
-    /*
-     * ① 音频分支根本没建起来（abranch=0）。
-     *
-     * 判据必须带「有第二路音频输入」或「本来已经有分支」：
-     *   - DASH 双输入：req->input2 非空 → 一定应该有音轨，没有就是故障；
-     *   - 单文件（durl/本地）：demuxer 没给 audio pad 说明这个文件本来就没音轨，
-     *     重建一百次也没用，直接放过。
-     * 这一条覆盖用户反馈的「有概率没有声音」最常见的形态：音频 URL 那一路
-     * 偶发 403/超时，ffmpeg 的可选映射静默丢掉音轨，画面一切正常。
-     */
-    if (!g_w.abranch) {
-        int want2 = g_w.req->input2 && g_w.req->input2[0];
-        if (!want2) return;                   /* 没有音轨的文件，不折腾 */
-        if (g_w.audio_heals >= PB2_AUDIO_HEALS) return;
-        if (seen < 0 || seen < PB2_AUDIO_START_GRACE_MS) return;
-        if (fr < (unsigned long long)PB2_AUDIO_START_FRAMES) return;
-
-        g_w.audio_heals++;
-        pb2_logf("audio missing: no audio branch %lldms after first frame "
-                 "(video %llu frames, ab=0) -> rebuild pipeline at %lldms "
-                 "(heal %d/%d, input2=%s)",
-                 seen, fr, g_w.last_pos_ms, g_w.audio_heals, PB2_AUDIO_HEALS,
-                 g_w.req->input2);
-        g_w.seek_target = g_w.last_pos_ms > 0 ? g_w.last_pos_ms : 0;
-        g_w.seek_pending = 1;
-        g_w.seek_last_ms = pb2_now_ms() - PB2_SEEK_DEBOUNCE_MS - 1;
-        pb2_stats_patch_seek(&g_w.stats, 1, g_w.seek_target);
-        return;
-    }
-
-    if (g_w.audio_stall_heals >= PB2_AUDIO_STALL_HEALS) return;
-
-    /*
-     * ② 分支建了、但一个音频字节都没到。
-     *
-     * alsasink 打不开（PCM 被占 / bluealsa 没就绪）时分支会自毁，反过来
-     * 「分支还在、数据不来」更多是解码链或上游 mapping 的问题。两种都试一次重建：
-     * 首帧后 4.5s 还没有任何音频数据，正常播放里不存在这种情况。
-     */
-    if (ab == 0) {
-        /*
-         * 【3.6.2 收窄范围：只救 DASH 双输入】
-         *
-         * 单文件（durl/自检页的 html5 取流）里「0 音频字节」有两种可能：
-         *   a) 这个文件本来就没有音轨（B 站某些稿件就是这样）；
-         *   b) 真的有音轨但解码链坏了。
-         * 两者在 native 侧无法区分，而重建对 (a) 毫无意义，还会在重建瞬间
-         * 让状态机短暂进入 OPENING/ERROR —— 真机自检页那次「起播 ok，5s 后
-         * 播放错误」正是重建窗口里被读到的暂态。
-         * 用户报的「概率性没声音」全部来自 DASH（音频是独立 URL，偶发 403/超时，
-         * ffmpeg 的可选映射静默丢轨），所以这里只对 input2 非空的会话自愈。
-         */
-        if (!(g_w.req->input2 && g_w.req->input2[0])) return;
-        if (g_w.audio_heals >= PB2_AUDIO_HEALS) return;
-        if (seen < 0 || seen < PB2_AUDIO_START_GRACE_MS) return;
-        if (fr < (unsigned long long)PB2_AUDIO_START_FRAMES) return;
-        g_w.audio_heals++;
-        pb2_logf("audio missing: branch ready but 0 audio bytes after %lldms "
-                 "(video %llu frames) -> rebuild pipeline at %lldms (heal %d/%d)",
-                 seen, fr, g_w.last_pos_ms, g_w.audio_heals, PB2_AUDIO_HEALS);
-        g_w.seek_target = g_w.last_pos_ms > 0 ? g_w.last_pos_ms : 0;
-        g_w.seek_pending = 1;
-        g_w.seek_last_ms = pb2_now_ms() - PB2_SEEK_DEBOUNCE_MS - 1;
-        pb2_stats_patch_seek(&g_w.stats, 1, g_w.seek_target);
-        return;
-    }
+    if (ab == 0) return;                      /* 音频还没开始，正常 */
     if (ab != g_w.audio_stall_ab) {
         /* 音频在推进：静默刷新基准。
          * 只在真的冻结过 >= 1s 时才打日志 —— 本函数每几十毫秒跑一次，
@@ -5295,93 +4050,19 @@ static void keep_marker(void) {
  */
 static void reset_session_fields(void) {
     g_w.is_live = 0;
-    /* 音频兜底状态属于「一次 OPEN 周期」，会话结束必须清，否则下一支视频
-     * 会直接以无声启动（audioOff 残留会让页面一直显示「设备被占用」）。 */
-    g_w.audio_off = 0;
-    g_w.audio_retry_stage = 0;
-    g_w.want_audio_retry = 0;
-    g_w.reopen_delay_ms = 0;
     g_w.t_start = 0;
     g_w.pause_started_ms = 0;
     g_w.live_reconnect_pending = 0;
     g_w.live_reconnect_count = 0;
     g_w.live_reconnect_at_ms = 0;
     g_w.route_pending = 0;
-    /* 无声自愈的配额按「会话」重置：一次 open→stop 里最多重建 2 次。
-     * 绝不能放进 teardown_pipeline_ex() —— seek/重建都会走那里，配额会被
-     * 无限续上，变成「没声音就一直重建」的死循环。 */
-    g_w.audio_heals = 0;
-    g_w.first_frame_ms = 0;
-    g_w.plane_fallback_done = 0;
-    /*
-     * 【3.5.14 弹幕】会话收尾清数据，但**保留开关模式**。
-     *
-     * 用户把弹幕拨到「1/2」之后返回列表、点进另一支视频，期望是「还是 1/2」；
-     * 如果这里把 dm_mode 一起归零，等于每看一支片子都要重拨一次，很难用。
-     * 模式只在两处归 OFF：RELEASE（模块下班）和用户自己拨。
-     */
-    dm_clear();
-    g_w.dm_gen++;
-    g_w.dm_fed_ms = 0;
-    g_w.dm_empty_logged = 0;
 }
 
 static void process_cmd(pb2_cmd_t *c) {
     switch (c->type) {
-        case PB2_CMD_OPEN: {
-            pb2_open_req_t *r = (pb2_open_req_t *)c->ptr;
-            int guard;
-
-            /* 新的播放请求：本会话一次性的兜底状态全部从零开始 */
-            g_w.want_plane_retry = 0;
-            g_w.want_audio_retry = 0;
-            g_w.reopen_delay_ms = 0;
-            g_w.audio_retry_stage = 0;
-            g_w.audio_off = 0;
-
-            do_open(r);
-            /*
-             * 兜底重建循环。do_open 判定需要重来时会置标志并**原地返回**
-             * （它不能递归自己：开头就 free(g_w.req)，而 g_w.req 正是要复用
-             * 的对象，见 open_req_dup 的注释）。这里最多两轮：
-             *   ① 平面：显式 plane-id 抢不到 → auto + videoscale
-             *   ② 音频：alsasink 设备被占 → 先原样重试，再降级为无声
-             * 每轮都重新 clone 当前请求（上一轮的 r 已经被 do_open 回收）。
-             */
-            for (guard = 0; guard < 3; guard++) {
-                pb2_open_req_t *dup;
-                int delay;
-                int audio_off;
-
-                if (!g_w.want_plane_retry && !g_w.want_audio_retry) break;
-
-                delay = g_w.reopen_delay_ms;
-                audio_off = g_w.audio_off;
-                g_w.want_plane_retry = 0;
-                g_w.want_audio_retry = 0;
-                g_w.reopen_delay_ms = 0;
-
-                dup = open_req_dup(g_w.req);
-                if (!dup) {
-                    pb2_logf("OPEN retry: clone failed -> error");
-                    pb2_stats_patch_error(&g_w.stats, PB2_E_OPEN_FAILED,
-                                          "open failed (retry alloc)");
-                    pb2_stats_patch_state(&g_w.stats, PB2_STATE_ERROR);
-                    break;
-                }
-                /* 音频兜底第二轮：直接不带音频重建，保证画面先出来 */
-                if (audio_off) dup->audio = 0;
-
-                if (delay > 0) {
-                    pb2_logf("OPEN retry: waiting %dms before rebuild (audio device release)",
-                             delay);
-                    pb2_sleep_ms(delay);
-                }
-                pb2_logf("OPEN retry: rebuild (audio=%d)", dup->audio);
-                do_open(dup); /* 内部会 free 掉上一轮的 g_w.req */
-            }
+        case PB2_CMD_OPEN:
+            do_open((pb2_open_req_t *)c->ptr);
             break;
-        }
         case PB2_CMD_PAUSE:
             if (g_w.pipe && g_w.pipeline_alive) {
                 long long t0 = pb2_now_ms();
@@ -5392,7 +4073,6 @@ static void process_cmd(pb2_cmd_t *c) {
                  * RESUME 用它把 t_start 往后推，等价于暂停期间时钟不走。
                  */
                 g_w.pause_started_ms = t0;
-                g_w.dm_smooth_valid = 0;   /* 暂停：位置冻结，恢复时重吸附 */
                 pb2_stats_patch_state(&g_w.stats, PB2_STATE_PAUSED);
                 pb2_logf("PAUSE took %lldms", pb2_now_ms() - t0);
             }
@@ -5413,7 +4093,6 @@ static void process_cmd(pb2_cmd_t *c) {
                 }
                 g_w.pause_started_ms = 0;
                 g_w.paused = 0;
-                g_w.dm_smooth_valid = 0;   /* 恢复：重新对齐当前真值 */
                 /*
                  * 【暂停恢复绝不能给迟到宽限】
                  * 恢复瞬间 PTS 全部过期的积压必须被 max-lateness=40 + qos=true
@@ -5436,19 +4115,6 @@ static void process_cmd(pb2_cmd_t *c) {
                 pb2_stats_patch_state(&g_w.stats, PB2_STATE_PLAYING);
                 pb2_logf("RESUME took %lldms", pb2_now_ms() - t0);
             }
-            break;
-        case PB2_CMD_SET_SOUND:
-            /*
-             * 【3.5.6 第五轮】一键开声。真机「画面正常但没有声音」时，
-             * 多半是全局静音开关把 Playback Path 设成了 OFF（音频数据
-             * 仍在走，自检页 `音=xxxxx/有` 也照常增长）。
-             * 文件操作与 amixer 全在 worker 线程，JSAPI 零阻塞。
-             */
-            pb2_logf("SET_SOUND: before muted=%d src=%s",
-                     pb2_mute_enabled(), pb2_mute_reason());
-            if (c->i64 != 0) pb2_force_sound();
-            pb2_logf("SET_SOUND: after muted=%d src=%s",
-                     pb2_mute_enabled(), pb2_mute_reason());
             break;
         case PB2_CMD_RECOVER:
             /*
@@ -5535,7 +4201,7 @@ static void process_cmd(pb2_cmd_t *c) {
             if (rw < 1) rw = 1;
             if (rh < 1) rh = 1;
             /* 隐藏时不加面板偏移，免得 1x1 被推到非零坐标 */
-            if (rw > 1 || rh > 1) rx += (g_w.panel_x_offset > 0 ? g_w.panel_x_offset : PB2_PANEL_X_OFFSET);
+            if (rw > 1 || rh > 1) rx += PB2_PANEL_X_OFFSET;
             want_hide = (rw <= 1 && rh <= 1) ? 1 : 0;
             snprintf(rect, sizeof(rect), "<%d,%d,%d,%d>", rx, ry, rw, rh);
 
@@ -5622,7 +4288,6 @@ static void process_cmd(pb2_cmd_t *c) {
                  * （seek_last_ms 回拨到过去，下一次 worker tick 立刻执行）。
                  */
                 snprintf(g_w.rect, sizeof(g_w.rect), "%s", rect);
-                normalize_video_rect("SET_RECT restore");
                 g_w.rect_hidden = 0;
                 if (g_w.is_live) {
                     pb2_logf("SET_RECT %s (restore: live rebuild, no seek path)", rect);
@@ -5638,103 +4303,17 @@ static void process_cmd(pb2_cmd_t *c) {
                     rect_rebuilt = 1;
                 }
             } else {
-                /* 正常尺寸之间改矩形。
-                 *
-                 * 【3.5.6 第九轮】优先走 GstVideoOverlay.set_render_rectangle()：
-                 * 它是运行期改平面的正道 —— sink 自己重配 plane，放大缩小都生效，
-                 * 也不用把属性写进去等下一次 configure。老路径（写 write-only 属性
-                 * + 暂停态脉冲）保留为回落：拿不到 libgstvideo 的设备行为不变。
-                 *
-                 * 为什么必须换：用户点画面收起/展开控件时矩形要来回变，老路径在
-                 * "放大"方向不可靠，连点两下就会停在中间态 —— 真机表现是
-                 * 「点两下屏幕以后视频跑到下方 / 只露半截」。 */
-                /*
-                 * 【3.5.6 第十四轮：只移动、不缩放时不要重建管线】
-                 *
-                 * videoscale 的输出 caps 只由 width/height 决定，与 x/y 无关。
-                 * 第十四轮把全屏改成"只改位置"（视频段高度普通态与全屏态完全相同），
-                 * 于是进出全屏时 w/h 一模一样，只有 x 变 —— 这种情况重建管线是
-                 * 纯浪费，还会黑一下。这里记住旧尺寸，normalize 之后比较一次。
-                 */
-                int old_w = 0, old_h = 0, new_w = 0, new_h = 0, size_same = 0;
-                sscanf(g_w.rect, "<%*d,%*d,%d,%d>", &old_w, &old_h);
+                /* 正常尺寸之间改矩形：直接 set 即可，不会踩棘轮 */
+                gst_util_set_object_arg(g_w.vsink_el, "render-rectangle", rect);
                 snprintf(g_w.rect, sizeof(g_w.rect), "%s", rect);
-                normalize_video_rect("SET_RECT");
-                sscanf(g_w.rect, "<%*d,%*d,%d,%d>", &new_w, &new_h);
-                size_same = (old_w > 0 && old_h > 0 && old_w == new_w && old_h == new_h);
-                /*
-                 * ============ 【3.5.6 第十轮：sw_scale 档绝不即时改平面】 ============
-                 *
-                 * X7 Pro 的管线里插了
-                 *   videoscale ! video/x-raw,width=<g_w.rect.w>,height=<g_w.rect.h>
-                 * （video_post_rate_desc），caps 是 **OPEN 那一刻**按 g_w.rect 算好的。
-                 * 播放中只改 render-rectangle，kmssink 拿到的是旧尺寸 buffer，
-                 * 却要往新矩形里贴 —— 真机照片里「点一下隐藏进度条，画面变宽
-                 * 却被推到下半屏、底部被裁」就是这么来的。文件里那句
-                 * "X7 自选平面疑似只做 1:1 贴 buffer，改 render-rectangle 对
-                 * 显示尺寸毫无作用" 是同一件事的另一半。
-                 *
-                 * 唯一可靠的「换尺寸」途径是让 build_pipeline 用新 g_w.rect
-                 * 重算 caps 并重建平面。这里只把新矩形记下来，然后投递一次
-                 * 原地 seek（与 1x1 恢复分支同一条已经充分验证过的路径）；
-                 * 直播的 seek 恒被忽略，改走 live_rebuild_pipeline。
-                 *
-                 * 页面侧已经保证**只有进/出全屏**才会发 SET_RECT（第十轮），
-                 * 控件显隐/字幕开关全部改成 DOM 纯黑占位，所以这里一次重建
-                 * 只对应一次用户主动的全屏切换，不会在日常操作里频繁黑屏。
-                 */
-                /*
-                 * 【3.5.6 第十五轮：overlay 拿不到时，连"只移动"也必须重建】
-                 *
-                 * 第十四轮给 size_same 开了一条捷径：x/y 变了、w/h 没变时不重建，
-                 * 直接走 overlay 把平面挪过去。但 overlay 需要 dlopen 到
-                 * libgstvideo；拿不到时旧代码会掉进最后的"写 render-rectangle
-                 * 属性"分支 —— 而 X7 的 kmssink 只在 configure 那一刻读这个属性，
-                 * 播放中写进去**没有任何效果**（文件里反复记过这件事）。
-                 *
-                 * 真机表现就是：点「全屏」，左右两栏确实让位了，但画面停在原地，
-                 * 用户只能说"全屏还是不行"。日志里却是一行"SET_RECT ... took 3ms"，
-                 * 看起来完全正常 —— 这种"成功但无效"比报错更难查。
-                 *
-                 * 现在把判据收紧：sw_scale 档只要没有 overlay 接口，就一律走重建
-                 * （原地 seek，caps 跟着重算），不再赌属性生效。
-                 */
-                int need_rebuild = 0;
-                if (g_w.sw_scale) {
-                    need_rebuild = !size_same || (pb2_overlay_fn() == NULL);
+                if (g_w.paused && g_w.pipe && g_w.pipeline_alive) {
+                    gst_element_set_state(g_w.pipe, GST_STATE_PLAYING);
+                    pb2_sleep_ms(200);
+                    rect_pulsed = 1;
                 }
-                if (need_rebuild) {
-                    if (g_w.is_live) {
-                        live_rebuild_pipeline("SET_RECT deferred");
-                        pb2_logf("SET_RECT %s deferred (sw_scale: live rebuild)", g_w.rect);
-                    } else {
-                        g_w.seek_target = g_w.last_pos_ms > 0 ? g_w.last_pos_ms : 0;
-                        g_w.seek_pending = 1;
-                        g_w.seek_last_ms = pb2_now_ms() - PB2_SEEK_DEBOUNCE_MS - 1;
-                        pb2_stats_patch_seek(&g_w.stats, 1, g_w.seek_target);
-                        pb2_logf("SET_RECT %s deferred (sw_scale: caps fixed at OPEN; rebuild via in-place seek@%lld%s)",
-                                 g_w.rect, g_w.seek_target,
-                                 size_same ? ", move-only but overlay unavailable" : "");
-                    }
-                    rect_rebuilt = 1;
-                } else if (overlay_apply_rect()) {
-                    /* X6（无 videoscale），或 X7 上「只移动不改尺寸」：overlay 是
-                     * 运行期改平面的正道 —— sink 自己重配 plane，buffer 尺寸没变，
-                     * caps 不用重协商，画面不会变形也不会黑。 */
-                    pb2_logf("SET_RECT %s via overlay%s (took %lldms)", g_w.rect,
-                             size_same ? " [move only, no rebuild]" : "",
-                             pb2_now_ms() - t0_rect);
-                } else {
-                    gst_util_set_object_arg(g_w.vsink_el, "render-rectangle", g_w.rect);
-                    if (g_w.paused && g_w.pipe && g_w.pipeline_alive) {
-                        gst_element_set_state(g_w.pipe, GST_STATE_PLAYING);
-                        pb2_sleep_ms(200);
-                        rect_pulsed = 1;
-                    }
-                    pb2_logf("SET_RECT %s took %lldms%s", rect,
-                             pb2_now_ms() - t0_rect,
-                             rect_pulsed ? " [property first, then pulse PLAYING]" : "");
-                }
+                pb2_logf("SET_RECT %s took %lldms%s", rect,
+                         pb2_now_ms() - t0_rect,
+                         rect_pulsed ? " [property first, then pulse PLAYING]" : "");
             }
 
             /*
@@ -5749,87 +4328,6 @@ static void process_cmd(pb2_cmd_t *c) {
             }
             break;
         }
-        case PB2_CMD_DM_FEED: {
-            /*
-             * 【3.5.14 弹幕】整片弹幕文本喂进来（一个 360 秒分片，几十 KB）。
-             *
-             * c->ptr 由 JSAPI 线程 malloc、worker 负责 free。**任何分支都要 free**，
-             * 包括提前 return 的错误分支 —— 否则每换一片就漏几十 KB，看一集
-             * 十几片就是几百 KB，长跑必崩。
-             *
-             * 代次语义：文本里自带的是「这一片的全量弹幕」，所以直接替换掉旧的，
-             * 不做累加（累加会让 seek 回头时同一句话叠两遍）。
-             */
-            char *text = (char *)c->ptr;
-            int n;
-            c->ptr = NULL;
-            if (!text) break;
-            /* 模式下关闭时也照常入表：用户随时可能把开关打开，届时不该
-             * 再等一次网络往返。dm_overlay 在 OFF 下不做任何渲染工作。 */
-            n = dm_feed_text(text);
-            free(text);
-            g_w.dm_fed_ms = pb2_now_ms();
-            g_w.dm_empty_logged = 0;
-            pb2_logf("DM_FEED: %d 条 gen=%u mode=%d", n, g_w.dm_gen, g_w.dm_mode);
-            break;
-        }
-        case PB2_CMD_DM_MODE: {
-            /*
-             * 【3.5.14 弹幕】i64 = mode | (fontPx << 8)。
-             *
-             * 打包成一格而不是两格，是因为这两个参数永远同生同死（切换模式时
-             * 字号也要跟着当前窗口高度重算），分开发只会让「设了模式没设字号」
-             * 这种半状态出现。
-             *
-             * 首次开启时才 dm_init()：dlopen cairo/freetype + 加载 CJK 字体
-             * 是几十毫秒的重活，不能放在播放起播路径上。用户不点开关就
-             * 永远不付出这个代价。初始化失败只打一次日志并不再重试
-             * （见 dm_overlay.c），弹幕功能静默关闭，播放不受影响。
-             */
-            int mode = (int)(c->i64 & 0xff);
-            int font_px = (int)((c->i64 >> 8) & 0xffff);
-            if (mode < PB2_DM_OFF || mode > PB2_DM_QUARTER) mode = PB2_DM_OFF;
-            if (mode != PB2_DM_OFF && !dm_ready()) {
-                if (dm_init() != 0) {
-                    pb2_logf("DM_MODE: overlay 初始化失败，弹幕保持关闭");
-                    mode = PB2_DM_OFF;
-                }
-            }
-            g_w.dm_mode = mode;
-            g_w.dm_font_px = font_px;
-            /*
-             * 这里不能直接 dm_set_mode(mode, font_px)：font_px 是 JS 按屏幕
-             * 逻辑像素给的基准值（266 高上算出来 24），真正画在 476x854 缓冲区
-             * 上的字号是 dm_apply 里按比例换算出来的 43。早先在这里直接下发
-             * 基准值，用户每切一次档就把字号打回 24，表现为「刚打开字挺大，
-             * 切一下模式就变小了」。正确做法：只记录 + 置脏，由 dm_apply 带着
-             * 换算值统一下发。OFF 例外 —— 关闭必须立刻生效，不能等下一帧。
-             */
-            if (mode == PB2_DM_OFF) {
-                dm_set_mode(PB2_DM_OFF, g_w.dm_font_px);
-                g_w.dm_mode_dirty = 0;
-            } else {
-                g_w.dm_mode_dirty = 1;
-            }
-            g_w.dm_empty_logged = 0;
-            pb2_logf("DM_MODE: mode=%d font_px=%d count=%d", mode, font_px, dm_count());
-            break;
-        }
-        case PB2_CMD_DM_CLEAR:
-            /*
-             * 【3.5.14 弹幕】切集 / 跨分片 seek 时清空。
-             *
-             * 代次 ++ 是关键：JS 侧拿到 seg.so 是异步的，清空之后可能还有一个
-             * 早先发出的请求在路上。它回来时页面会发现「session.gen 变了」而
-             * 丢弃 —— 但万一漏了，native 侧这一代次至少能在日志里对上，不至于
-             * 出现「上一集的弹幕贴在这一集上」这种无解排查。
-             */
-            dm_clear();
-            g_w.dm_gen++;
-            g_w.dm_fed_ms = 0;
-            g_w.dm_empty_logged = 0;
-            pb2_logf("DM_CLEAR: gen=%u", g_w.dm_gen);
-            break;
         case PB2_CMD_STOP:
             pb2_logf("STOP");
             teardown_pipeline();
@@ -5848,22 +4346,6 @@ static void process_cmd(pb2_cmd_t *c) {
             teardown_pipeline();
             reap_dying();
             reset_session_fields();
-            /*
-             * 【3.5.14 弹幕】RELEASE 是「整个播放模块要下班了」，与 STOP
-             * （只是停这一支）不同：这里要把 dlopen 的 cairo/freetype、
-             * 字体 face、位图缓存全部还回去。
-             *
-             * dm_shutdown() 里把 g_dm.ready 清 0，所以下一次 PB2_CMD_DM_MODE
-             * 会重新 dm_init() —— 用户返回列表再进另一支视频，弹幕照样能用。
-             * 紧接着把模式也归 OFF：一个已经 shutdown 的 overlay 留着
-             * mode=HALF 没有任何意义，反而会在 dm_apply 里白跑一次 caps。
-             */
-            dm_shutdown();
-            g_w.dm_mode = PB2_DM_OFF;
-            g_w.dm_font_px = 0;
-            g_w.dm_mode_dirty = 0;
-    g_w.dm_scale_pct = 0;
-    g_w.dm_font_eff = 0;
             pb2_audio_restore();
             pb2_stats_patch_state(&g_w.stats, PB2_STATE_IDLE);
             break;
@@ -6021,9 +4503,6 @@ static void *worker_main(void *arg) {
     teardown_pipeline();
     reap_dying();
     pb2_audio_restore();
-    /* 【3.5.14 弹幕】线程要退出了，把 dlopen 的库句柄/字体/缓存一并还回去。
-     * 放在这里而不是 teardown_pipeline 里：seek/重建不该重载字体。 */
-    dm_shutdown();
     if (g_w.req) {
         pb2_open_req_free(g_w.req);
         g_w.req = NULL;
@@ -6202,56 +4681,8 @@ int pb2_session_gst_ready(void) { return g_w.gst_ready; }
 
 const char *pb2_session_gst_version(void) { return g_w.gst_version; }
 
-/*
- * 【X7 Pro 排障】本次会话最后一次下发给 kmssink 的 render-rectangle。
- *
- * 黑屏/画面偏移时最需要知道的就是这串数字：pmid 的挖洞是按视口 CSS 算的，
- * 平面是按面板坐标算的，两边一旦对不上，用户看到的就是「画面贴在底部/被压扁」。
- * 把真正生效的 <x,y,w,h> 暴露到 info().rect，自检页一行就能比对。
- */
-const char *pb2_session_rect(void) { return g_w.rect; }
-
-/* 【X7 Pro 适配】info()/diag 读当前会话实际生效的设备参数（不是宏默认值） */
-int pb2_session_panel_offset(void) {
-    return g_w.panel_x_offset > 0 ? g_w.panel_x_offset : PB2_PANEL_X_OFFSET;
-}
-
-int pb2_session_plane_id(void) { return g_w.kms_plane_id; }
-int pb2_session_sw_scale(void) { return g_w.sw_scale; }
-int pb2_session_buf_scale(void) {
-    return (g_w.buf_scale >= 50 && g_w.buf_scale <= 400) ? g_w.buf_scale : 100;
-}
-/* 1 = 本会话因音频设备被占而主动降级为无声（片源本身有音轨） */
-int pb2_session_audio_off(void) { return g_w.audio_off; }
-
 unsigned long long pb2_session_frames(void) {
     return atomic_load_explicit(&g_w.probe.frames, memory_order_relaxed);
-}
-
-/*
- * 音频健康（status().audioDead 的真值来源）。
- *
- * 语义：**期望有声音、但确实一个音频字节都没有**。
- * 只在「已经自愈过一次仍无效」时才报 1 —— 起播前 4.5s 的窗口里不报警，
- * 免得正常慢启动被 UI 打成「无声」。
- *
- * 以前 jsapi 里把 audioDead 写死成 0，页面那条「无声：…」的提示永远不会出现，
- * 用户只能自己发现没声音。
- */
-int pb2_session_audio_dead(void) {
-    if (!g_w.req || !g_w.req->audio) return 0;
-    if (!g_w.pipeline_alive) return 0;
-    if (g_w.paused || g_w.eos || g_w.is_live) return 0;
-    if (g_w.audio_heals <= 0) return 0;
-    if (g_w.first_frame_ms <= 0) return 0;
-    if (pb2_now_ms() - g_w.first_frame_ms < PB2_AUDIO_START_GRACE_MS) return 0;
-    if (atomic_load_explicit(&g_w.probe.abytes, memory_order_relaxed) > 0) return 0;
-    if (!g_w.abranch && !(g_w.req->input2 && g_w.req->input2[0])) return 0;
-    return 1;
-}
-
-int pb2_session_audio_heals(void) {
-    return g_w.audio_heals;
 }
 
 long long pb2_session_stall_ms(void) {

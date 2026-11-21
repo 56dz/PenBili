@@ -11,12 +11,7 @@
 import { QN_LADDER, HTML5_FPS, buildPlayurlQuery, parseHtml5Response, parseDashResponse, validateStreamUrl } from './bili/playurl.js';
 import { fetchLivePlayUrl, LIVE_FPS } from './bili/live.js';
 import { deriveMixinKey } from './bili/wbi.js';
-// 【X7 Pro 适配】视频矩形改由设备 profile 计算：X6 Pro 结果与旧的
-// playVideoRects 完全一致；X7 Pro 会按 936x280 视口缩放并把面板列偏移、
-// plane-id 一起下发给 native（旧代码把 107 / 76 写死在 C 里）。
-import { ensureProfile, playVideoRectsFor } from './device_profile.js';
-/* 中列的「顶部悬浮条 / 视频洞 / 字幕带 / 控制条」分段几何（与页面同源）。 */
-import { bandBox, videoReserve } from './play_chrome.js';
+import { playVideoRects, FULL_VIDEO_AREA, FULLSCREEN_VIDEO_AREA } from './screen.js';
 import { dashLadderFor, videoFpsCapFor, liveFpsCapFor, liveQnFor, pixelBudgetFor } from './video_settings.js';
 
 export const SEEK_STEP_MS = 20000;
@@ -301,16 +296,14 @@ export async function resolveVideoUrl(ctx, item) {
   const v = await ctx.client.fetchView(item.bvid);
   if (cancelled(ctx)) return { ok: false, stage: 'cancel', message: '已取消' };
   if (!v.ok) return { ok: false, stage: 'view', subStage: v.stage, message: v.message };
-  /* 【互动视频】片段的 cid 来自 edgeinfo_v2（选项的 choice.cid 或
-   * story_list.is_current.cid），不是 view 的第一段 cid。带 useCid 标记时
-   * 无条件用 item.cid 取流；view 仍要请求（aid / 显示宽高 / 标题都靠它）。 */
+  /* 【互动视频 / 分P】片段 cid 可能来自选项或 pages[]，不是 view 的第一段 cid。
+   * 带 useCid 标记时无条件用 item.cid 取流；view 仍要请求（aid / 显示宽高 / 标题都靠它）。 */
   const cid = item && item.useCid && Number(item.cid) > 0 ? Math.floor(Number(item.cid)) : v.cid;
   /* 【分P / 合集】view 一次响应里已经有整份结构，这里只做"当前是哪一 P"的定位。
    * 单 P 稿件 pages 只有一条，uiPart 留空 —— 否则标题会变成「标题 · 标题」。
    *
-   * ⚠️ 多 P 稿件的 `view.duration` 是**所有 P 之和**，不是当前 P 的时长。
-   * 旧代码直接拿它当 durationMs：3P 各 100s 的稿件播 P1 会显示 5:00，
-   * 进度条永远走不到头、片尾自动连播也不会触发。多 P 时必须改用 pages[i].duration。 */
+   * ⚠️ 多 P 稿件的 view.duration 是**所有 P 之和**，不是当前 P 的时长。
+   * 多 P 时必须改用 pages[i].duration，否则进度条永远走不到头。 */
   const pages = Array.isArray(v.pages) ? v.pages : [];
   const season = v.season || null;
   let uiPart = '';
@@ -407,9 +400,12 @@ export async function resolveVideoUrl(ctx, item) {
       aid: aid,
       durationMs: parsed.durationMs || Math.max(0, Math.floor(durationSec * 1000)),
       title: title,
+      up: item.up || v.up || '',
+      mid: item.mid || v.mid || 0,
+      desc: v.desc || item.desc || '',
       width: width,
       height: height,
-      /* 互动片段：在标题后附上节点名，用户在进度条上方能看出走到哪一幕 */
+      /* 互动片段：在标题后附上节点名，用户在标题栏能看出走到哪一幕 */
       nodeTitle: item.nodeTitle || '',
       edgeId: Math.floor(Number(item.edgeId) || 0),
       /* 分P / 合集：整份结构回传给页面（右栏页签与列表都用它），
@@ -417,7 +413,6 @@ export async function resolveVideoUrl(ctx, item) {
       pages: pages,
       season: season,
       part: uiPart,
-      desc: v.desc || '',
       host: vv.host
     };
   }
@@ -448,153 +443,119 @@ export async function resolveVideoUrl(ctx, item) {
         ok: true,
         url: parsed.url,
         audioUrl: '',
-      qn: parsed.quality || qn,
-      cid: cid,
-      aid: aid,
-      durationMs: parsed.durationMs || Math.max(0, Math.floor(durationSec * 1000)),
-      title: title,
-      width: width,
-      height: height,
-      nodeTitle: item.nodeTitle || '',
-      edgeId: Math.floor(Number(item.edgeId) || 0),
-      pages: pages,
-      season: season,
-      part: uiPart,
-      desc: v.desc || '',
-      host: v2.host
-    };
+        qn: parsed.quality || qn,
+        cid: cid,
+        aid: aid,
+        durationMs: Math.max(0, Math.floor(durationSec * 1000)),
+        title: title,
+        up: item.up || v.up || '',
+        mid: item.mid || v.mid || 0,
+        desc: v.desc || item.desc || '',
+        width: width,
+        height: height,
+        nodeTitle: item.nodeTitle || '',
+        edgeId: Math.floor(Number(item.edgeId) || 0),
+        pages: pages,
+        season: season,
+        part: uiPart,
+        host: v2.host
+      };
     }
   }
   return { ok: false, stage: (last && last.stage) || 'playurl', message: (last && last.message) || '未取到播放地址' };
 }
 
-/*
- * 页面给的「上下让位」像素。ctx.bandPx() 是新接口（{top,bottom,full}），
- * ctx.ccReservePx() 是 3.5.6 之前的旧接口（只有下方字幕带），保留兼容：
- * 老 ctx 少让一条顶栏，但绝不会算错几何。度量函数抛异常也不能挡住起播。
- * full = 全屏态（3.5.6 第七轮）：左右列让位，信箱盒子的 x/width 换成整个视口，
- * 只有页面知道这件事，所以由它随 top/bottom 一起带过来。
- */
-function readBandPx(ctx) {
-  let top = 0;
-  let bottom = 0;
-  let bar = 0;
-  let full = false;
-  try {
-    if (ctx && typeof ctx.bandPx === 'function') {
-      const b = ctx.bandPx() || {};
-      top = Math.max(0, Math.floor(Number(b.top) || 0));
-      bottom = Math.max(0, Math.floor(Number(b.bottom) || 0));
-      /* 【第二十四轮】控制条高度单独报：默认它浮在画面上、不从矩形里扣，
-       * 只有 profile.barOverlay === false 的回退档才加进 bottom。 */
-      bar = Math.max(0, Math.floor(Number(b.bar) || 0));
-      full = b.full === true;
-    } else if (ctx && typeof ctx.ccReservePx === 'function') {
-      bottom = Math.max(0, Math.floor(Number(ctx.ccReservePx()) || 0));
-    }
-  } catch (e) {
-    top = 0;
-    bottom = 0;
-    bar = 0;
-    full = false;
+/* 离线缓存：解析**单文件 durl**（fnval=1, qn=16）—— 下载页存一份可本地播放的 mp4。
+ * 为什么不用 DASH：要存两条流（video+audio），且本地 .m4s 的分片索引不保证可 seek；
+ * durl 一条就带音轨（真机实测 118s/360p ≈13MB），播放时直接喂本地路径。 */
+export async function resolveDownloadStream(ctx, item) {
+  if (!item || item.kind === 'live') return { ok: false, stage: 'param', message: '直播不支持下载' };
+  if (!/^BV[0-9A-Za-z]{10}$/.test(item.bvid || '')) {
+    return { ok: false, stage: 'param', message: '稿件标识不合法' };
   }
-  return { top: top, bottom: bottom, bar: bar, full: full };
+  const v = await ctx.client.fetchView(item.bvid);
+  if (!v.ok) return { ok: false, stage: 'view', message: v.message };
+  if (cancelled(ctx)) return { ok: false, stage: 'cancel', message: '已取消' };
+  const mixin = await ensureMixin(ctx);
+  if (!mixin) return { ok: false, stage: 'wbi', message: 'WBI 密钥获取失败' };
+  const built = buildPlayurlQuery(
+    { bvid: item.bvid, cid: v.cid, qn: 16, fnval: 1 },
+    mixin,
+    Math.floor(Date.now() / 1000)
+  );
+  if (!built.ok) return { ok: false, stage: 'param', message: built.message };
+  const res = await ctx.client.fetchPlayurl(built.query);
+  if (cancelled(ctx)) return { ok: false, stage: 'cancel', message: '已取消' };
+  const parsed = parseHtml5Response(res);
+  if (!parsed.ok) {
+    return { ok: false, stage: parsed.stage === 'api' ? 'playurl' : parsed.stage, message: parsed.message };
+  }
+  const vv = validateStreamUrl(parsed.url);
+  if (!vv.ok) return { ok: false, stage: 'param', message: 'URL ' + vv.reason };
+  if (ctx.log) {
+    ctx.log('[bili] dl stream durl qn=' + parsed.quality + ' ' + v.width + 'x' + v.height +
+      ' size=' + parsed.sizeBytes + ' host=' + vv.host);
+  }
+  return {
+    ok: true,
+    url: parsed.url,
+    sizeBytes: parsed.sizeBytes || 0,
+    qn: parsed.quality || 16,
+    cid: v.cid,
+    aid: v.aid || 0,
+    durationMs: Math.max(0, Math.floor((v.duration || item.durationSec || 0) * 1000)),
+    title: item.title || v.title || '',
+    up: item.up || v.up || '',
+    desc: v.desc || '',
+    width: v.width || 640,
+    height: v.height || 360,
+    host: vv.host
+  };
 }
 
 // → {ok, session} | {ok:false, stage, message, code?} | {ok:false, stage:'cancel'}
-export async function openVideo(ctx, item) {
-  const rs = await resolveVideoUrl(ctx, item);
+// startMs：起播位置（切「样式」需要在当前位置重开解码；普通起播传 0/缺省）。
+export async function openVideo(ctx, item, preResolved, startMs) {
+  const rs = (preResolved && preResolved.ok) ? preResolved : await resolveVideoUrl(ctx, item);
   if (!rs.ok) return rs;
   if (cancelled(ctx)) return { ok: false, stage: 'cancel', message: '已取消' };
-  // 矩形按**稿件真实显示宽高**做信箱适配（竖屏 → 物理竖柱，不再被拉伸成横屏）。
-  // 直播没有进度条，视频区用 LIVE_VIDEO_DESIGN（266 高）；点播是 240 高 + 26px 进度条。
-  // profile 会把设计坐标乘 setViewPort 的缩放系数，并按本机视口宽度做旋转变换：
-  // X7 Pro 的面板行数是 936 而不是 960，列偏移是 100 而不是 107。
-  // 这两个矩形必须与 falcon 侧 hole 的几何严格一致（见 base.less），
-  // 否则会出现「画面与点击热区错位」。
-  const profile = await ensureProfile();
-  /* 【悬浮控件 / CC 字幕】视频平面盖住 UI，控件与字幕带必须落在视频矩形**之外**：
-   * 中列被切成 top / video / cc / bar 四段（play_chrome.planBands），这里把
-   * 「上方让多少 / 下方让多少」换算成 native 的信箱盒子，render-rectangle 与
-   * falcon 的挖洞区严格同源。0/0 = 普通播放，几何与 3.5.6 逐像素一致。 */
-  const band = readBandPx(ctx);
-  const colH = (profile.layout.play.videoH || 0) + (profile.layout.play.seekH || 0);
-  /* 【第二十一轮】全屏不再改几何（它只是把控件挪到右列），所以这里
-   * **只有一种盒子**：普通态的中列宽 × 中列总高。band.full 恒 false
-   * （页面 readBandPx 已固定），原来的"横跨整屏"分支整段删除。 */
-  let rectBox = null;
-  /* 【3.5.6 第二十四轮】控制条默认浮在画面上，不占矩形（profile.barOverlay）。
-   * 回退档（barOverlay=false）才把 bar 加回下方让位量，回到旧的分段扣减。
-   *
-   * 这里**无条件**构造盒子（以前 top=0 且无字幕时会返回 null → 落到
-   * videoArea 的 248 高，与页面 buildVideoRect 的 280 高差 32px，
-   * 起播后立刻又要 SET_RECT 重建一次）。现在两条路都用「中列全高」。 */
-  /* 【3.5.10】口径收进 play_chrome.videoReserve()：页面 buildVideoRect 调同一个
-   * 函数，两条路径必须逐像素一致（以前这里扣 bar、那里不扣，X6 上差 48 物理像素）。 */
-  const reserveBottom = videoReserve({ cc: band.bottom, bar: band.bar }, profile.barOverlay);
-  /* 【3.5.13】沉浸态（band.full = 页面 ui.side）把盒子从「中列」换成「整个视口」。
-   *
-   * 16:9 在 960x266 上永远高度受限，所以换盒子**不改尺寸**，只是让画面在视口里
-   * 重新居中（physical y 差 30 像素）。这种「尺寸不变、只平移」的 SET_RECT 在
-   * native 走 overlay 快路径（session.c 的 size_same 分支），毫秒级、不重建管线。
-   * 必须与页面 buildVideoRect 里的 area 逐像素同源，否则开关侧栏后画面会跳。 */
-  const areaBox = band.full
-    ? { x: 0, y: 0, width: profile.logical.width, height: colH }
-    : {
-      x: profile.videoArea.x,
-      y: profile.videoArea.y,
-      width: profile.videoArea.width,
-      height: colH
-    };
-  rectBox = bandBox(areaBox, { top: band.top, cc: reserveBottom, bar: 0 });
-  /* 【第二十五轮：绿幕修复】重新做 fit —— 矩形 = 画面本身。
-   *
-   * 上一轮把信箱交给 native 的 `videoscale add-borders=true`，想省掉 JS 的
-   * fit；但 add-borders 补的边是 YUV 全 0（绿），竖屏稿件要补 150px，真机上
-   * 就是左右两片绿幕。现在改回在 JS 里算 fit，plane 只覆盖画面，黑洞由 UI 层
-   * 提供（hole 之外的 fb 黑），没有边可补。
-   *
-   * 比例仍然不会"变扁"：矩形只由 bands（几何）和片源尺寸决定，而这两个在
-   * 播放期间都是恒定的；caps 与 render-rectangle 从第一帧就一致。 */
-  /* fit 到画面本身（plane 不许有边可补，否则 add-borders 会补出绿幕）。
-   * 全屏不再走 cover 路径，cropX/cropY 恒 0。 */
-  const rects = playVideoRectsFor(rs.width, rs.height, profile, rs.live === true, rectBox);
-  const cropX = 0;
-  const cropY = 0;
+  const startAt = Math.max(0, Math.round(Number(startMs) || 0));
+  // 全屏播放页（移植文件管理 shell 播放器 UI）：视频只写「顶栏 96 + 视频带 216」
+  // 这条带，顶/底栏由 Falcon 绘制；矩形必须与 .fp-video 严格一致，否则会覆盖 UI。
+  // 带内仍按稿件真实宽高做信箱适配（竖屏不再被拉伸）。
+  // ctx.videoArea：页面可显式指定（隐藏状态栏时传 FULLSCREEN_VIDEO_AREA），
+  // 让「隐藏态起播」一次就开成全屏，避免先出小窗再被 setRect 拉大的闪跳。
+  //
+  // v3.9.1「清晰」样式：**显示不变形、只提高解码分辨率**。
+  // 显示矩形始终是等比信箱（带栏 = 视频带内的信箱，隐藏栏 = 全屏信箱）。
+  // 清晰档额外把解码尺寸设为「无栏（全屏信箱）矩形」：ffmpeg 直接按这个尺寸出帧，
+  // 带栏时由 native 等比缩小、切全屏时 1:1 落屏 —— 不裁切、不拉伸，
+  // 也避免旧「铺满裁切」把 4.4:1 的视频带裁成一条造成的画面变形。
+  const area = ctx.videoArea || FULL_VIDEO_AREA;
+  const rects = playVideoRects(rs.width, rs.height, area);
+  const clear = ctx.playStyle === 'clear' && rs.live !== true;
+  const decodeRects = clear ? playVideoRects(rs.width, rs.height, FULLSCREEN_VIDEO_AREA) : null;
   /* 帧率上限（0 = 不限）：native 侧在 mppvideodec 之后插 videorate max-rate=N。
    * 为什么必须有这道闸：部分稿件服务端**只给 60fps 档**（例如 1080P60），
    * 光靠「请求 30fps 档」会直接落空；videorate 只做上限不插帧，低帧率内容直通。 */
   const fpsCap = rs.live ? liveFpsCapFor(ctx.videoSettings) : videoFpsCapFor(ctx.videoSettings);
-  const startMs = Math.max(0, Math.floor(Number(item && item.startMs) || 0));
-  /* 【第十九轮】重开（进/出全屏）要原样复用这份参数：URL / 音轨 / fps 上限 /
-   * 设备参数都不变，只有矩形和起点变。存进 session，reopenSession 直接拿。 */
-  const openArgs = {
+  const openRes = await ctx.player.openSession({
     input: rs.url,
     input2: rs.audioUrl || '', // DASH 音频轨第二输入（空 = durl 回退 / 直播单流路径）
-    startMs: 0,
+    startMs: startAt,
     durationMs: rs.durationMs, // 直播 = 0（时长未知）
     fps: fpsCap > 0 ? Math.min(rs.fps || HTML5_FPS, fpsCap) : (rs.fps || HTML5_FPS),
     audio: true,
-    transpose: profile.transpose,
+    transpose: 2,
     rect: rects.physical,
-    /* 【X7 Pro 适配】native 不再写死 107 / 76：
-     * panelOffset = 逻辑带在 480 宽面板里的起始列；
-     * planeId = -1 时 kmssink 自动挑空闲 overlay 平面（X7 Pro 默认）；
-     * swScale = 1 时 native 在解码后插 videoscale，把 buffer 缩到窗口大小 ——
-     * 自选平面可能没有缩放器，靠它保证画面比例正确（X7 Pro 默认开）。 */
-    panelOffset: profile.panelXOffset,
-    planeId: profile.planeId,
-    swScale: profile.swScale,
-    /* 【3.5.6 第四轮】videoscale 输出倍率：X7 Pro 的 1:1 平面只认 buffer
-     * 像素尺寸，放大 buffer 才能让画面铺满挖洞区。100 = 与矩形等大。 */
-    bufScale: profile.bufScale,
-    /* 【第二十六轮】全屏 cover 裁切量（普通态 0/0） */
-    cropX: cropX,
-    cropY: cropY,
+    /* 清晰样式的解码尺寸（native 会换算到本机 fb 像素）；null = 按显示矩形解码 */
+    decode: decodeRects ? decodeRects.physical : null,
     /* '' = 自动：已连蓝牙耳机走 bluealsa，否则内置扬声器（player.c 的 detect_bt_pcm） */
     audioDevice: '',
-    userAgent: ctx.mediaUa,
-    referer: ctx.mediaReferer,
+    /* 本地缓存文件不能带 -user_agent/-headers：这两个是 http 协议的私有选项，
+     * 喂给 file 输入会 "Option not found" 起不来。 */
+    userAgent: rs.local ? '' : ctx.mediaUa,
+    referer: rs.local ? '' : ctx.mediaReferer,
     fpsCap: fpsCap,
     /*
      * 显式直播意图（native open 的第 16 个位置参数）。
@@ -606,8 +567,7 @@ export async function openVideo(ctx, item) {
      * 这里我们是明确知道意图的，直接告诉 native。
      */
     isLive: rs.live === true
-  };
-  const openRes = await ctx.player.openSession(Object.assign({ startMs: startMs }, openArgs));
+  });
   if (!openRes || openRes.ok !== true) {
     return {
       ok: false,
@@ -629,95 +589,76 @@ export async function openVideo(ctx, item) {
     session: {
       kind: rs.live ? 'live' : 'video',
       live: !!rs.live,
+      /* 本地缓存文件（下载页起播）：播放页据此把「下载」行变成「删除缓存」，
+       * 且不再走取流/评论等在线路径。 */
+      local: !!rs.local,
       roomid: rs.roomid || 0,
       bvid: rs.live ? 'live:' + rs.roomid : item.bvid, /* 直播无 bvid（不入历史，日志用它占位） */
       cid: rs.cid,
       title: rs.title || item.title || '',
-      up: item.up || '',
-      /* 简介：切P/切集时 view 里那份才是权威（item.desc 可能还是上一集的）。 */
+      up: item.up || rs.up || '',
+      mid: item.mid || rs.mid || 0,
       desc: rs.desc || item.desc || '', /* 简介（用户手绘稿 m11950：左列上方要显示标题和简介） */
       cover: item.cover || '',
       qn: rs.qn,
       aid: rs.aid || 0, /* 评论 oid（直播 = 0 → 评论不可用） */
       durationMs: rs.durationMs,
-      outWidth: openRes.outWidth,
-      outHeight: openRes.outHeight,
-      /* 切换 CC 字幕时按当前稿件宽高重算矩形（不必重新取流） */
-      width: rs.width,
-      height: rs.height,
-      nodeTitle: rs.nodeTitle || '',
-      edgeId: rs.edgeId || 0,
-      /* 【分P / 合集】右栏的两个页签与列表全靠这两份数据：
-       *   pages  = [{ cid, page, title, durationSec }]（单 P 也有一条）
-       *   season = { id, title, count, sections:[{ title, items:[...] }] } | null
-       * part 只在多 P 时非空，左列标题用「稿件名 · part」显示。 */
+      /* 源视频分辨率的**原始朝向**（640x360 等）。隐藏状态栏切全屏时要重算信箱矩形，
+       * 不能拿 outWidth/outHeight —— 那是转置后的 fb 像素尺寸（144x256），
+       * 再喂给 fitLogicalRect 会算成竖屏 219 高。 */
+      videoWidth: rs.width,
+      videoHeight: rs.height,
+      /* 【分P / 合集 / 互动】页面右栏页签与标题用；单 P 视频 pages 只有一条。 */
       pages: rs.pages || [],
       season: rs.season || null,
       part: rs.part || '',
+      nodeTitle: rs.nodeTitle || '',
+      edgeId: rs.edgeId || 0,
+      outWidth: openRes.outWidth,
+      outHeight: openRes.outHeight,
       /* 键盘避让恢复用：open 时下发给 native 的物理矩形（= open 参数里的 x/y/width/height）。
        * 注意坐标系：x 是「视频逻辑区左缘」，**不含**面板偏移 —— native 在
-       * build_pipeline 与 PB2_CMD_SET_RECT 里统一加当前会话的 panelOffset
-       * （X6 Pro=107、X7 Pro=100，由 device_profile.js 下发）。
-       * 所以这里原样回传给 setVideoRect 即可，不要在 JS 侧再加偏移。
-       * X6 Pro 真机实测：orig.x=0 → render-rectangle 是 <107,299,240,427>。 */
+       * build_pipeline 与 PB2_CMD_SET_RECT 里都会统一加 PB2_PANEL_X_OFFSET(107)。
+       * 所以这里原样回传给 setVideoRect 即可，不要在 JS 侧再加偏移（加了会变 214）。
+       * 真机实测：orig.x=0 → 管线里 render-rectangle 是 <107,299,240,427>。 */
       rectPhysical: rects.physical,
-      deviceProfile: profile.name,
-      /* 重开用：与本次 OPEN 完全相同的参数（不含 startMs / rect，那两个每次重开都要换）。
-       * 进/出全屏走 reopenSession，不再在运行期改平面矩形 —— 见 reopenSession 的注释。 */
-      openArgs: openArgs
+      /* 清晰样式的解码矩形（266x960 物理面）；null = 按显示矩形解码（流畅） */
+      decodePhysical: decodeRects ? decodeRects.physical : null,
+      /* 切样式时要在当前位置重开解码，这里保留本次解析结果（URL/时长/宽高等），
+       * 避免二次走网络。仅内存持有，不落盘/不进历史。 */
+      stream: rs
     }
   };
 }
 
-/*
- * ============ 用新矩形重开一路流（进/出全屏的唯一通道）============
- *
- * 【为什么不再用 setVideoRect 改尺寸】
- * X7 Pro 的管线里插了 `videoscale ! video/x-raw,width=<rect>,height=<rect>`，
- * 输出 caps 在**建管线那一刻**按矩形算死。运行期改 render-rectangle 后，
- * native 只能靠一次原地 seek 重建管线去追新 caps（session.c 的 SET_RECT）；
- * 真机上这条路不可靠 —— 切全屏后画面尺寸/位置和挖洞区对不上，用户看到的就是
- * 「全屏后视频被压缩」。而**同一台机器用 OPEN 建出来的普通态画面是完全正确的**，
- * 所以尺寸变化改走 OPEN：teardown + 用新矩形重新起一路，位置从当前播放点续。
- *
- * 代价是一次 ~0.5~1s 的起播（黑屏），换来的是 caps 与矩形从第一帧就一致。
- * 参数（URL/音轨/fps 上限/设备参数）全部复用 open 时那份，不重新取流，
- * 因此不会触发 playurl 阶梯、不会换 CDN 地址。
- *
- * → {ok:true, rect, outWidth, outHeight} | {ok:false, code?, message}
- */
-export async function reopenSession(ctx, session, startMs, rect) {
-  if (!session || !session.openArgs) {
-    return { ok: false, message: '会话缺少重开参数' };
-  }
-  const args = Object.assign({}, session.openArgs, {
-    rect: rect || session.openArgs.rect,
-    startMs: Math.max(0, Math.floor(Number(startMs) || 0))
-  });
-  let res;
-  try {
-    /* 必须先关：native 的 open 在 has_session 时直接返回 PLAYER_ALREADY_RUNNING
-     * （player.c），不会帮你把旧会话踢掉。closeSession 是幂等的。 */
-    await closeSession(ctx);
-    res = await ctx.player.openSession(args);
-  } catch (e) {
-    return { ok: false, message: (e && e.message) || '重开异常' };
-  }
-  if (!res || res.ok !== true) {
-    return {
-      ok: false,
-      code: res ? res.code : undefined,
-      message: (res && (res.code + ': ' + res.error)) || '重开失败'
-    };
-  }
-  /* 会话里的 rectPhysical 必须跟着换：键盘避让/字幕开关恢复矩形时用的是它，
-   * 不更新就会把画面恢复成旧布局。 */
-  session.rectPhysical = args.rect;
+/* 详情页（用户手绘稿）：只解析流和元信息，不拉起 native 播放进程。
+ * 返回 {ok, rs, session}；rs 留给 onStartPlayFromDetail 复用（openVideo 的 preResolved），
+ * 避免"详情页取一次流、点封面又取一次"（弱网下二次取流 1~2s 的等待）。 */
+export async function resolveDetail(ctx, item) {
+  const rs = await resolveVideoUrl(ctx, item);
+  if (!rs.ok) return rs;
+  if (cancelled(ctx)) return { ok: false, stage: 'cancel', message: '已取消' };
   return {
     ok: true,
-    rect: args.rect,
-    outWidth: res.outWidth,
-    outHeight: res.outHeight
+    rs: rs,
+    session: {
+      kind: rs.live ? 'live' : 'video',
+      live: !!rs.live,
+      roomid: rs.roomid || 0,
+      bvid: rs.live ? 'live:' + rs.roomid : item.bvid,
+      cid: rs.cid,
+      title: rs.title || item.title || '',
+      up: item.up || rs.up || '',
+      mid: item.mid || rs.mid || 0,
+      desc: rs.desc || item.desc || '',
+      cover: item.cover || '',
+      qn: rs.qn,
+      aid: rs.aid || 0,
+      pages: rs.pages || [],
+      season: rs.season || null,
+      part: rs.part || '',
+      durationMs: rs.durationMs
+    }
   };
 }
 

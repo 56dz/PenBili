@@ -183,17 +183,6 @@ extern void *gst_pad_probe_info_get_buffer_list(GstPadProbeInfo *info);
 extern unsigned int gst_buffer_list_length(void *list);
 extern void *gst_buffer_list_get(void *list, unsigned int idx);
 extern size_t gst_buffer_get_size(void *buffer);
-/*
- * 【第三十轮】边缘绿修正要读写 buffer 的像素。
- *
- * 只用 extract/fill 这两个「指针 + 偏移 + 长度」的 API：它们**不需要**
- * GstMapInfo。按本文件头的铁律，自己抄 GstMapInfo 的字段顺序迟早栈越界
- * （memory/flags/data/size/maxsize 之后还有 user_data[4] 与保留字段，
- * 版本间长度不一样）。extract/fill 只有标量参数，永远安全。
- * 两个符号都在设备 libgstreamer-1.0.so.0 的 .dynsym 里（已核对）。
- */
-extern size_t gst_buffer_extract(void *buffer, size_t offset, void *dest, size_t size);
-extern size_t gst_buffer_fill(void *buffer, size_t offset, const void *src, size_t size);
 
 /* ---------- GObject 基础 ---------- */
 extern void gst_object_unref(void *object);

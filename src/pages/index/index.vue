@@ -1,8 +1,8 @@
 <template>
   <!-- page-live 只在「视频像素真的在 fb 上」时启用透明背景（见 base.less 注释）；
        未起播/起播失败/已播完时必须用不透明底色，否则会把上一屏的 fb 残留像素透出来。 -->
-  <div :class="holeVisible && !upd.visible ? 'page page-live' : 'page'" :style="L.page">
-    <!-- 检查更新（v3.5.6 起双源）：弹窗不是浮层而是**整页替换**。
+  <div :class="holeVisible && !upd.visible ? 'page page-live' : 'page'">
+    <!-- 检查更新（v3.5.5）：弹窗不是浮层而是**整页替换**。
          falcon 运行时 position:absolute 不可靠、全仓没有一个 z-index 能用（base.less
          文件头铁律），所以靠 upd.visible 把正常视图整体不渲染 —— 零定位依赖，
          也就不会出现「弹窗和列表叠在一起」。 -->
@@ -30,16 +30,13 @@
         </scroller>
       </div>
       <div class="upd-right">
-        <!-- 进入软件时自动检测：4 个按钮，两个下载按钮**都是直连**（v3.5.6 起不再有镜像）。
-             第一个按钮的括号里必须是**当前命中的源名**（GitCode / GitHub）——
-             写死「直连 GitHub」在 GitCode 主通道下就是错的，用户会以为点了也白点。
-             第二个按钮是换源：两个平台的网络可达性互补，GitCode 挂了还能直连 GitHub。 -->
+        <!-- 进入软件时自动检测：4 个按钮 -->
         <template v-if="upd.mode === 'auto' && upd.stage === 'ready'">
-          <div class="upd-btn upd-btn-main" @click="onUpdInstall()">
-            <text class="upd-btn-t-main">立即更新（直连 {{ updSourceLabel }}）</text>
+          <div class="upd-btn upd-btn-main" @click="onUpdInstall(false)">
+            <text class="upd-btn-t-main">立即更新（直连 GitHub）</text>
           </div>
-          <div class="upd-btn upd-btn-main" @click="onUpdInstallFrom(updAltSource)">
-            <text class="upd-btn-t-main">立即更新（直连 {{ updAltLabel }}）</text>
+          <div class="upd-btn upd-btn-main" @click="onUpdInstall(true)">
+            <text class="upd-btn-t-main">立即更新（使用镜像）</text>
           </div>
           <div class="upd-btn" @click="onUpdSkip">
             <text class="upd-btn-t">跳过此版本</text>
@@ -48,9 +45,9 @@
             <text class="upd-btn-t">今天内不提示</text>
           </div>
         </template>
-        <!-- 「我的」页手动检测：2 个按钮（下载源由 onUpdInstall 自动换源，不给用户选） -->
+        <!-- 「我的」页手动检测：2 个按钮（下载源由 onUpdInstall 自动回退，不给用户选） -->
         <template v-else-if="upd.mode === 'manual' && upd.stage === 'ready'">
-          <div class="upd-btn upd-btn-main" @click="onUpdInstall(updAltSource)">
+          <div class="upd-btn upd-btn-main" @click="onUpdInstall(false)">
             <text class="upd-btn-t-main">立即更新</text>
           </div>
           <div class="upd-btn" @click="onUpdClose">
@@ -72,9 +69,9 @@
     </div>
     <!-- 正常视图整体包一层：让「整页替换」只改这一处 v-else，
          不必给下面 10 个顶层子节点各加一个 !upd.visible（漏一个就会和弹窗叠加）。 -->
-    <div v-else class="page-body" :style="L.body">
+    <div v-else class="page-body">
     <!-- 浏览态左栏：只有四个标签，不再有 PenBili 字样（用户要求删掉，把高度还给内容） -->
-    <div v-if="mode === 'browse'" class="bar" :style="L.nav">
+    <div v-if="mode === 'browse'" class="bar">
       <!-- 软件 logo（用户要求 m07040-1：首页左上角加软件标志） -->
       <image class="bar-logo" :src="ic.logo" :width="30" :height="30"></image>
       <div
@@ -88,29 +85,20 @@
       <text class="bar-status">{{ statusText }}</text>
     </div>
 
-    <!-- 播放态左列（用户手绘稿 m11950）：上=视频标题/简介(192)，下=点赞/投币/收藏(74)。
-         【3.5.6 第二十一轮】全屏时**整列保留原宽度**，只把内容换成纯黑占位。
-         不能 v-if 掉这一列：它一旦消失，中列会左移，视频洞的位置就变了 ——
-         而 KMS 平面按固定矩形出画，洞和画面对不上就是"画面跑到左边"。 -->
-    <div v-if="mode === 'play'" class="pleft" :style="L.playLeft">
-      <!-- 【3.5.13】沉浸占位：单击画面隐藏左右侧栏时，这一列换成同宽同高的
-           纯黑。**必须继续占着像素**，不能 v-if 掉：它一旦消失，中列会左移，
-           而 KMS 平面按固定矩形出画，洞和画面对不上就是"画面跑到左边"。
-
-           为什么必须是**不透明黑**而不是透明：falcon 不主动清屏，透明容器
-           只表示"这次不画"，上一屏的信息栏像素会原封不动留在 framebuffer 上
-           （第二十六轮真机事故就是这么来的，见 base.less .pmid 一带注释）。
-
-           两条走独立互斥的 v-if，不用 v-else —— falcon 对**跨标签名**的
-           v-else 链接不住（项目第 746 行注释早已记录）。 -->
-      <div v-if="ui.side" class="pside-fill" :style="L.playLeft"></div>
-      <template v-if="!ui.side">
-      <div class="pleft-info" :style="L.playInfo">
+    <!-- 播放态左列（用户手绘稿 m11950）：上=视频标题/简介(192)，下=点赞/投币/收藏(74) -->
+    <div v-if="mode === 'detail'" class="pleft">
+      <div class="pleft-info">
         <div class="pback" @click="onIbarBack">
           <image class="pback-icon" :src="ic.back" :width="22" :height="22"></image>
         </div>
+        <!-- 详情页显示完整标题（lines:2 省略），跑马灯只在全屏播放页用：
+             详情页左列是信息卡，滚动窗口只会让人看到标题中段，读不出是什么稿。 -->
         <text class="ptitle">{{ infoTitle }}</text>
-        <text class="pup">{{ infoUp }}</text>
+        <!-- UP 名（蓝色）：点进 UP 主页（用户要求「点详情页蓝色UP名跳转」）。
+             用 div 承接点击 —— falcon 的 <text> 不保证派发 click，外层容器最稳。 -->
+        <div v-if="infoUp || infoMid > 0" class="pup" @click="onOpenUp">
+          <text class="pup-text">{{ infoUp || 'UP主页' }}{{ infoMid > 0 ? ' ›' : '' }}</text>
+        </div>
         <!-- 简介必须可滚动（用户反馈：「播放界面出现长简介时，简介栏无法上下滑动，查看全部的」）。
              以前是 <text class="pdesc" lines:5>，超过 5 行直接省略号截断，用户没有任何办法看到全文。
              改成 scroller 后高度仍是 72px（192px 的左列预算是固定的，见 base.less .pleft-info
@@ -126,45 +114,12 @@
              所以提示落在左列信息卡最下面一行：播放态（holeVisible）同样看得见。
              这一行**恒定渲染**（无提示时是空串），不改几何尺寸，避免提示出现/消失时布局抖动；
              代价是简介从 7 行缩到 5 行（192px 高度是固定预算，见 base.less .pleft-info）。 -->
-        <text class="pnote">{{ pnoteText }}</text>
-      </div>
-      <!-- 【3.5.11】左列控制条：播放 / -10s / +10s / 字幕。
-           用户要求「暂停、+-10、字幕、全屏移动到点赞投币收藏上方，简介下方」，
-           同时「视频下方只保留进度条本体」—— 底部那条带子就从 5 个槽降到只剩
-           时间+轨道，高度 30 → 24，省下来的像素直接给画面。
-           直播态不渲染（直播没有 seek/字幕，播放键在中列点画面即可暂停）。
-           沉浸态（ui.side）也不渲染：那时整列被 .pside-fill 占掉。
-
-           【3.5.13】全屏键移除 —— 用户 m20514：「我测试完了，认为可以把
-           '全屏'移除了，因为主播放界面已经填充满了」。主界面中列已经按
-           16:9 反算成 473×266 吃满全高，全屏那套「左列让位 + 右列控制面板」
-           既不会让画面变大（16:9 在这块 3.61:1 的屏上永远高度受限），
-           又白搭一整套面板。剩下的 4 颗键靠 .pctrl-btn 的 flex-grow:1
-           自动等分补位，不需要改任何数值。 -->
-      <div v-if="!isLivePlay" class="pleft-ctrl" :style="L.playCtrl">
-        <div :class="play.state === 'paused' ? 'pctrl-btn pctrl-play pctrl-on' : 'pctrl-btn pctrl-play'" @click="onTogglePlay">
-          <image class="pctrl-ic" :src="play.state === 'playing' ? ic.pause : ic.play" :width="16" :height="16"></image>
-        </div>
-        <div class="pctrl-btn" @click="onSeekStep(-10000)">
-          <text class="pctrl-t">-10s</text>
-        </div>
-        <div class="pctrl-btn" @click="onSeekStep(10000)">
-          <text class="pctrl-t">+10s</text>
-        </div>
-        <div class="pctrl-btn" @click="onCcToggle">
-          <text :class="cc.on ? 'pctrl-t pctrl-t-on' : 'pctrl-t'">字幕</text>
-        </div>
-        <!-- 【3.5.14】弹幕：切换式，点一次换下一档（关 → 全屏 → 1/2 → 1/4）。
-            文案压到 2~3 个字，因为 5 颗键等分左列后每颗只有 ~40px。
-            「1/2」「1/4」指弹幕只出现在画面上方那一块。 -->
-        <div class="pctrl-btn" @click="onDmToggle">
-          <text :class="dm.mode === 'off' ? 'pctrl-t' : 'pctrl-t pctrl-t-on'">{{ dmBtnText }}</text>
-        </div>
+        <text class="pnote">{{ play.note }}</text>
       </div>
       <!-- 三个按钮（点赞/投币/收藏）直播态隐藏（用户反馈 m07570-3）。
            直播没有「收藏夹」语义，点赞/投币对房间也不适用，留着只会占掉 74px
            且点了没反馈。留空 div 保持 pleft 的 192+74 高度预算不变。 -->
-      <div v-if="!isLivePlay" class="pleft-btns" :style="L.playBtns">
+      <div v-if="!isLivePlay" class="pleft-btns">
         <div class="pbtn" @click="onToggleLike">
           <image class="pbtn-icon" :src="act.like ? ic.likeOn : ic.like" :width="26" :height="26"></image>
           <text :class="act.like ? 'pbtn-count-on' : 'pbtn-count'">{{ formatCount(act.likeCount) }}</text>
@@ -178,14 +133,13 @@
           <text :class="act.fav ? 'pbtn-count-on' : 'pbtn-count'">{{ formatCount(act.favCount) }}</text>
         </div>
       </div>
-      </template>
     </div>
 
     <!-- 图文态左栏：纯图标工具条（评论开关）。
          注意这里必须写 v-else-if="mode === 'article'"，**不能写 v-else**：
          上面的兄弟节点条件是 v-if="mode === 'play'"，v-else 会接住所有非 play 的
          情况（包括 mode === 'browse'），于是首页也会渲染出返回箭头和评论图标。 -->
-    <div v-else-if="mode === 'article'" class="ibar" :style="L.iconBar">
+    <div v-else-if="mode === 'article'" class="ibar">
       <div class="ibtn" @click="onIbarBack">
         <image class="ibtn-icon" :src="ic.back" :width="26" :height="26"></image>
       </div>
@@ -198,19 +152,25 @@
     </div>
 
     <!-- 浏览内容 -->
-    <div v-if="mode === 'browse'" class="content" :style="L.content">
+    <div v-if="mode === 'browse'" class="content">
       <!-- 推荐 / 热门：封面卡片网格 + 底部（刷新 | 加载更多） -->
-      <scroller v-if="tab === 'rcmd' || tab === 'hot'" class="list" :style="L.content">
-        <div class="grid" :style="L.grid">
-          <div v-for="it in currentItems" :key="it.bvid" class="vrow" :style="L.card" @click="onPlayItem(it)">
-            <image class="thumb" :src="it.cover" :width="L.num.card" :height="L.num.thumbH" :style="L.thumb"></image>
-            <div class="vinfo" :style="L.vinfo">
+      <scroller v-if="tab === 'rcmd' || tab === 'hot'" class="list" @scroll="onListScroll(tab, $event)">
+        <div class="grid">
+          <div
+            v-for="(it, idx) in currentItems"
+            :key="it.bvid"
+            :ref="'scr-' + tab + '-' + idx"
+            class="vrow"
+            @click="onOpenDetail(it)"
+          >
+            <image class="thumb" :src="it.cover" :width="427" :height="242"></image>
+            <div class="vinfo">
               <text class="vtitle">{{ it.title }}</text>
               <text class="vmeta">{{ vmeta(it) }}</text>
             </div>
           </div>
         </div>
-        <div v-if="currentItems.length" class="more-row" :style="L.wide">
+        <div v-if="currentItems.length" class="more-row">
           <div class="more-half" @click="onRefreshTab">
             <text class="more-text">刷新</text>
           </div>
@@ -218,21 +178,35 @@
             <text class="more-text">{{ moreBtnText }}</text>
           </div>
         </div>
-        <div v-if="!currentItems.length && !loading" class="empty" :style="L.wide">
+        <div v-if="!currentItems.length && !loading" class="empty">
           <text class="empty-text">{{ statusText || '暂无内容 · 点左侧标签可重试' }}</text>
         </div>
       </scroller>
 
       <!-- 搜索：关键词行 + 三分栏（视频/图文/直播）+ 结果 -->
-      <scroller v-else-if="tab === 'search'" class="list" :style="L.content">
-        <div class="searchbar" :style="L.wide" @click="onOpenInput">
+      <scroller v-else-if="tab === 'search'" class="list" @scroll="onListScroll('search', $event)">
+        <div class="searchbar" ref="scr-search-top" @click="onOpenInput">
           <text class="search-kw">{{ keyword || '点此输入关键词搜索 B 站' }}</text>
           <div class="search-btn">
             <text class="search-btn-text">搜索</text>
           </div>
         </div>
+        <!-- 搜索记录（用户要求）：只在没有关键词的空态显示，点条目直接复用关键词搜索 -->
+        <div v-if="!keyword && searchHistory.length" class="sh-wrap">
+          <div class="sh-head">
+            <text class="sh-title">搜索记录</text>
+            <div class="sh-clear" @click="onClearSearchHistory">
+              <text class="sh-clear-text">清空</text>
+            </div>
+          </div>
+          <div class="sh-list">
+            <div v-for="h in searchHistory" :key="'sh' + h.kw" class="sh-item" @click="onHistorySearch(h.kw)">
+              <text class="sh-text">{{ h.kw }}</text>
+            </div>
+          </div>
+        </div>
         <!-- 类型三分栏：切换零请求（各类型独立缓存），有关键词且该类型无结果时自动补拉 -->
-        <div class="stype-row" :style="L.wide">
+        <div class="stype-row">
           <div
             v-for="st in searchTypes"
             :key="'st' + st.id"
@@ -243,30 +217,30 @@
           </div>
         </div>
         <!-- 视频/图文/直播：同款封面卡片网格 -->
-        <div class="grid" :style="L.grid">
-        <template v-for="it in searchItems">
-          <div v-if="it.kind === 'video'" :key="it.key" class="vrow" :style="L.card" @click="onPlayItem(it)">
-            <image class="thumb" :src="it.cover" :width="L.num.card" :height="L.num.thumbH" :style="L.thumb"></image>
-            <div class="vinfo" :style="L.vinfo">
+        <div class="grid">
+        <template v-for="(it, idx) in searchItems">
+          <div v-if="it.kind === 'video'" :key="it.key" :ref="'scr-search-' + idx" class="vrow" @click="onOpenDetail(it)">
+            <image class="thumb" :src="it.cover" :width="427" :height="242"></image>
+            <div class="vinfo">
               <text class="vtitle">{{ it.title }}</text>
               <text class="vmeta">{{ vmeta(it) }}</text>
             </div>
           </div>
           <!-- 图文：同款卡片，进入图文详情（评论区与视频同族，专栏实测 type=12） -->
-          <div v-else-if="it.kind === 'article'" :key="it.key" class="vrow" :style="L.card" @click="openArticle(it)">
-            <image class="thumb" :src="it.cover" :width="L.num.card" :height="L.num.thumbH" :style="L.thumb"></image>
-            <div class="vinfo" :style="L.vinfo">
+          <div v-else-if="it.kind === 'article'" :key="it.key" :ref="'scr-search-' + idx" class="vrow" @click="openArticle(it)">
+            <image class="thumb" :src="it.cover" :width="427" :height="242"></image>
+            <div class="vinfo">
               <text class="vtitle">{{ it.title }}</text>
               <text class="vmeta">{{ it.up }}{{ it.view ? ' · 阅读 ' + formatCount(it.view) : '' }}{{ it.reply ? ' · 评论 ' + it.reply : '' }}</text>
             </div>
           </div>
           <!-- 直播：点击开播（本机 MPP 硬解，直连 B 站 FLV 源） -->
-          <div v-else-if="it.kind === 'live'" :key="it.key" class="vrow" :style="L.card" @click="onPlayItem(it)">
+          <div v-else-if="it.kind === 'live'" :key="it.key" :ref="'scr-search-' + idx" class="vrow" @click="onOpenDetail(it)">
             <!-- 封面必须是 16:9 长方形（用户反馈：「搜索直播时，每个直播的封面图片是正方形，
                  而不是长方形」）。此前这里用 .thumb-sq 强制 93x93，与视频/图文/历史三栏的
                  166x93 不一致，视觉上突然出现一个方块。统一走 .thumb。 -->
-            <image class="thumb" :src="it.cover" :width="L.num.card" :height="L.num.thumbH" :style="L.thumb"></image>
-            <div class="vinfo" :style="L.vinfo">
+            <image class="thumb" :src="it.cover" :width="427" :height="242"></image>
+            <div class="vinfo">
               <text class="vtitle">{{ it.title }}</text>
               <text class="vmeta">{{ it.up }}{{ it.online ? ' · 人气 ' + formatCount(it.online) : '' }}{{ it.cate ? ' · ' + it.cate : '' }}</text>
             </div>
@@ -274,7 +248,7 @@
           </template>
         </div>
           <!-- 与推荐/热门同款（刷新 | 加载更多）双按钮 -->
-        <div v-if="searchItems.length" class="more-row" :style="L.wide">
+        <div v-if="searchItems.length" class="more-row">
           <div class="more-half" @click="onRefreshTab">
             <text class="more-text">刷新</text>
           </div>
@@ -282,104 +256,137 @@
             <text class="more-text">{{ moreBtnText }}</text>
           </div>
         </div>
-        <div v-if="!searchItems.length && !loading" class="empty" :style="L.wide">
+        <div v-if="!searchItems.length && !loading" class="empty">
           <text class="empty-text">{{ statusText || '输入关键词开始搜索' }}</text>
         </div>
       </scroller>
 
-      <!-- 我的：登录态 + 播放历史 + 自检入口；mineView='qr' 时切换为扫码视图 -->
-      <scroller v-else-if="mineView === 'info'" class="list" :style="L.content">
-        <div class="mine-head" :style="L.wide">
-          <div class="mine-idcol" :style="L.wide">
-            <text class="mine-name" :style="L.wide">{{ profile ? profile.uname : '未登录' }}</text>
-            <text class="mine-id" :style="L.wide">{{ profile ? ('Lv.' + profile.level + ' · mid ' + profile.mid + (profile.vipType ? ' · 大会员' : '')) : '登录后个性化推荐 · 身份持久保存' }}</text>
+      <!-- 下载：离线缓存列表（文件在 /userdisk/PenBili/，元数据在 storage） -->
+      <scroller v-else-if="tab === 'downloads'" class="list" @scroll="onListScroll('downloads', $event)">
+        <div class="dl-head">
+          <text class="dl-head-text">共 {{ downloads.length }} 个 · {{ dlTotalText }}</text>
+          <text class="dl-head-dir">{{ dlDir }}</text>
+        </div>
+        <div v-if="downloads.length" class="grid">
+          <div
+            v-for="(it, idx) in downloads"
+            :key="'dl' + it.bvid + it.cid"
+            :ref="'scr-downloads-' + idx"
+            class="vrow"
+            @click="onPlayDownload(it)"
+          >
+            <image class="thumb" :src="it.cover" :width="427" :height="242"></image>
+            <div class="vinfo">
+              <text class="vtitle">{{ it.title }}</text>
+              <text class="vmeta">{{ dlMeta(it) }}</text>
+            </div>
           </div>
         </div>
-        <div v-if="!profile" class="mine-row" :style="L.wide" @click="onGoLogin">
-          <text class="mine-label">扫码登录 B 站账号</text>
-          <text class="mine-value">›</text>
+        <div v-if="!downloads.length" class="empty">
+          <text class="empty-text">暂无下载 · 播放页点「•••」→「缓存」即可离线保存</text>
         </div>
-        <!-- 未登录说明（收官文案）：视频显示风险 + 行动引导 -->
-        <text v-if="!profile" class="mine-notice" :style="L.wide">未登录 · 部分视频可能看不到</text>
-        <div v-else class="mine-row" :style="L.wide" @click="onLogout">
-          <text class="mine-label">退出登录</text>
-          <text class="mine-value">{{ profile.uname }}</text>
+      </scroller>
+
+      <!-- 历史：独立一页（用户要求，放在「下载」下面），最多 20 条 -->
+      <scroller v-else-if="tab === 'history'" class="list" @scroll="onListScroll('history', $event)">
+        <div class="dl-head">
+          <text class="dl-head-text">共 {{ history.length }} 条 · 最多 20 条</text>
+          <text class="dl-head-dir">点卡片重新打开</text>
         </div>
-        <div class="mine-row" :style="L.wide" @click="onRefreshProfile">
-          <text class="mine-label">刷新登录态</text>
-          <text class="mine-value">{{ profileStatus }}</text>
-        </div>
-        <!-- 视频调节：点整行轮转选项（falcon 无原生下拉，见 onCycleVideoQuality 注释） -->
-        <div class="mine-secrow" :style="L.wide">
-          <text class="mine-sec">视频调节</text>
-        </div>
-        <div class="mine-row" :style="L.wide" @click="onCycleVideoQuality">
-          <text class="mine-label">画质</text>
-          <text class="mine-value">{{ vqText() }} ›</text>
-        </div>
-        <!-- CC 字幕：开关与语言都靠点击轮转（falcon 无原生下拉）。
-             字幕列表来自 x/player/v2，匿名态常为空，状态行会给出提示。 -->
-        <div class="mine-secrow" :style="L.wide">
-          <text class="mine-sec">CC 字幕</text>
-        </div>
-        <div class="mine-row" :style="L.wide" @click="onCcToggle">
-          <text class="mine-label">字幕开关</text>
-          <text class="mine-value">{{ cc.on ? '开' : '关' }} ›</text>
-        </div>
-        <div class="mine-row" :style="L.wide" @click="onCcLanTap">
-          <text class="mine-label">字幕语言</text>
-          <text class="mine-value">{{ ccLanText }} ›</text>
-        </div>
-        <!-- 字幕为什么没有：未登录 / 无 CC 轨道 / 下载失败，全写在这一行。
-             播放器里只留「字幕」这个开关，不再抢占画面上的顶栏（用户要求）。 -->
-        <text class="mine-notice" :style="L.wide">{{ ccSettingHint }}</text>
-        <!-- 【3.5.14】弹幕开关放在这里（与 CC 字幕同一套轮转交互），
-             左列那颗键只是快捷方式 —— 两边都改同一个 dm.mode。 -->
-        <div class="mine-secrow" :style="L.wide">
-          <text class="mine-sec">弹幕</text>
-        </div>
-        <div class="mine-row" :style="L.wide" @click="onDmToggle">
-          <text class="mine-label">弹幕显示</text>
-          <text class="mine-value">{{ dmSettingText }} ›</text>
-        </div>
-        <div class="mine-row" :style="L.wide" @click="onDmSizeToggle">
-          <text class="mine-label">弹幕字号</text>
-          <text class="mine-value">{{ dmSizeText }} ›</text>
-        </div>
-        <text class="mine-notice" :style="L.wide">{{ dmSettingHint }}</text>
-        <div class="mine-secrow" :style="L.wide">
-          <text class="mine-sec">直播</text>
-        </div>
-        <div class="mine-row" :style="L.wide" @click="onCycleLiveQuality">
-          <text class="mine-label">画质</text>
-          <text class="mine-value">{{ lqText() }} ›</text>
-        </div>
-        <div class="mine-row" :style="L.wide">
-          <text class="mine-label">取流方式</text>
-          <text class="mine-value">本地直连 · 芯片硬解</text>
-        </div>
-        <text class="mine-notice" :style="L.wide">点画质行可逐项切换（分辨率与帧率合一，不会出现服务端不存在的组合）。直播由本机 MPP 硬解，不经云端转码；未登录时服务端最高只给 480p。</text>
-        <div class="mine-secrow" :style="L.wide">
-          <text class="mine-sec">播放历史（{{ history.length }}）</text>
-        </div>
-        <div v-if="history.length" class="grid" :style="L.grid">
-          <div v-for="h in history" :key="'h' + h.bvid" class="vrow" :style="L.card" @click="onPlayItem(h)">
-            <image class="thumb" :src="h.cover" :width="L.num.card" :height="L.num.thumbH" :style="L.thumb"></image>
-            <div class="vinfo" :style="L.vinfo">
+        <div v-if="history.length" class="grid">
+          <div
+            v-for="(h, idx) in history"
+            :key="'h' + h.bvid"
+            :ref="'scr-history-' + idx"
+            class="vrow"
+            @click="onOpenDetail(h)"
+          >
+            <image class="thumb" :src="h.cover" :width="427" :height="242"></image>
+            <div class="vinfo">
               <text class="vtitle">{{ h.title }}</text>
               <text class="vmeta">{{ h.up }} · {{ historyTime(h.at) }}</text>
             </div>
           </div>
         </div>
-        <div v-if="!history.length" class="mine-row" :style="L.wide">
-          <text class="mine-label">还没有播放记录</text>
+        <div v-if="!history.length" class="empty">
+          <text class="empty-text">暂无播放记录 · 看过的视频会出现在这里</text>
+        </div>
+      </scroller>
+
+      <!-- 我的：登录态 + 设置入口；mineView='qr' 时切换为扫码视图 -->
+      <scroller v-else-if="mineView === 'info'" class="list">
+        <div class="mine-head">
+          <div class="mine-idcol">
+            <text class="mine-name">{{ profile ? profile.uname : '未登录' }}</text>
+            <text class="mine-id">{{ profile ? ('Lv.' + profile.level + ' · mid ' + profile.mid + (profile.vipType ? ' · 大会员' : '')) : '登录后个性化推荐 · 身份持久保存' }}</text>
+          </div>
+        </div>
+        <div v-if="!profile" class="mine-row" @click="onGoLogin">
+          <text class="mine-label">扫码登录 B 站账号</text>
+          <text class="mine-value">›</text>
+        </div>
+        <!-- 未登录说明（收官文案）：视频显示风险 + 行动引导 -->
+        <text v-if="!profile" class="mine-notice">未登录时视频可能无法正常显示，登录后体验更完整</text>
+        <div v-else class="mine-row" @click="onLogout">
+          <text class="mine-label">退出登录</text>
+          <text class="mine-value">{{ profile.uname }}</text>
+        </div>
+        <div class="mine-row" @click="onRefreshProfile">
+          <text class="mine-label">刷新登录态</text>
+          <text class="mine-value">{{ profileStatus }}</text>
+        </div>
+        <!-- 视频调节：点整行轮转选项（falcon 无原生下拉，见 onCycleVideoQuality 注释） -->
+        <div class="mine-secrow">
+          <text class="mine-sec">视频调节</text>
+        </div>
+        <div class="mine-row" @click="onCycleVideoQuality">
+          <text class="mine-label">画质</text>
+          <text class="mine-value">{{ vqText() }} ›</text>
+        </div>
+        <div class="mine-row" @click="onCcToggle">
+          <text class="mine-label">CC 字幕</text>
+          <text class="mine-value">{{ cc.on ? '开' : '关' }} ›</text>
+        </div>
+        <div class="mine-row" @click="onToggleVideoZoom">
+          <text class="mine-label">视频缩放</text>
+          <text class="mine-value">{{ videoSettings.videoZoom ? '开 · 双指捏合' : '关' }} ›</text>
+        </div>
+        <div v-if="cc.on" class="mine-row" @click="onCcLanTap">
+          <text class="mine-label">字幕语言</text>
+          <text class="mine-value">{{ ccLanText }} ›</text>
+        </div>
+        <text class="mine-notice">{{ ccSettingHint }}</text>
+        <div class="mine-secrow">
+          <text class="mine-sec">直播</text>
+        </div>
+        <div class="mine-row" @click="onCycleLiveQuality">
+          <text class="mine-label">画质</text>
+          <text class="mine-value">{{ lqText() }} ›</text>
+        </div>
+        <div class="mine-row">
+          <text class="mine-label">取流方式</text>
+          <text class="mine-value">本地直连 · 芯片硬解</text>
+        </div>
+        <text class="mine-notice">点画质行可逐项切换（分辨率与帧率合一，不会出现服务端不存在的组合）。直播由本机 MPP 硬解，不经云端转码；未登录时服务端最高只给 480p。</text>
+        <div class="mine-secrow">
+          <text class="mine-sec">播放</text>
+        </div>
+        <!-- 历史已独立成左栏「历史」页（用户要求）；这里保留一个入口行 -->
+        <div class="mine-row" @click="selectTab('history')">
+          <text class="mine-label">播放历史</text>
+          <text class="mine-value">{{ history.length ? history.length + ' 条 ›' : '暂无 ›' }}</text>
+        </div>
+        <!-- 我的下载（用户要求「下载页面放我的下面」）：与左栏「下载」标签同一页 -->
+        <div class="mine-row" @click="selectTab('downloads')">
+          <text class="mine-label">我的下载</text>
+          <text class="mine-value">{{ downloads.length ? downloads.length + ' 个 · ' + dlTotalText : '暂无' }} ›</text>
         </div>
         <!-- 检查更新（用户需求 m14218-2）：「我的」页手动检测，点开弹窗只有 2 个按钮 -->
-        <div class="mine-row" :style="L.wide" @click="onCheckUpdateTap">
+        <div class="mine-row" @click="onCheckUpdateTap">
           <text class="mine-label">检查更新</text>
           <text class="mine-value">v{{ appVersion }} ›</text>
         </div>
-        <div class="mine-row" :style="L.wide">
+        <div class="mine-row">
           <text class="mine-label">PenBili</text>
           <text class="mine-value">v{{ appVersion }} · {{ profile ? '已登录' : '匿名' }}</text>
         </div>
@@ -387,15 +394,15 @@
         <!-- 关于：项目信息（GitHub / 开源协议 / 免责）。
              词典笔上没有能唤起浏览器的 JSAPI，所以 GitHub 地址同时给二维码，
              手机扫一下就能打开仓库——比让用户在 266px 高的屏上抄 URL 现实。 -->
-        <div class="mine-secrow" :style="L.wide">
+        <div class="mine-secrow">
           <text class="mine-sec">关于</text>
         </div>
-        <div class="mine-about" :style="L.wide">
+        <div class="mine-about">
           <div class="mine-about-text">
             <text class="mine-about-title">PenBili · 有道词典笔 B 站客户端</text>
-            <text class="mine-about-line">作者 56dz · 开源协议 GPL-3.0</text>
-            <text class="mine-about-line">github.com/56dz/PenBili</text>
-            <text class="mine-about-line">基于 Falcon 小程序运行时，视频由本机 MPP 硬解</text>
+            <text class="mine-about-line">S6 Pro 分支 · 作者 56dz · GPL-3.0</text>
+            <text class="mine-about-line">github.com/noguimc/PenBili</text>
+            <text class="mine-about-line">基于 Falcon 小程序运行时，视频由本机软解</text>
             <text class="mine-about-note">第三方客户端，与哔哩哔哩无隶属关系；所有内容版权归原作者及平台所有</text>
           </div>
           <div class="mine-about-qr">
@@ -411,7 +418,7 @@
       </scroller>
 
       <!-- 扫码视图：二维码真正水平居中（左右等宽弹力列夹持），状态/按钮在左列 -->
-      <div v-else class="qr-wrap" :style="L.content">
+      <div v-else class="qr-wrap">
         <div class="qr-left">
           <text class="qr-state">{{ qr.message }}</text>
           <text class="qr-hint">打开手机B站 App 扫码</text>
@@ -435,87 +442,193 @@
       </div>
     </div>
 
-    <!-- 播放态中列：视频洞 / (字幕带) / 底部控制条。
-         【3.5.6 第十四轮】
-         · 顶栏删掉了 —— 那 18px 直接还给画面（用户要「视频占满，进度条别占地方」）；
-         · 视频段与字幕带的高度**不跟控件显隐走**：控制条恒占 seekH，收起时只是
-           把内容换成纯黑（DOM 高度与 native 矩形严格同源）；
-         · 只有两种操作会真的改矩形：进/出全屏（只改 x，不改尺寸）和开关字幕
-           （18px 让进让出）。X7 的 videoscale caps 在起播时按矩形定死，
-           运行期改尺寸必然要重建管线，所以这两条都刻意做成低频、且全屏不改尺寸。 -->
-    <!-- 【3.5.6 第二十一轮：全屏不再改任何几何】
-         用户明确要求：「点全屏后不对视频位置做任何改动，只把控件挪到右手边」。
-         所以这里没有黑边占位、没有第二套视频列 —— .pleft / .pmid / .pright
-         三列的位置和宽度在任何状态下都相同，视频洞一个像素都不动。
-         全屏只是把左列内容换成纯黑、右列内容换成控制面板。 -->
-    <div
-      v-if="mode === 'play'"
-      class="pmid"
-      :style="midStyle"
-    >
-      <!-- 【3.5.6 第十四轮：顶栏删除】
-           用户原话：「把视频放大，占满视频区，本身就没有多大的地方，进度条还占些」。
-           这块 3.34:1 的屏上，16:9 永远高度受限，省下的每一像素都直接变成画面宽度
-           （以 X7 936x280、中列 457、控制条 32 为例）：
-             顶栏 18 + 视频 230 + 控制条 32  → 画面 409x230   （第十轮）
-             顶栏  0 + 视频 248 + 控制条 32  → 画面 441x248   （本轮，面积 +16%）
-           顶栏原来的四件事都有了新去处：
-             · 标题      → 左列顶部本来就有；
-             · 暂停标记  → 控制条的播放键（暂停态实心品牌粉）；
-             · ±10s      → 移进控制条（-1m/+1m 去掉，拖进度条比点两次快）；
-             · 返回      → 只在全屏态出现，放控制条最左（普通态左列有返回）。
-           代价：暂停时画面正中不会再有「已暂停」胶囊 —— 那本来也压不到画面上
-           （KMS 平面在 UI 之上），只是少了画面上方一行提示。 -->
-      <!-- 直播态没有控件：视频区吃掉整个中列（见 base.less .pvideo-live）。
-           注意 KMS 平面是硬件 overlay，尺寸由 native 的 render-rectangle 决定，
-           这里的 class 只管 falcon 侧「挖孔」占位（hole）的几何 —— 两者必须一致，
-           否则点击热区与画面对不上。 -->
-      <div class="pstage" :style="stageStyle">
-      <div :class="isLivePlay ? 'pvideo pvideo-live' : 'pvideo'" :style="videoBoxStyle" @click="onVideoTap">
-        <!-- hole 是视频平面上的透明占位，必须**自己**也绑 click —— falcon 的点击
-             不一定从子节点冒泡到父容器，真机实测只绑父级会有一半面积点不动。 -->
-        <hole v-if="holeVisible" :class="isLivePlay ? 'video-hole video-hole-live' : 'video-hole'" :style="videoBoxStyle" @click="onVideoTap"></hole>
-        <!-- 取流中：整块视频区是 UI 像素（holeVisible=false），正好播加载动画。
-             B 站那套是「小电视 + 三个跳动的点」，falcon 没有可靠的 @keyframes，
-             所以动画由 120ms 一帧的 JS 定时器驱动（见 loadAnim / ui.frame）。 -->
-        <div v-else :class="isLivePlay ? 'play-idle play-idle-live' : 'play-idle'" :style="videoBoxStyle" @click="onVideoTap">
-          <div v-if="play.state === 'loading'" class="pl-load">
-            <div class="pl-tv">
-              <div class="pl-tv-screen">
-                <div class="pl-tv-bar" :style="loadBarStyle"></div>
-              </div>
-            </div>
-            <div class="pl-dots">
-              <div :class="loadDot0"></div>
-              <div :class="loadDot1"></div>
-              <div :class="loadDot2"></div>
-            </div>
-            <text class="pl-load-text">正在加载视频…</text>
+    <!-- UP 主主页（用户要求「增加UP主页解析」）：左栏只有返回，内容区复用首页双列卡片 -->
+    <div v-if="mode === 'up'" class="bar">
+      <div class="tab tab-back" @click="onBackUp">
+        <image class="tab-back-icon" :src="ic.back" :width="30" :height="30"></image>
+      </div>
+      <text class="bar-status">{{ upBarText }}</text>
+    </div>
+    <scroller v-if="mode === 'up'" class="list" @scroll="onListScroll('up', $event)">
+      <div class="up-head">
+        <text class="up-title">{{ upName }}</text>
+        <text class="up-stat">{{ upStatText }}</text>
+      </div>
+      <text v-if="upSign" class="up-sign">{{ upSign }}</text>
+      <div v-if="up.items.length" class="grid">
+        <div
+          v-for="(it, idx) in up.items"
+          :key="'upv' + it.bvid"
+          :ref="'scr-up-' + idx"
+          class="vrow"
+          @click="onOpenDetail(it)"
+        >
+          <image class="thumb" :src="it.cover" :width="427" :height="242"></image>
+          <div class="vinfo">
+            <text class="vtitle">{{ it.title }}</text>
+            <text class="vmeta">{{ upVmeta(it) }}</text>
           </div>
-          <text v-else class="play-idle-text">{{ play.note || idleText }}</text>
         </div>
       </div>
-      <!-- 【CC 字幕带：18px 单行】
-           KMS 视频平面 zpos 高于 Falcon UI，文字压不到画面上（见 play_chrome.js
-           文件头），所以字幕必须占一段真实的 UI 像素。
-           它在「字幕开着且有 cue」时占 18px（ccActive → bands.cc），
-           渲染条件只看几何（ccBarVisible === bands.cc > 0）：
-             · 默认（未登录 / 无 CC）→ 高度 0，视频洞 280，画面 498x280（最大）；
-             · 开字幕         → 占 18px，视频洞 262，画面 466x262。
-           **没有台词时也要渲染这条黑带**（内容为空）：带子已经从画面里让出来了，
-           不画就是一块透明洞，上一屏的像素会从这里透出来（第十九轮真机
-           「全屏多出一条进度条」就是这条缝）。
-           这一次重建只在开/关字幕时发生（低频操作），换来的是默认状态下画面
-           比"恒定留一条字幕带"大 18px —— 这笔账在 docs/player-chrome.md §12 里。 -->
-      <div v-if="ccBarVisible" class="cc-bar" :style="ccBarStyle">
-        <text class="cc-text">{{ subtitleText }}</text>
+      <div v-if="up.loading && !up.items.length" class="empty">
+        <text class="empty-text">正在解析 UP 主页…</text>
       </div>
+      <div v-else-if="!up.items.length" class="empty" @click="onRefreshUp">
+        <text class="empty-text">{{ up.status ? up.status + ' · 点此重试' : '该 UP 暂无公开投稿' }}</text>
       </div>
-      <!-- 【3.5.12】中列不再有底部条：进度条搬去右列评论区顶部（.pright-bar）。
-           用户 m19885：「把进度条移至评论区的最上方，固定在上方，不随评论区滑动」
-           + 「视频画面尽量覆盖整个播放区」。两件事是同一件事 —— 那 24px 一离开
-           中列，中列整条高度都还给画面，16:9 画面正好铺满，左右黑边自己消失。
-           中列现在只有「视频洞 + 字幕带」两段，bands.bar 恒为 0。 -->
+      <div v-if="up.items.length" class="more-row">
+        <div class="more-half" @click="onRefreshUp">
+          <text class="more-text">刷新</text>
+        </div>
+        <div class="more-half" @click="loadMoreUp">
+          <text class="more-text">{{ up.loading ? '加载中…' : (up.noMore ? '没有更多了' : '加载更多') }}</text>
+        </div>
+      </div>
+    </scroller>
+
+    <!-- 详情态中列（用户手绘稿）：黑底 + 16:9 大封面；点击封面才启动播放页 -->
+    <div v-if="mode === 'detail'" class="pmid">
+      <div class="detail-cover-wrap" @click="onStartPlayFromDetail">
+        <image class="detail-cover" :src="detail.item && detail.item.cover" :width="469" :height="264"></image>
+        <text class="detail-play-hint">点击封面播放</text>
+      </div>
+    </div>
+
+    <!-- 全屏播放页（移植文件管理 shell 播放器 UI）：
+         顶栏 96（返回/标题/菜单）+ 视频带 216 + 底栏 78（播放/时间/进度条）。
+         native 只写视频带（FULL_VIDEO_AREA），所以顶/底栏不会被视频覆盖。
+         点视频区 = 隐藏/显示这两条栏（切布局 + native setRect 换矩形，不重启解码）；
+         隐藏时视频带撑满 390，画面按 16:9 信箱适配全屏。
+         打开设置菜单时调 pauseRender 停写 fb，否则菜单区会被下一帧视频盖掉。 -->
+    <div
+      v-if="mode === 'play' && !interact.visible"
+      :class="chromeHidden ? 'fp-root fp-root-full' : 'fp-root'"
+      :style="{ backgroundColor: chromeTick % 2 === 0 ? '#000000' : '#010101' }"
+    >
+      <div v-if="!chromeHidden" class="fp-nav">
+        <div class="fp-back" @click="onPlayBack">
+          <text class="fp-back-text">‹ 返回</text>
+        </div>
+        <text class="fp-title">{{ titleDisplay }}</text>
+        <text v-if="play.note" class="fp-note">{{ play.note }}</text>
+        <div class="fp-menu-btn" @click="togglePlayerMenu">
+          <text class="fp-menu-dots">•••</text>
+        </div>
+      </div>
+
+      <div
+        :class="chromeHidden ? 'fp-video fp-video-full' : 'fp-video'"
+        :style="{ height: fpVideoHeight + 'px' }"
+        @click="onVideoTap"
+      >
+        <!-- 不用 <hole>：真机实测 hole 在大面积重绘（标题滚动 400ms 一次）时会把
+             整条视频带清成白色，视频两侧信箱区尤其明显。改用 .fp-video 自身黑底
+             作信箱区，native 每帧只覆写中间真实视频矩形，重绘后 33ms 内即补回。
+             空闲（未出画）时叠一行提示文字。 -->
+        <text v-if="!holeVisible" class="play-idle-text">{{ play.note || idleText }}</text>
+      </div>
+
+      <!-- CC 字幕带（3.5.9 同步）：native 视频帧覆盖不了 UI，字幕必须占真实像素。
+           开字幕时视频带让出 30px（见 screen.js playAreaFor），这条带画在让出的位置。 -->
+      <div v-if="ccBandVisible" class="fp-cc" :style="{ height: ccBandH + 'px' }">
+        <text class="fp-cc-text">{{ subtitleText }}</text>
+      </div>
+
+      <div v-if="!chromeHidden" class="fp-bottom">
+        <div class="fp-play" @click="onTogglePlay">
+          <image class="fp-play-icon" :src="play.state === 'playing' ? ic.pause : ic.play" :width="46" :height="36"></image>
+        </div>
+        <text class="fp-time">{{ fpCurTime }}</text>
+        <div
+          v-if="!isLivePlay"
+          class="fp-seek"
+          @touchstart="onSeekTouch"
+          @touchmove="onSeekTouch"
+          @touchend="onSeekRelease"
+        >
+          <div class="fp-track">
+            <div class="fp-fill" :style="{ width: fpSeekFillW + 'px' }"></div>
+            <div class="fp-knob"></div>
+          </div>
+        </div>
+        <text v-else class="fp-time">直播</text>
+        <text class="fp-time">{{ fpDurTime }}</text>
+      </div>
+
+      <!-- 右侧设置菜单（移植文件管理播放器的 menu-overlay 布局）：
+           布局 384 宽，画质/直播画质两行 + 关闭。点视频空白处也会关闭。 -->
+      <div v-if="playerMenuOpen" class="fp-menu-overlay">
+        <div class="fp-menu-head">
+          <text class="fp-menu-title">播放设置</text>
+          <div class="fp-menu-close" @click="togglePlayerMenu">
+            <text class="fp-menu-close-text">关闭</text>
+          </div>
+        </div>
+        <div class="fp-menu-row" @click="onCycleVideoQuality">
+          <text class="fp-menu-label">画质</text>
+          <text class="fp-menu-value">{{ vqMenuText() }}</text>
+        </div>
+        <div class="fp-menu-row" @click="onCycleLiveQuality">
+          <text class="fp-menu-label">直播画质</text>
+          <text class="fp-menu-value">{{ lqMenuText() }}</text>
+        </div>
+        <!-- 视频放大：开 = 双指捏合 1..4x（native 中心裁切，不重启解码）。 -->
+        <div class="fp-menu-row" @click="onZoomCycle">
+          <text class="fp-menu-label">缩放</text>
+          <text class="fp-menu-value">{{ zoomText }}</text>
+        </div>
+        <!-- 样式：流畅=按视频带尺寸解码（现状）；清晰=按无栏（全屏）分辨率解码后等比显示，
+             画面不裁切、不变形，切全屏时 1:1 落屏。切换会按当前位置重开一次解码。 -->
+        <div class="fp-menu-row" @click="onCyclePlayStyle">
+          <text class="fp-menu-label">样式</text>
+          <text class="fp-menu-value">{{ playStyleText }}</text>
+        </div>
+        <!-- 字幕（3.5.9 同步）：点整行轮转「关 → 开·自动 → 开·其它语言 → …」。
+             笔端没有下拉控件，轮转是唯一不越屏的交互。 -->
+        <div class="fp-menu-row" @click="onCcMenuTap">
+          <text class="fp-menu-label">字幕</text>
+          <text class="fp-menu-value">{{ ccMenuText }}</text>
+        </div>
+        <!-- 离线缓存：在线→下载；已缓存→删除；直播→不可下载（见 onDownloadCurrent） -->
+        <div class="fp-menu-row" @click="onDownloadCurrent">
+          <text class="fp-menu-label">缓存</text>
+          <text class="fp-menu-value">{{ dlMenuText }}</text>
+        </div>
+      </div>
+    </div>
+
+    <!-- 互动视频选项页（3.5.9 同步）：native 视频帧盖不住 UI，题面改为整页替换。
+         出现时调 pauseRender 冻结画面，选择/收起后恢复。 -->
+    <div v-if="mode === 'play' && interact.visible" class="ip-page">
+      <div class="ip-head">
+        <text class="ip-title">{{ interactTitle }}</text>
+        <text class="ip-count">{{ interact.leaf ? '结局' : (interact.countdown > 0 ? interact.countdown + 's' : '选择') }}</text>
+      </div>
+      <scroller class="ip-list">
+        <div
+          v-for="(ch, ci) in interactChoices"
+          :key="'ic' + ch.id + '_' + ci"
+          :class="ch.isDefault ? 'ip-choice ip-choice-def' : 'ip-choice'"
+          @click="onChoiceTap(ch)"
+        >
+          <text class="ip-choice-idx">{{ ci + 1 }}</text>
+          <text class="ip-choice-text">{{ ch.option }}</text>
+          <text v-if="ch.isDefault" class="ip-choice-tag">默认</text>
+        </div>
+        <text v-if="!interactChoices.length && !interact.leaf" class="ip-status">{{ interactHint }}</text>
+        <text v-if="interact.status" class="ip-status">{{ interact.status }}</text>
+      </scroller>
+      <div class="ip-foot">
+        <div v-if="interact.history.length && !interact.noBacktracking" class="ip-btn" @click="onInteractBack">
+          <text class="ip-btn-t">‹ 回退</text>
+        </div>
+        <div class="ip-btn" @click="onInteractReplay">
+          <text class="ip-btn-t">重播本段</text>
+        </div>
+        <div class="ip-btn" @click="onInteractClose">
+          <text class="ip-btn-t">收起</text>
+        </div>
+      </div>
     </div>
 
     <!-- 播放态右列（用户手绘稿 m11950）：上=评论区(240)，下=输入框+发送按钮(26)。
@@ -524,58 +637,22 @@
          直播的评论流与点播不同族（弹幕式、实时滚动），复用点播评论区语义不对；
          而且三个按钮（含收藏）在直播态已隐藏，favOverlay 永远不会被打开，
          整列一起隐藏是安全的。隐藏后中列视频区靠 .pvideo-live 撑满 266px。 -->
-    <div v-if="mode === 'play' && !isLivePlay" class="pright" :style="L.playRight">
-      <!-- 【3.5.6 第二十一轮：全屏 = 只换右列内容，不动视频】
-           用户要求：点全屏后不对视频位置做任何改动，把进度条 / 播放 / 退出全屏 /
-           互动选项挪到右手边。所以这一列在任何状态下都占着同样的像素，
-           全屏时内容换成控制面板，中列和视频洞完全不受影响。 -->
-      <!-- 【3.5.13】沉浸占位：同宽同高纯黑，理由同左列 .pside-fill。 -->
-      <div v-if="ui.side" class="pside-fill" :style="L.playRight"></div>
-      <!-- 【互动视频】每段选项面板。falcon 没有可靠 z-index，所以与收藏夹一样
-           采用「整栏替换」而不是浮层：选项可见时评论区让位，点「收起」再换回。 -->
-      <!-- 【第二十八轮】四条分支改成显式互斥的独立 v-if。
-           falcon 对跨 <template>/<div> 的 v-else-if / v-else 链支持不稳：
-           真机上「沉浸态 = true」时评论区这个 v-else 分支**照样渲染**，
-           于是评论列表/输入框和另一块面板叠成一团（用户截图）。
-           条件写全、互不依赖，反正它们本来就互斥。 -->
-      <template v-if="!ui.side && interact.visible">
-        <div class="ip-head" :style="ipHeadStyle">
-          <text class="ip-title">{{ interactTitle }}</text>
-          <text class="ip-count">{{ interact.leaf ? '结局' : (interact.countdown > 0 ? interact.countdown + 's' : '选择') }}</text>
+    <div v-if="mode === 'detail' && !isLivePlay" class="pright">
+      <!-- 分P / 合集页签（3.5.9 同步）：只在稿件真的有多段时出现。
+           笔端没有下拉，三个胶囊页签是唯一不越屏的入口。 -->
+      <div v-if="!favOverlay && (epHasPages || epHasSeason)" class="ptabs">
+        <div :class="epTabNow === 'reply' ? 'ptab ptab-on' : 'ptab'" @click="onEpTab('reply')">
+          <text :class="epTabNow === 'reply' ? 'ptab-t ptab-t-on' : 'ptab-t'">评论</text>
         </div>
-        <div class="side-body" :style="ipBodyStyle">
-          <scroller class="side-scroll">
-            <div
-              v-for="(ch, ci) in interactChoices"
-              :key="'ic' + ch.id + '_' + ci"
-              :class="ch.isDefault ? 'ip-choice ip-choice-def' : 'ip-choice'"
-              @click="onChoiceTap(ch)"
-            >
-              <text class="ip-choice-idx">{{ ci + 1 }}</text>
-              <text class="ip-choice-text">{{ ch.option }}</text>
-              <text v-if="ch.isDefault" class="ip-choice-tag">默认</text>
-            </div>
-            <text v-if="!interactChoices.length && !interact.leaf" class="ip-status">{{ interact.autoJump ? '自动连播片段，本段结束自动进入下一段' : '本段没有可点选项，等待自动连播…' }}</text>
-            <text class="ip-status">{{ interact.status }}</text>
-          </scroller>
+        <div v-if="epHasPages" :class="epTabNow === 'pages' ? 'ptab ptab-on' : 'ptab'" @click="onEpTab('pages')">
+          <text :class="epTabNow === 'pages' ? 'ptab-t ptab-t-on' : 'ptab-t'">{{ epPageLabel }}</text>
         </div>
-        <div class="ip-foot" :style="ipFootStyle">
-          <div v-if="interact.history.length && !interact.noBacktracking" class="ip-btn" @click="onInteractBack">
-            <text class="ip-btn-t">‹ 回退</text>
-          </div>
-          <div class="ip-btn" @click="onInteractReplay">
-            <text class="ip-btn-t">重播本段</text>
-          </div>
-          <div class="ip-btn" @click="onCcToggle">
-            <text class="ip-btn-t">{{ cc.on ? '字幕关' : '字幕开' }}</text>
-          </div>
-          <div class="ip-btn" @click="onInteractClose">
-            <text class="ip-btn-t">收起</text>
-          </div>
+        <div v-if="epHasSeason" :class="epTabNow === 'season' ? 'ptab ptab-on' : 'ptab'" @click="onEpTab('season')">
+          <text :class="epTabNow === 'season' ? 'ptab-t ptab-t-on' : 'ptab-t'">{{ epSeasonLabel }}</text>
         </div>
-      </template>
+      </div>
       <!-- 收藏夹覆盖层 -->
-      <template v-if="!ui.side && !interact.visible && favOverlay">
+      <template v-if="favOverlay">
         <div class="fav-head">
           <div class="fav-exit" @click="closeFavOverlay">
             <text class="fav-exit-text">‹ 退出</text>
@@ -597,49 +674,47 @@
           </scroller>
         </div>
       </template>
-      <!-- 评论区（默认） -->
-      <template v-if="!ui.side && !interact.visible && !favOverlay">
-        <!-- 【3.5.12】常驻进度条：压在评论区最上方，**不随评论滚动**。
-             用户 m19885 三点合一：进度条从视频下方搬到这里；顺势把中列那
-             24~30px 还给画面（16:9 正好铺满，左右黑边一起消失）。
-             它不属于 bands / 不跟 ui.chrome 联动 —— 从前那条会 5 秒后收起，
-             这里的定位是「固定在评论区顶上」，收起反而让高度跳变、评论跳动。
-             轨道宽走 barSlots（= seekMetrics(右列宽)），DOM 与命中同源。 -->
-        <div v-if="!isLivePlay" class="pright-bar" :style="rightBarStyle">
-          <text class="cb-time cb-time-lead">{{ playCurText }}</text>
-          <div
-            class="cb-hit"
-            :style="trackStyle"
-            @touchstart="onSeekTouch"
-            @touchmove="onSeekTouch"
-            @touchend="onSeekRelease"
-          >
-            <div class="cb-line">
-              <div class="seek-fill" :style="{ width: seekFillW + 'px' }"></div>
-              <div class="seek-knob"></div>
+      <!-- 分P 列表：点任意一段切换（同一 bvid，不同 cid） -->
+      <template v-if="!favOverlay && epTabNow === 'pages'">
+        <div class="side-body">
+          <scroller class="side-scroll">
+            <div
+              v-for="(p, pi) in ep.pages"
+              :key="'ep' + p.cid"
+              :class="pi === ep.pageIndex ? 'ep-row ep-row-on' : 'ep-row'"
+              @click="switchEpFromDetail('page', p)"
+            >
+              <text :class="pi === ep.pageIndex ? 'ep-row-t ep-row-t-on' : 'ep-row-t'">{{ p.title }}</text>
+              <text class="ep-row-d">{{ epDur(p.durationSec) }}</text>
             </div>
-          </div>
-          <text class="cb-time">{{ playDurText }}</text>
+            <text class="ep-note">{{ ep.note || ('共 ' + ep.pages.length + ' P · 点任意一段播放') }}</text>
+          </scroller>
         </div>
-        <!-- 【分P / 合集】切换栏。只在"真的有得选"时出现（单 P 且无合集 → 不渲染，
-             右栏一个像素都不变）。三格等宽：评论 / 分P n / 合集 n。
-             高度 22 从评论体里扣（replyBodyStyle），再加上面那条进度条，
-             总高仍然 = 视口高。 -->
-        <div v-if="epTabsVisible" class="ep-tabs" :style="epTabsStyle">
-          <div :class="epTabNow === 'reply' ? 'ep-tab-on' : 'ep-tab'" @click="onEpTab('reply')">
-            <text :class="epTabNow === 'reply' ? 'ep-tab-t ep-tab-t-on' : 'ep-tab-t'">评论{{ replyCount ? ' ' + replyCount : '' }}</text>
-          </div>
-          <div v-if="epHasPages" :class="epTabNow === 'pages' ? 'ep-tab-on' : 'ep-tab'" @click="onEpTab('pages')">
-            <text :class="epTabNow === 'pages' ? 'ep-tab-t ep-tab-t-on' : 'ep-tab-t'">{{ epPageLabel }}</text>
-          </div>
-          <div v-if="epHasSeason" :class="epTabNow === 'season' ? 'ep-tab-on' : 'ep-tab'" @click="onEpTab('season')">
-            <text :class="epTabNow === 'season' ? 'ep-tab-t ep-tab-t-on' : 'ep-tab-t'">{{ epSeasonLabel }}</text>
-          </div>
+      </template>
+      <!-- 合集列表：按 sections 分组 -->
+      <template v-if="!favOverlay && epTabNow === 'season' && ep.season">
+        <div class="side-body">
+          <scroller class="side-scroll">
+            <text class="ep-head">{{ ep.season.title }} · 共 {{ ep.season.count }} 集</text>
+            <template v-for="(sec, si) in ep.season.sections">
+              <text v-if="ep.season.sections.length > 1" class="ep-sec">{{ sec.title }}</text>
+              <div
+                v-for="(it, ii) in sec.items"
+                :key="'se' + si + '_' + ii"
+                :class="it.bvid === epCurBvid ? 'ep-row ep-row-on' : 'ep-row'"
+                @click="switchEpFromDetail('season', it)"
+              >
+                <text :class="it.bvid === epCurBvid ? 'ep-row-t ep-row-t-on' : 'ep-row-t'">{{ it.title }}</text>
+                <text class="ep-row-d">{{ epDur(it.durationSec) }}</text>
+              </div>
+            </template>
+            <text class="ep-note">{{ ep.note || ('第 ' + (epSeasonPos.flat + 1) + ' / ' + ep.season.count + ' 集') }}</text>
+          </scroller>
         </div>
-
-        <!-- 评论 -->
-        <template v-if="epTabNow === 'reply'">
-        <div class="pright-body" :style="replyBodyStyle">
+      </template>
+      <!-- 评论区（默认） -->
+      <template v-if="!favOverlay && epTabNow === 'reply'">
+        <div :class="epTabsVisible ? 'pright-body pright-body-tabs' : 'pright-body'">
           <scroller class="side-scroll">
             <text v-if="replyStatus" class="reply-status">{{ replyStatus }}</text>
             <div v-for="rp in replies" :key="'rp' + rp.rpid" class="reply-block reply-block-n">
@@ -669,16 +744,7 @@
         </div>
         <!-- 输入框 + 发送（用户要求 m11950：右下是输入框，点输入框输入文字，点右侧按钮发送）。
              笔端没有内嵌软键盘，所以点输入框唤起系统输入法，文本回填到框里，再点发送才真正提交。 -->
-        <!-- 收起选项后仍要能一键回选项面板：用整行替换输入框，不改任何几何。 -->
-        <div v-if="interact.active && !interact.visible && interact.pending" class="pinput" :style="L.rightInput">
-          <div class="pinput-box" @click="onInteractOpen">
-            <text class="pinput-text">‹ 显示本段互动选项</text>
-          </div>
-          <div class="pinput-send" @click="onComposeReply">
-            <text class="pinput-send-text">评论</text>
-          </div>
-        </div>
-        <div v-else class="pinput" :style="L.rightInput">
+        <div class="pinput">
           <div class="pinput-box" @click="onComposeReply">
             <text :class="cinText ? 'pinput-text' : 'pinput-ph'">{{ cinText || (hasLogin ? '发个友善的评论…' : '未登录 · 不能评论') }}</text>
           </div>
@@ -686,45 +752,6 @@
             <text class="pinput-send-text">发送</text>
           </div>
         </div>
-        </template>
-
-        <!-- 分P列表：同一 bvid 的不同段。行尾是单段时长（不是稿件总时长）。
-             点击 → switchEp('page')，复用完整起播流程。
-             三个页签用**三个独立 v-if**（不是 v-else-if 链）：falcon 对跨标签
-             标签名不同的 v-else 链支持不稳，独立判断最保险，反正三者互斥。 -->
-        <scroller v-if="epTabNow === 'pages'" class="ep-list" :style="epListStyle">
-          <div
-            v-for="(p, i) in ep.pages"
-            :key="'pg' + p.cid"
-            :class="i === ep.pageIndex ? 'ep-row-on' : 'ep-row'"
-            @click="switchEp('page', p)"
-          >
-            <text :class="i === ep.pageIndex ? 'ep-idx ep-idx-on' : 'ep-idx'">P{{ p.page }}</text>
-            <text :class="i === ep.pageIndex ? 'ep-name ep-name-on' : 'ep-name'">{{ p.title }}</text>
-            <text class="ep-dur">{{ epDur(p.durationSec) }}</text>
-          </div>
-          <text class="ep-note">{{ epSwitchText || ('共 ' + ep.pages.length + ' P · 点任意一段切换') }}</text>
-        </scroller>
-
-        <!-- 合集列表：按 section 分组（多节时显示节标题），当前集高亮。
-             合集里每一集是**独立的 bvid**，切换会重新取 view + 取流。 -->
-        <scroller v-if="epTabNow === 'season'" class="ep-list" :style="epListStyle">
-          <text v-if="ep.season" class="ep-head">{{ ep.season.title }} · 共 {{ ep.season.count }} 集</text>
-          <template v-for="r in epSeasonRows">
-            <text v-if="r.kind === 'sec'" :key="'sc' + r.key" class="ep-sec">{{ r.title }}</text>
-            <div
-              v-if="r.kind === 'ep'"
-              :key="r.key"
-              :class="r.on ? 'ep-row-on' : 'ep-row'"
-              @click="switchEp('season', r.row)"
-            >
-              <text :class="r.on ? 'ep-idx ep-idx-on' : 'ep-idx'">{{ r.on ? '▶' : r.no }}</text>
-              <text :class="r.on ? 'ep-name ep-name-on' : 'ep-name'">{{ r.row.title }}</text>
-              <text class="ep-dur">{{ r.dur }}</text>
-            </div>
-          </template>
-          <text class="ep-note">{{ epSwitchText || ('第 ' + (epSeasonPos.flat || 1) + ' / ' + (ep.season ? ep.season.count : 0) + ' 集') }}</text>
-        </scroller>
       </template>
     </div>
 
@@ -735,15 +762,15 @@
          一旦 .pright 不渲染，这 278px 就没有任何不透明元素兜底，会把上一屏的 fb 残留
          像素透出来（浏览态列表的封面、图文正文等），看起来像"右侧半屏花了"。
          所以直播态放一个同宽同高、同底色的空占位，几何与 .pright 完全一致。 -->
-    <div v-if="isLivePlay" class="pright-fill" :style="L.playRight"></div>
+    <div v-if="isLivePlay" class="pright-fill"></div>
 
     <!-- 图文详情：中列正文（896 宽，评论打开时被评论面板替换） -->
-    <div v-if="mode === 'article' && !commentsOpen" class="astage" :style="L.articleBody">
-      <scroller class="art-scroll" :style="L.articleBody">
-        <div v-if="article.state === 'loading'" class="art-loading" :style="L.articleBody">
+    <div v-if="mode === 'article' && !commentsOpen" class="astage">
+      <scroller class="art-scroll">
+        <div v-if="article.state === 'loading'" class="art-loading">
           <text class="play-idle-text">图文加载中…</text>
         </div>
-        <div v-else-if="article.state === 'error'" class="art-loading" :style="L.articleBody">
+        <div v-else-if="article.state === 'error'" class="art-loading">
           <text class="play-idle-text">{{ article.note || '图文加载失败 · 返回列表' }}</text>
         </div>
         <template v-else>
@@ -751,9 +778,9 @@
             v-if="article.cover"
             class="art-cover"
             :src="article.cover"
-            :width="L.num.cover"
+            :width="880"
             :height="article.coverDh || 160"
-            :style="{ width: L.cover.width, height: (article.coverDh || 160) + 'px' }"
+            :style="{ width: '880px', height: (article.coverDh || 160) + 'px' }"
           ></image>
           <text class="art-title">{{ article.title }}</text>
           <text class="art-author">{{ article.author }}{{ article.read ? ' · 阅读 ' + formatCount(article.read) : '' }}{{ article.like ? ' · 点赞 ' + formatCount(article.like) : '' }}</text>
@@ -765,7 +792,7 @@
               :src="b.src"
               :width="b.dw || 880"
               :height="b.dh || 240"
-              :style="{ width: articleImgW(b.dw), height: (b.dh || 240) + 'px' }"
+              :style="{ width: (b.dw || 880) + 'px', height: (b.dh || 240) + 'px' }"
             ></image>
             <text v-else :key="'ab' + bi" class="art-p">{{ b.text }}</text>
           </template>
@@ -775,7 +802,7 @@
     </div>
 
     <!-- 图文评论面板（896 宽，盖住正文区） -->
-    <div v-if="mode === 'article' && commentsOpen" class="comments-col" :style="L.articleBody">
+    <div v-if="mode === 'article' && commentsOpen" class="comments-col">
       <div class="comments-head">
         <text class="comments-title">评论{{ replyCount ? ' · ' + replyCount : '' }}</text>
         <div class="ctrl comments-close" @click="closeComments">
@@ -821,8 +848,6 @@
 </template>
 
 <script>
-/* 【X7 Pro 适配】设备显示 profile 的预热入口（幂等，内部缓存 Promise）。 */
-import { ensureProfile } from '../../services/device_profile.js';
 import {
   fetchRecommended,
   fetchPopular,
@@ -834,25 +859,35 @@ import {
   formatCount
 } from '../../services/feed.js';
 import { fetchViewState, fetchFavFolders, setLike, addCoin, dealFav } from '../../services/bili/action.js';
+/* 离线缓存（「下载」页）：文件落 /userdisk/PenBili/，元数据进 storage。
+ * 下载走 native httpjson.startDownload（libcurl，可带 UA/Referer —— B 站 CDN 无头 403）。 */
+import {
+  DL_DIR,
+  loadDownloads,
+  saveDownloads,
+  upsertDownload,
+  removeDownloadEntry,
+  ensureDlDir,
+  downloadToFile,
+  dlFilePath,
+  fileSize,
+  removeFile,
+  formatBytes
+} from '../../services/downloads.js';
 // 自检种子守卫：判断是否真该自动播（双开关），纯函数可单测 —— 详见该文件头注释
 import { isAutotestSeedEnabled, readAutotestSeed } from '../../services/autotest_seed.js';
 /* 直播「下播」判据的引擎级自证（probeLiveEnd）：纯计算，不取流不播放不亮屏。
  * 单独成模块是为了让「假 status → 判据结论」这张用例表能被 Node 单测直接跑。 */
 import { runLiveEndCases } from '../../services/live_end_probe.js';
-/* 检查更新（双源 Release：GitCode 主 / GitHub 备）：版本比较 / 资产挑选 / 下载 URL /
- * 提示决策 / 正文切行全部是纯函数（可 Node 单测），运行时只有 fetch/download/install
- * 三个薄封装。两个下载按钮都是直连，不再提供镜像入口（v3.5.6）。
- * 为什么是双源：部分国内网络完全打不开 github.com（用户明确要求改用 GitCode）；
- * GitHub 留着当兜底，也是原始发布地。
+/* 检查更新（GitHub Release）：版本比较 / 资产挑选 / 镜像 URL / 提示决策 / 正文切行
+ * 全部是纯函数（可 Node 单测），运行时只有 fetch/download/install 三个薄封装。
  * 为什么不用 $falcon.jsapi.updater：它是有道自家服务端升级通道（service_upgrade_push），
- * 需要自家服务器下发 payload，与公开 Release 无关 —— strings libfalcon.so 已确认。 */
+ * 需要自家服务器下发 payload，与 GitHub Release 无关 —— strings libfalcon.so 已确认。 */
 import {
   APP_VERSION,
   REPO_URL,
+  MIRROR_PREFIX,
   SAVE_DIR,
-  SOURCES,
-  sourceById,
-  sourceLabel,
   downloadUrl,
   fetchLatestRelease,
   downloadFileToDisk,
@@ -877,8 +912,16 @@ import {
   getScreenState,
   screenStateName,
   getBrightness,
+  seekRatioFromX,
   seekFillWidth,
-  fitLogicalRect
+  FP_SEEK_TRACK_WIDTH,
+  FP_SEEK_FILL_MAX,
+  playVideoRects,
+  FULL_VIDEO_AREA,
+  FULLSCREEN_VIDEO_AREA,
+  FP_NAV_H,
+  FP_CC_H,
+  playAreaFor
 } from '../../services/screen.js';
 // 图标：本地 PNG 走 aiot-vue-cli 的 image 插件 → 产物 images/<md5>.png（见 rollup-plugins/image.js）。
 // 不用 falcon-ui 的 icon 组件：它依赖 font-family: falcon-icons，但包内没有该字体文件（渲染为空）。
@@ -899,6 +942,26 @@ import { fetchArticle } from '../../services/bili/article.js';
 import { createClient, cookieFromSession, DEFAULT_UA, REFERER } from '../../services/bili/client.js';
 import { KEYS, getJson, setJson, loadSession, logWarn } from '../../services/storage.js';
 import { loadHistory, saveHistory, pushHistory, formatHistoryTime } from '../../services/history.js';
+import { loadSearchHistory, saveSearchHistory, pushSearchHistory } from '../../services/search_history.js';
+import { fetchUpCard, fetchUpVideos } from '../../services/bili/space.js';
+/* 【3.5.9 同步】分P / 合集（结构解析）、CC 字幕、互动视频、播放器信息。
+ * 弹幕（3.5.14–3.5.20）按 S6 Pro 分支要求**整体移除**，不引入 danmaku.js。 */
+import { pageIndexOf, episodeIndexOf, fmtDur as fmtEpDur } from '../../services/bili/video_meta.js';
+import {
+  SUBTITLE_SETTINGS_KEY, normalizeSubtitleSettings, pickSubtitleTrack,
+  rankSubtitleTracks, subtitleFit, SUBTITLE_FIT_GOOD, fetchSubtitleCues,
+  cueAt
+} from '../../services/bili/subtitle.js';
+import { fetchPlayerV2Tracks } from '../../services/bili/player_v2.js';
+import {
+  CHOICE_LEAD_MS, AUTO_CHAIN_DELAY_MS,
+  defaultChoice, mergeHiddenVars, visibleChoices, applyNativeAction,
+  buildSegmentItem, segmentEndPlan, shouldShowChoices, fetchEdgeInfo
+} from '../../services/bili/interactive.js';
+import { canAutoHide, AUTO_HIDE_MS } from '../../services/play_chrome.js';
+/* 原生多指：Falcon 页面层拿不到双指距离，读取 /dev/input/event4 的 ABS_MT_*。
+ * 与文件管理 3.1.9 图片页共用同一个 libjsapi_picpinch.so。 */
+import { start as pinchStart, stop as pinchStop, read as pinchRead } from 'picpinch';
 import {
   parseGenerate,
   parsePoll,
@@ -915,37 +978,11 @@ import { cancelNativePosts } from '../../services/net.js';
 import { fetchReplies, addReply, fetchSubReplies } from '../../services/bili/reply.js';
 import { encodeQr, rowRuns } from '../../services/bili/qrcode.js';
 import { saveSession } from '../../services/storage.js';
-// 【X7 Pro 适配 3.6.1】容器宽高不再写死在 less 里，统一由 layout.js 按视口算
-// （960x266 与旧值逐像素相同；936x280 会把右侧/底部黑边吃掉）。
-import { layoutFor, layoutStyles } from '../../services/layout.js';
-import { buildProfile, readFalconEnv, playVideoRectsFor } from '../../services/device_profile.js';
-/* 【分P / 合集】列表定位与时长格式化（纯函数）：
- *   pageIndexOf  当前 cid 在第几 P（高亮）
- *   episodeIndexOf 当前 bvid 在合集的第几节第几集
- *   fmtDur       列表行尾的 mm:ss
- * 解析本身在 client.fetchView 里做完（parsePages / parseSeason）。 */
-import { pageIndexOf, episodeIndexOf, fmtDur } from '../../services/bili/video_meta.js';
-import {
-  DM_MODES,
-  DM_MODE_LABELS,
-  DM_SIZE_LABELS,
-  DM_SIZE_PX,
-  DM_SIZE_DEFAULT,
-  DM_MODE_DEFAULT,
-  DM_SETTINGS_KEY,
-  nextDmSize,
-  dmSizePx,
-  normalizeDmSettings,
-  nextDmMode,
-  segmentIndexAt,
-  dedupeByKey,
-  buildFeedText,
-  fetchSegment,
-  createSegCache
-} from '../../services/bili/danmaku.js';
 import { input } from '../../services/input.js';
 import {
   openVideo,
+  resolveDetail,
+  resolveDownloadStream,
   togglePlay,
   seekBy,
   // 与页面方法 seekTo 同名，取别名避免词法歧义（页面方法是入口，这个是服务层实现）
@@ -964,12 +1001,7 @@ import {
   SEEK_STEP_MS,
   SEEK_FRAME_RETRY_DEADLINE_MS,
   SEEK_LAND_NEAR_MS,
-  seekNoteDone,
-  /* 【第二十三轮】退后台 / 回前台用「关掉再重开」而不是 setVideoRect：
-   * 后者会重建管线，真机上表现为画面被压扁（详见 hideForBackground 注释）。 */
-  reopenSession,
-  /* 【第十九轮】进/出全屏不再运行期改矩形，而是用新矩形重开一路流：
-   * caps 从第一帧就与矩形一致（运行时改尺寸在 X7 上不可靠，真机表现为画面被压扁）。 */
+  seekNoteDone
 } from '../../services/play_session.js';
 import * as player from '../../services/player.js';
 import {
@@ -980,35 +1012,21 @@ import {
   saveVideoSettings,
   nextOptionId,
   videoQualityLabel,
-  liveQualityLabel
+  liveQualityLabel,
+  playStyleLabel,
+  nextPlayStyle
 } from '../../services/video_settings.js';
-/* 【CC 字幕 / 互动视频】上游 x/player/v2 与 x/stein/edgeinfo_v2。
- * 纯逻辑全部放在 services/bili/ 下，页面只负责状态机与渲染（可 Node 单测）。 */
-import { fetchPlayerV2, fetchPlayerV2Tracks } from '../../services/bili/player_v2.js';
-import {
-  SUBTITLE_SETTINGS_KEY, normalizeSubtitleSettings, pickSubtitleTrack,
-  rankSubtitleTracks, subtitleFit, subtitleKeywordFit, SUBTITLE_KW_KEYS,
-  SUBTITLE_FIT_GOOD, fetchSubtitleCues, cueAt
-} from '../../services/bili/subtitle.js';
-/* 【播放控件】中列被切成「顶部悬浮条 / 视频洞 / 字幕带 / 控制条」四段，
- * 四段之和恒等于视口高；native 的 render-rectangle 用同一份数字收缩。
- * 单击画面收起控件、隐藏后字幕贴底，全靠这套分段（见 play_chrome.js 的注释）。 */
-import {
-  planBands, bandBox, barMetrics, seekMetrics, trackRatioFromX, seekGoal, videoReserve,
-  loadingFrame, chromeForState, canAutoHide, formatClock,
-  CC_BAND_H, CHROME_LOAD_MS, AUTO_HIDE_MS, SEEK_KNOB_W
-} from '../../services/play_chrome.js';
-import {
-  fetchEdgeInfo, visibleChoices, defaultChoice, mergeHiddenVars,
-  applyNativeAction, buildSegmentItem, shouldShowChoices, segmentEndPlan,
-  CHOICE_LEAD_MS, AUTO_CHAIN_DELAY_MS
-} from '../../services/bili/interactive.js';
 
 const TABS = [
   { id: 'rcmd', label: '推荐' },
   { id: 'hot', label: '热门' },
   { id: 'search', label: '搜索' },
-  { id: 'mine', label: '我的' }
+  { id: 'mine', label: '我的' },
+  /* 「下载」放在「我的」下面（用户要求）：左栏是纵向标签栏，这就是字面意义的下面。
+   * 同时「我的 → 我的下载」也有一个入口行，两条路都能进。 */
+  { id: 'downloads', label: '下载' },
+  /* 历史单独一页（用户要求）：放在「下载」下面，最多 20 条（history.js MAX_HISTORY） */
+  { id: 'history', label: '历史' }
 ];
 
 // 搜索三分栏（与 feed.js searchBili 的 search_type 对应）：
@@ -1021,40 +1039,11 @@ const SEARCH_TYPES_UI = [
 ];
 
 // 二维码内容 = TV 变体 url（cookie 在 poll 响应 body 的 cookie_info；取证注释见 qrlogin.js）
-const QR_CELL = 4;
+// 单元 6 设计 px = 4 物理 px（960 设计宽 → 640 面板，k=2/3）：
+// 57 格（v8 49 + 2×4 quiet）× 6 = 342 设计 = 228 物理，模块宽高都是整数像素，
+// 不再出现旧 4px 单元（2.67 物理 px）的粗细不匀/扫描失败。单元宽度由 base.less 的
+// qr-l-N（N×6px）驱动，行高/段高同样是 6px。
 const QR_QUIET = 4;
-
-/* 【分P / 合集】右栏顶部切换栏的高度（像素）。
- * 右列总高 253（body）+ 27（输入框），这条 22 从 body 里扣 —— 评论少看一行，
- * 换来「分P / 合集」永远在视线里。不加高整列：那 22px 会从视频区抢。 */
-const EP_TAB_H = 22;
-/* 【3.5.22】字幕候选最多试几条。实测同一 cid 的 AI 产物池 >=6（并发 8 次拿到
- * 6 个互不相同 url，只有 2 条 ratio=1.00），取 4 经常整池捞不到对的那条，
- * 用户看到的就是「字幕和视频对不上」。放大到 8 覆盖整池；每条几十~几百 KB，
- * 并发下载实测 1~1.6s，比挑错字幕可接受得多。 */
-const CC_TRY_MAX = 8;
-/* 【3.5.24】起播拉字幕最多试几轮，以及轮与轮之间的退避。
- *
- * 症状（用户）：上一支视频开着字幕，打开下一支时字幕键仍显示「开」，
- * 画面上却没有字幕；把开关关掉再打开就出来了。
- *
- * 根因不是判据太松太紧，而是**只试了一轮**：字幕键显示的是用户偏好 cc.on，
- * 而画面有没有字幕取决于这一轮有没有真的捞到合格产物。上游 player/v2 的
- * 字幕列表是灰度分桶的随机结果（实测同一 cid 连发 30 次能拿到 20 份互不
- * 相同、且多数与本片无关的产物），起播那一轮没捞到就是「开着却没有」；
- * 用户关开一次恰好等于「再来一轮」，于是又能出了。
- * 所以把「再来一轮」做进起播流程：一轮不合格就隔一会儿换个池子重试。 */
-const CC_ROUND_MAX = 3;
-const CC_ROUND_GAP_MS = 800;
-/* 后续轮次压低单轮请求数（首轮 9 发），避免三轮 27 发全部打出去撞风控。 */
-const CC_RETRY_TRIES = 5;
-/* 字幕位置最多外推多久：1s 主轮询间隔 + 200ms 余量。超过就说明 tick 被拖住了，
- * 宁可让字幕停一下，也不要它跑到画面前面去。 */
-const CC_EXTRAP_MAX_MS = 1200;
-/* 单击/双击仲裁窗口：第一击挂起，到期才切沉浸态；期间来第二击则改为暂停/播放。
- * 太短（<150ms）会把耐心的用户误伤成双击，太长（>350ms）每次单击都要等、手感粘滞；
- * 260 是经典取值。 */
-const TAP_DELAY_MS = 260;
 
 // grid → 交替段行（白/暗首尾 quiet 补齐；宽度全部映射 qr-l-N 静态 class，零 inline style，
 // 相邻同类段自动合并；每行总宽恒 = size + 2*quiet）
@@ -1099,7 +1088,7 @@ function lenOf(cls, prefix) {
 
 // 关于区的 GitHub 二维码：URL 是常量，模块加载时算一次即可（不必放进 computed
 // 每次重算——编码要走完整的 Reed-Solomon，在 A35 上是实打实的开销）。
-const ABOUT_URL = 'https://github.com/56dz/PenBili';
+const ABOUT_URL = 'https://github.com/noguimc/PenBili';
 const ABOUT_QR_ROWS = (() => {
   const enc = encodeQr(ABOUT_URL, {});
   if (!enc.ok) return [];
@@ -1108,6 +1097,11 @@ const ABOUT_QR_ROWS = (() => {
 
 function idlePlay() {
   return { state: 'idle', session: null, positionMs: 0, frames: 0, note: '' };
+}
+
+// 下载任务状态（同一时刻只允许一个；done=true 表示当前稿件的缓存已完成）
+function idleDl() {
+  return { busy: false, bvid: '', cid: 0, bytes: 0, total: 0, done: false, note: '' };
 }
 
 const STATE_LABELS = {
@@ -1153,7 +1147,10 @@ const SEEK_NOTE_TIMEOUT_MS = 4000;
  *
  * 15s 的取值依据：真机弱网起播门最坏情况实测 8~12s 才出首帧（audio 先放行），
  * 15s 既留了余量，又不会让用户盯着"加载中"超过十五秒还不知道发生了什么。 */
-const NO_FRAME_FAIL_MS = 15000;
+/* CV1826 上 360p 起播实测 6~16s（CDN/探流/起播门 + native 15s 门重试），
+ * 15s 阈值会在视频刚出帧时误判失败（真机 17:23 日志：rst=1 后 15.0s 判死，
+ * 下一帧其实已经落屏）。放宽到 30s，让 native 的「首帧超时重试」跑完。 */
+const NO_FRAME_FAIL_MS = 30000;
 
 /* 直播重连提示文案（P1-4 配套）：抽成常量，因为 tick 里有两处要跟它比对
  * （「该挂了吗」「该撤了吗」），写两遍字符串迟早拼错。 */
@@ -1162,13 +1159,7 @@ const LIVE_RECONNECT_NOTE = '直播重连中…';
 export default {
   name: 'PageBili',
   data() {
-    /* 画布 = 写死的机型视口（与 app.js 的 setViewPort 同源）。
-     * 【第二十四轮】不再读 $falcon.env / storage 覆盖：机型参数只有
-     * device_profile.js 的 X7P / X6P 两张表，画布与布局都从同一个 buildProfile 出。 */
-    const _p = buildProfile({ env: readFalconEnv() });
-    const L = layoutStyles(layoutFor(_p.cfg.width, _p.cfg.height));
     return {
-      L: L,
       tabs: TABS,
       searchTypes: SEARCH_TYPES_UI,
       tab: 'rcmd',
@@ -1185,6 +1176,8 @@ export default {
       hotMorePn: 0, // 推荐耗尽后用热门续底的页码（与 hot tab 独立）
       moreNoMore: false,
       keyword: '',
+      // 搜索记录（storage: bili_search_history；空态展示，点条目复用关键词）
+      searchHistory: [],
       loading: false,
       statusText: '',
       // 评论上下文：视频=type 1（oid=aid）、图文=type 12（oid=专栏 aid）——回复/加载共用
@@ -1192,14 +1185,58 @@ export default {
       // 图文详情（mode=article）：blocks = 文本/图片混排块（{t:'text',text} | {t:'img',src,dw,dh}）
       article: { aid: 0, title: '', author: '', cover: '', coverDh: 140, blocks: [], read: 0, like: 0, state: 'idle', note: '' },
       history: [],
+      /* 离线缓存（「下载」页）：元数据来自 storage，文件在 /userdisk/PenBili/。
+       * dl = 当前下载任务状态（busy/bytes/total），在播放页菜单里显示进度。 */
+      downloads: [],
+      dl: idleDl(),
       buvidShort: '',
       seekStepSec: SEEK_STEP_MS / 1000,
       play: idlePlay(),
-      /* 播放控件（顶部悬浮条 / 底部控制条）显隐 + 加载动画帧号。
-       * chrome=true → 中列让出 top/bar 两段给控件；单击画面取反（用户要求）。
-       * frame 由 120ms 的定时器推进，驱动 B 站那套「小电视 + 跳动圆点」加载动画
-       * （falcon 上没有可靠的 @keyframes，动画只能靠 JS 改样式）。 */
-      ui: { chrome: true, frame: 0, side: false },
+      // 详情态（用户手绘稿）：item=当前稿件，rs=已解析的流（点封面后直接复用，避免二次取流）
+      detail: { item: null, rs: null },
+      /* 【3.5.9 同步】CC 字幕：开关与语言持久化，轨道/句子按稿件加载。 */
+      cc: {
+        on: false, lan: '', keepOnSegment: true,
+        tracks: [], cues: [], lanDoc: '', status: '', loading: false, posMs: 0
+      },
+      /* 【3.5.9 同步】分P / 合集：数据来自 view（play_session 透传），不额外请求。 */
+      ep: { tab: 'reply', pages: [], season: null, pageIndex: -1, note: '', switching: false },
+      /* 【3.5.9 同步】互动视频：片段选项、隐藏变量与连播状态。 */
+      interact: {
+        active: false, visible: false, busy: false,
+        bvid: '', graphVersion: 0, edgeId: 0, cid: 0,
+        node: null, vars: {}, choices: [], history: [],
+        step: 0, status: '', countdown: 0, leaf: false,
+        noBacktracking: false, baseItem: null, segment: 0,
+        pending: false, autoJump: false, pauseVideo: false,
+        leadMs: 0, questionMs: 0, waiting: false, dismissed: false
+      },
+      /* 导航来源（用户反馈：从搜索 → UP 主页 → 详情 → 播放，返回时错回搜索页）：
+       *   detailFrom = 进详情前所在的页面（'up' | 'browse'）
+       *   playFrom   = 进播放前所在的模式（'detail' | 'browse' | 'up'）
+       * 播放页返回时只有「detailFrom === 'up'」才回 UP 主页，其余回列表。 */
+      detailFrom: '',
+      playFrom: '',
+      /* 列表滚动位置缓存：key → {frac, y, h}（scroll 事件里的 contentOffset/contentSize）。
+       * 返回列表时按 frac 近似定位到对应卡片并 scrollToElement。 */
+      scrollMemo: {},
+      /* UP 主主页（mode='up'）：card=名片，items=投稿列表（分页拉取）。
+       * 入口只有详情页的蓝色 UP 名；返回回到详情页（detail 还在内存里）。 */
+      up: { mid: 0, name: '', card: null, items: [], page: 1, noMore: false, loading: false, status: '' },
+      titleShift: 0, // 标题滚动展示的字符偏移（见 titleDisplay）
+      // 全屏播放页的右侧设置菜单（移植文件管理播放器 menu-overlay）
+      playerMenuOpen: false,
+      /* 播放页「隐藏状态栏」：true = 顶栏/底栏不渲染、视频带撑满 390。
+       * 实现方式是切换（v-if + native setRect），不做动画 —— falcon 没有
+       * transition，且 native 视频矩形只能在帧与帧之间整体替换。 */
+      chromeHidden: false,
+      /* 每次切栏 +1，绑到 .fp-root 的背景色（#000000 / #010101 交替）。
+       * 为什么需要：栏被 v-if 移除后，Falcon 只重绘「变化元素」的区域，
+       * 全屏后左右信箱条（视频矩形之外）会残留上一帧的顶/底栏像素
+       * （真机实测：左侧还挂着「返回」胶囊、右侧挂着时间）。根节点铺满整页，
+       * 改它的背景色 = 整页 dirty → 强制全量重绘一次，残影被清成黑色。
+       * 两个颜色肉眼看不出差别（都是黑），只是为了让 dirty 判定成立。 */
+      chromeTick: 0,
       // 登录 / 扫码
       mineView: 'info',
       profile: null,
@@ -1218,22 +1255,6 @@ export default {
       commentsOpen: false,
       // 播放页右栏：默认只显示评论区；点收藏时整栏被收藏夹选择覆盖（favOverlay=true）
       favOverlay: false,
-      /* 【分P / 合集】右栏顶部那条切换栏与两个列表。
-       *
-       * tab 只有三种值：reply / pages / season。实际渲染用 epTabNow ——
-       * 切到一个没有分P的稿件后，tab 可能还停在 'pages'，那时必须回落到评论，
-       * 否则右栏会变成一片空白。
-       *
-       * pages / season 由 view 接口带回来（openVideo 的 session），**不额外请求**：
-       * 每次起播本来就要 view，这两份数据是白拿的。 */
-      ep: {
-        tab: 'reply',
-        switching: false,
-        note: '',
-        pageIndex: -1,
-        pages: [],
-        season: null
-      },
       // 互动（点赞/投币/收藏）状态与结果反馈
       act: { like: 0, coin: 0, fav: false, status: '', busy: false, likeCount: 0, coinCount: 0, favCount: 0 },
       favFolders: [],
@@ -1248,6 +1269,12 @@ export default {
        * 想吃方法就得写 {{ appVersion() }}。版本号是常量，放 data 最省事也最不容易错。 */
       appVersion: APP_VERSION,
       seekDragMs: null,
+      // 字幕带高度（逻辑 px，来自 screen.js；模板不能直接引用模块常量）
+      ccBandH: FP_CC_H,
+      /* 视频放大：开关存在 videoSettings.videoZoom；zoomValue 是当前倍率。
+       * pinch 状态只用于一次捏合会话（baseD/baseZoom）。 */
+      zoomValue: 1,
+      pinch: { active: false, baseD: 0, baseZoom: 1, miss: 0 },
       // 播放页右下输入框里的待发送评论（用户手绘稿 m11950：
       // 点输入框唤起系统输入法回填文本，点右侧「发送」按钮才真正提交）
       cinText: '',
@@ -1256,81 +1283,6 @@ export default {
        * v3.3.0 起分辨率与帧率合并为单一画质档（如 '1080p 60fps'），
        * 因为 B 站的 qn 编码本身就把两者绑在一起，360p/480p 根本没有 60fps 档。 */
       videoSettings: DEFAULT_VIDEO_SETTINGS,
-      /* CC 字幕：on/lan 持久化在 bili_cc_settings；cues 是下载解析后的时轴。
-       * ccActive = 开 + 真的有字幕句 → 顶栏那 18px 才画字幕（第十轮起
-       * 不再收缩视频矩形：X7 的 videoscale caps 起播时定死，改矩形会毁画面）。 */
-      cc: {
-        on: false,
-        lan: '',
-        keepOnSegment: true,
-        tracks: [],
-        cues: [],
-        lanDoc: '',
-        status: '',
-        loading: false,
-        posMs: 0,
-        /* 【3.5.21】cues 归属的 cid。cues 脱离了「属于哪个视频」就必然串片：
-         * 只要上一支视频的 cues 还在、新视频已经在播，渲染出来的就是
-         * 「新画面 + 旧字幕」。subtitleText() 用 ccOwned 校验这个字段。 */
-        cid: 0,
-        /* 每次拉取的字幕请求序号：同一 gen 内两次调用（initExtras 与
-         * onCcToggle→reloadCc）靠它分先后，晚到的旧请求不能覆盖新结果。 */
-        req: 0
-      },
-      /* 【3.5.14】弹幕：模式持久化在 bili_dm_settings，列表按 6 分钟分片拉取。
-       * 为什么必须烧进视频帧：KMS 平面里视频层（Esmart1-win0, zpos=2）
-       * 永远压在 Falcon UI（Esmart0-win0, zpos=0）之上，UI 层的 DOM 盖不住
-       * 画面 —— 想「弹幕浮在视频上」只有两条路：再占一个空闲 Esmart 平面
-       * （zpos 不可控、跨机型风险大），或者把字画进帧里（选这条）。
-       * seg 缓存用 Map 存已解析的分片，切集/teardown 全清。 */
-      dm: {
-        mode: DM_MODE_DEFAULT,
-        size: DM_SIZE_DEFAULT,
-        segIdx: 0,
-        list: [],
-        cache: null,
-        seen: null,
-        status: '',
-        loading: false,
-        ready: false,
-        failIdx: 0,
-        failCount: 0
-      },
-      /* 互动视频：一个 node 对应一个片段；choices 是该片段条件过滤后的选项。
-       * history 保存每个片段的 (node, vars) 快照，「回退」不用再请求网络。 */
-      interact: {
-        active: false,
-        visible: false,
-        busy: false,
-        bvid: '',
-        graphVersion: 0,
-        edgeId: 0,
-        cid: 0,
-        node: null,
-        vars: {},
-        choices: [],
-        history: [],
-        step: 0,
-        status: '',
-        countdown: 0,
-        leaf: false,
-        noBacktracking: false,
-        baseItem: null,
-        segment: 0,
-        /* 题型与题面窗口（来自 node.question）：
-         *   autoJump   type=0，空选项自动跳转，不渲染选项面板
-         *   pauseVideo 片尾停住等选择（真实稿恒为 1）
-         *   leadMs     题面提前量（start_time_r=300 → 3000ms）
-         *   questionMs duration>0 时的倒计时，到点走默认项
-         *   pending    题面已到/用户收起后，右列输入框位置显示「显示本段互动选项」 */
-        pending: false,
-        autoJump: false,
-        pauseVideo: false,
-        leadMs: 0,
-        questionMs: 0,
-        waiting: false,
-        dismissed: false
-      },
       /* 检查更新弹窗状态（v3.5.5）。stage 是单向推进的状态机：
        *   idle → checking → (ready | latest | error)
        *   ready → downloading → installing → done | error
@@ -1340,8 +1292,6 @@ export default {
       upd: {
         visible: false,
         mode: 'auto',
-        // 命中的检测源 id（'gitcode' / 'github'），决定按钮文案与镜像是否有意义
-        source: 'gitcode',
         stage: 'idle',
         message: '',
         release: null,
@@ -1384,32 +1334,140 @@ export default {
       return this.upd.stage === 'checking' || this.upd.stage === 'downloading' ||
              this.upd.stage === 'installing';
     },
-    // 命中的检测源名（没命中时显示主源，避免出现空的「直连 」）
-    updSourceLabel() {
-      return sourceLabel(this.upd.source);
-    },
-    // 第二个按钮换哪个源：两个平台互为备用（GitCode 国内通、GitHub 海外通）
-    updAltSource() {
-      return this.upd.source === 'github' ? 'gitcode' : 'github';
-    },
-    updAltLabel() {
-      return sourceLabel(this.updAltSource);
-    },
-    // 右下角小字：把「为什么不能点」讲清楚（资产缺失、来源是哪个平台、缓存在哪）
+    // 右下角小字：把「为什么不能点」讲清楚（镜像 403、资产缺失、来源是直连还是镜像）
     updTip() {
       if (this.upd.tip) return this.upd.tip;
       const r = this.upd.release;
       if (this.upd.stage === 'ready' && r && !r.assetUrl) return '该版本没有可用安装包';
-      if (this.upd.stage === 'ready') {
-        return '当前 v' + APP_VERSION + ' · 直连 ' +
-               this.updSourceLabel + ' / ' + this.updAltLabel;
-      }
+      if (this.upd.stage === 'ready') return '当前 v' + APP_VERSION + ' · 检测走直连，镜像仅用于下载加速';
       if (this.upd.stage === 'done') return '重新打开软件即可使用新版本';
       return '';
     },
     // 搜索活跃类型的条目视图（三分栏：视频/图文/直播各自缓存，切换零请求）
     searchItems() {
       return this.searchResults[this.searchType] || [];
+    },
+    // ---- 离线缓存（下载页 / 播放页菜单）----
+    dlDir() {
+      return DL_DIR;
+    },
+    dlTotalText() {
+      let n = 0;
+      for (let i = 0; i < this.downloads.length; i++) n += Number(this.downloads[i].sizeBytes) || 0;
+      return formatBytes(n) || '0B';
+    },
+    dlPercent() {
+      const d = this.dl || {};
+      if (!d.busy) return 0;
+      const total = Number(d.total) || 0;
+      if (!total) return 0;
+      return Math.min(99, Math.floor(((Number(d.bytes) || 0) * 100) / total));
+    },
+    /* 播放页菜单「缓存」行的值（行为在 onDownloadCurrent 里分发） */
+    dlMenuText() {
+      const s = this.play.session;
+      if (!s) return '';
+      if (s.live) return '直播不可缓存';
+      const d = this.dl || {};
+      if (d.busy && d.bvid === s.bvid) return '缓存中 ' + this.dlPercent + '%';
+      if (s.local) return '删除缓存';
+      if (this.findDownload(s.bvid, s.cid)) return '已缓存';
+      return '点击缓存';
+    },
+    /* 播放页菜单「样式」行：流畅（信箱）/ 清晰（铺满裁切） */
+    playStyleText() {
+      return playStyleLabel(this.videoSettings);
+    },
+    /* 「缩放」行：开时显示当前倍率（双指捏合实时更新）。 */
+    zoomText() {
+      if (this.videoSettings.videoZoom !== true) return '关';
+      return '开 · ' + (Math.round(this.zoomValue * 10) / 10).toFixed(1) + 'x';
+    },
+    /* ---------- 【3.5.9 同步】CC 字幕 / 分P / 互动 ---------- */
+    /* 字幕带是否占像素：开字幕 + 真有句子 + 点播。几何由 ccBandVisible 决定，
+     * native 矩形与 DOM 同源（screen.js 的 playAreaFor）。 */
+    ccBandVisible() {
+      return this.mode === 'play' && !this.isLivePlay && !this.interact.visible &&
+        this.cc.on && this.cc.cues.length > 0;
+    },
+    subtitleText() {
+      return this.ccBandVisible ? cueAt(this.cc.cues, this.cc.posMs) : '';
+    },
+    /* 视频带高度：全屏 390、带栏 216；开字幕时各让出 FP_CC_H。 */
+    fpVideoHeight() {
+      if (this.chromeHidden) return this.ccBandVisible ? 390 - FP_CC_H : 390;
+      return this.ccBandVisible ? 216 - FP_CC_H : 216;
+    },
+    ccMenuText() {
+      if (!this.cc.on) return '关';
+      if (this.cc.loading) return '加载中…';
+      if (!this.cc.cues.length) return this.cc.status || '无轨道';
+      return '开 · ' + (this.cc.lanDoc || '自动') + ' ' + this.cc.cues.length + ' 句';
+    },
+    ccLanText() {
+      if (!this.cc.tracks.length) return this.cc.status || '自动（暂无轨道）';
+      const t = pickSubtitleTrack(this.cc.tracks, this.cc.lan);
+      return t ? t.lanDoc : '自动';
+    },
+    /* 「我的」页说明：把"为什么没字幕"讲清楚（匿名接口不返回字幕地址）。 */
+    ccSettingHint() {
+      if (!this.hasLogin) return '未登录：B 站匿名接口不返回字幕地址，登录后才能显示字幕。';
+      if (this.cc.loading) return '字幕加载中…';
+      if (this.cc.cues.length > 0) return '已加载 ' + this.cc.cues.length + ' 句字幕' + (this.cc.lanDoc ? '（' + this.cc.lanDoc + '）' : '') + '。';
+      if (this.cc.tracks.length > 0) return '找到 ' + this.cc.tracks.length + ' 条字幕轨，但内容没取到：' + (this.cc.status || '播放时会再试一次');
+      if (this.cc.status) return this.cc.status;
+      return '播放视频后，这里会显示该稿件的字幕状态。';
+    },
+    /* 分P / 合集：数据都在 play.session（view 一次响应）。 */
+    epHasPages() {
+      return this.mode === 'detail' && !this.isLivePlay && this.ep.pages.length > 1;
+    },
+    epHasSeason() {
+      return this.mode === 'detail' && !this.isLivePlay && !!(this.ep.season && this.ep.season.count > 0);
+    },
+    epTabsVisible() {
+      return this.epHasPages || this.epHasSeason;
+    },
+    epTabNow() {
+      if (this.ep.tab === 'pages' && this.epHasPages) return 'pages';
+      if (this.ep.tab === 'season' && this.epHasSeason) return 'season';
+      return 'reply';
+    },
+    epPageLabel() {
+      const n = this.ep.pages.length;
+      const cur = this.ep.pageIndex >= 0 ? this.ep.pageIndex + 1 : 1;
+      return '分P ' + cur + '/' + n;
+    },
+    epSeasonLabel() {
+      const s = this.ep.season;
+      return s ? '合集 ' + s.count : '合集';
+    },
+    epCurBvid() {
+      return this.play.session ? this.play.session.bvid : '';
+    },
+    epSeasonPos() {
+      const s = this.ep.season;
+      const p = s ? episodeIndexOf(s, this.epCurBvid) : { si: -1, ii: -1 };
+      let flat = 0;
+      if (s && p.si >= 0) {
+        for (let i = 0; i < p.si; i++) flat += s.sections[i].items.length;
+        flat += p.ii;
+      }
+      return { si: p.si, ii: p.ii, flat: flat };
+    },
+    interactChoices() {
+      const list = this.interact.choices || [];
+      if (this.interact.autoJump) return [];
+      return list.filter((c) => !c.auto);
+    },
+    interactTitle() {
+      const n = this.interact.node;
+      const t = n && n.title ? n.title : '互动片段';
+      return '第 ' + (this.interact.segment || 1) + ' 段 · ' + t;
+    },
+    interactHint() {
+      if (this.interact.autoJump) return '自动连播片段，本段结束自动进入下一段';
+      return '本段没有可点选项，等待自动连播…';
     },
     // 评论面板返回按钮文案（跟随所在模式）
     commentsBackLabel() {
@@ -1422,18 +1480,8 @@ export default {
       if (this.play.state === 'loading') return '…';
       return this.play.state === 'paused' ? '开始' : '暂停';
     },
-    /* 【第三十轮】播完也保留视频洞。
-     * 用户真机截图：「视频播完之后删除这个已播完的遮挡页」。旧逻辑里
-     * holeVisible 只管 playing/paused，一进 ended 就把整块视频区换成
-     * .play-idle（不透明底色 + 居中「已播完」），画面被它整块盖掉。
-     * 现在播完继续挖洞，KMS 平面的末帧留在屏上（参考系统播放器的做法：
-     * 播完停在最后一帧，只在控制条上显示 02:32 / 02:32 与「已播完」）。
-     * 末帧由 kmssink 的 last-sample 保留；万一 native 已经 teardown，
-     * 洞下面是纯黑，同样不会出现遮挡页。 */
     holeVisible() {
-      const st = this.play.state;
-      return this.mode === 'play' &&
-        (st === 'playing' || st === 'paused' || st === 'ended');
+      return this.mode === 'play' && (this.play.state === 'playing' || this.play.state === 'paused');
     },
     idleText() {
       if (this.play.state === 'loading') return '取流中…';
@@ -1447,13 +1495,43 @@ export default {
       const s = this.play.session;
       if (!s) return '';
       const t = s.title || '';
-      /* 多 P 稿件：标题后附当前 P 的名字（"【某某】… · P2 第二段"）。
-       * part 等于 title 时不重复 —— 很多稿件 P1 的 part 就是稿件名本身。 */
-      const p = s.part || '';
-      return p && p !== t ? t + ' · ' + p : t;
+      /* 多 P 稿件：标题后附录当前段名（与 B 站「稿件名 · P2 第二段」一致）。 */
+      const pages = s.pages || [];
+      if (s.part && pages.length > 1) {
+        const idx = pageIndexOf(pages, s.cid);
+        return t + ' · P' + (idx >= 0 ? pages[idx].page : 1) + ' ' + s.part;
+      }
+      return t;
     },
     infoUp() {
       return this.play.session ? this.play.session.up : '';
+    },
+    // UP mid：优先会话（view 兜底补过），其次详情条目（列表卡里的 owner.mid）
+    infoMid() {
+      const s = this.play.session || {};
+      if (Number(s.mid) > 0) return Number(s.mid);
+      return Number(this.detail.item && this.detail.item.mid) || 0;
+    },
+    // UP 主页展示名：名片优先，其次详情页带过来的 UP 名
+    upName() {
+      const c = this.up.card;
+      return (c && c.name) || this.up.name || (this.up.mid ? 'UP ' + this.up.mid : 'UP 主页');
+    },
+    upSign() {
+      return this.up.card && this.up.card.sign ? this.up.card.sign : '';
+    },
+    upStatText() {
+      const c = this.up.card;
+      if (!c) return this.up.loading ? '解析中…' : '';
+      const parts = [];
+      if (c.fans > 0) parts.push(formatCount(c.fans) + ' 粉丝');
+      if (c.archiveCount > 0) parts.push(c.archiveCount + ' 投稿');
+      if (c.level > 0) parts.push('Lv.' + c.level);
+      return parts.join(' · ');
+    },
+    upBarText() {
+      const n = this.up.name || (this.up.card && this.up.card.name) || '';
+      return n ? 'UP · ' + n : 'UP 主页';
     },
     /* 当前播放会话是不是直播（用户反馈 m07570-3：「直播界面不应该出现评论区、
        三个按钮、和进度条」）。
@@ -1464,277 +1542,6 @@ export default {
      * 因为 durationMs 未知的点播（如 durl 回退）也是 0，会误判。 */
     isLivePlay() {
       return this.mode === 'play' && !!(this.play.session && this.play.session.live === true);
-    },
-    /* 【第二十二轮】本地文件：没有 aid/cid，评论 / 点赞 / 字幕 / 互动全都无从谈起。
-     * 页面据此隐藏点赞三连、把右栏换成静态信息 —— 否则会留下能点但必然失败的入口。 */
-    /* ---------- CC 字幕 / 互动视频 ---------- */
-    ccActive() {
-      return this.cc.on && this.cc.cues.length > 0 && !this.isLivePlay && this.mode === 'play';
-    },
-    /* 【3.5.21】cues 是否属于**当前这支视频**。
-     * 这个判据只挡「显示哪一句」，不进 ccActive —— 后者同时决定底部字幕带的
-     * 高度（bands.cc），换片瞬间翻成 false 会让视频矩形变高并触发 setVideoRect，
-     * native 侧那是走 seek 重建整条管线（黑屏 0.4~0.6s），代价远大于收益。 */
-    ccOwned() {
-      const cur = (this.play.session && this.play.session.cid) || 0;
-      return cur > 0 && this.cc.cid === cur;
-    },
-    /* 【已下线】全屏态。用户 m20514：主播放界面已经填充满了，全屏按钮与
-     * 整块面板都拆了。现在的沉浸态是 ui.side（点画面藏/显左右两列），
-     * 它不改中列宽高，只把字幕盒子按整个视口居中（见 bandPx / buildVideoRect）。
-     */
-    /* 视频区/控件带的宽度。**【3.5.6 第二十一轮：恒等于中列宽】**
-     *
-     * 用户明确要求：点全屏后**不对视频位置做任何改动**，只把控件挪到右手边。
-     * 所以"全屏"从"改几何"彻底变成"换 UI"：
-     *   · 中列宽高、视频洞位置、底部条占位、字幕带，全屏与普通态逐像素相同；
-     *   · 一次 setVideoRect 都不下发（更不重开），KMS 平面自始至终没被碰过；
-     *   · 左边那列留在原地、内容换成纯黑，右列换成控制面板。
-     *
-     * 这样做是因为前几轮所有"画面被压成扁方形"的路都出在"运行期改矩形 / 用新
-     * 矩形重开"上：videoscale 的 caps 在起播时按矩形定死，任何事后调整都可能
-     * 让 buffer 尺寸与平面窗口不一致。不碰它，就没有变形的可能。 */
-    midW() {
-      return this.L.num.videoW;
-    },
-    /* 中列分段（顶部悬浮条 / 视频洞 / 控制条）—— 唯一几何来源。
-     *
-     * 【3.5.6 第十轮：几何必须恒定，绝不能跟着控件显隐变】
-     * X7 Pro 的 sw_scale=1 会在起播时往管线里插一级 videoscale，输出 caps
-     * 是 `video/x-raw,width=<g_w.rect.w>,height=<g_w.rect.h>` —— **按起播时的
-     * 矩形定死**。播放中改 render-rectangle，kmssink 只能拿旧尺寸的 buffer
-     * 去贴新矩形：真机照片里「点一下隐藏进度条，画面变宽却被推到下半屏、
-     * 底部被裁」就是这个。`session.c` 里那句 "改 render-rectangle 对它的
-     * 显示尺寸毫无作用" 是同一件事的另一半。
-     *
-     * 所以：
-     *   · `chrome` 恒传 true —— 顶栏/控制条的那两段像素**永远让出来**，
-     *     控件隐藏时只是把内容换成纯黑，尺寸一像素都不动；
-     *   · `cc` 恒传 false —— 不再有独立的底部字幕带，字幕改由上面那条
-     *     18px 顶栏承载（参考系统播放器里字幕也在画面上方）；
-     *   · 全屏态也保留控制条（barH 不归零）—— 用户真机反馈「全屏后点下方
-     *     不出进度条」。控制条那 32px 一旦让给画面，就没有任何 UI 像素能画
-     *     进度条了（KMS 平面盖在 UI 之上，画不上去）。
-     *   · 全屏与普通态的视频段**高度相同**（都是 H-18-32），16:9 的矩形尺寸
-     *     因此完全一样（409x230），只有 x 变成居中 —— caps 不用变，也就不会
-     *     再出现「全屏后被压扁」。代价是全屏不会把画面放大，这是 X7 上
-     *     videoscale caps 起播定死带来的硬限制（换尺寸必然重建，重建就会变形）。
-     * 只有进/出全屏才换矩形，而且只换位置、不换尺寸。 */
-    bands() {
-      return planBands({
-        totalH: this.L.num.height,
-        chrome: true,
-        /* 【第十四轮】字幕带回到独立的一条 18px，但只在真有字幕句时存在：
-         * 未登录/无 CC 的默认状态视频洞就是 250（画面 444x250），
-         * 开字幕才让出 18px（232 → 412x232）。顶栏已删除（topH=0）。 */
-        cc: this.ccActive,
-        live: this.isLivePlay,
-        /* 沉浸态不改分段：中列始终是「视频段 + 字幕带」，
-         * 只有字幕开关会真的改矩形。 */
-        full: false,
-        /* 全屏也要自己的字幕带（顶栏已删，没有"借顶栏"这条路了）。
-         * 这样全屏/普通态在同样的字幕状态下视频段高度一致，进出全屏不改尺寸。 */
-        ccFull: true,
-        topH: 0,
-        ccH: CC_BAND_H,
-        /* 【3.5.12】中列底部条已删除 —— 进度条搬去右列评论区顶部（.pright-bar）。
-         * 这里恒传 0，中列只剩「视频洞 + 字幕带」两段，整条高度都归画面。
-         * 好处是顺带治好了左右黑边：中列宽度按 16:9 反算（见 layout.js），
-         * 画面正好铺满，不再有信箱黑。
-         * 注意这可不像从前那样"bar 段永远让出来"了 —— 现在视频矩形真的会变
-         * （视频洞长高了 24~30px），所以起播时的矩形与以前不同，但**运行期
-         * 仍然不变**：字幕开关是唯一的例外（低频、且必须重建）。 */
-        barH: 0
-      });
-    },
-    /* 视频 + 字幕那一列：宽度恒等于中列宽（全屏也不变，见 midW 的注释）。 */
-    stageStyle() {
-      /* 【3.5.12】中列只剩「视频段 + 字幕带」两段（底部条已搬去右列）。
-       * 视频段不再随控件显隐变化：它恒等于 bands.video = H − 字幕带。 */
-      return { width: this.midW + 'px', height: (this.bands.video + this.bands.cc) + 'px' };
-    },
-    /* **当前生效**的轨道宽度：普通态 = 右列顶部那条进度条，全屏态 = 右列面板。
-     * 填充宽（seekFillW）、命中测试（seekRatioAt）、DOM 宽度三处全从这里出，
-     * 换布局时自动跟着走，不会出现"点这儿、跳那儿"。 */
-    seekTrackW() {
-      return this.barSlots.track;
-    },
-    /* 字幕带是否要占像素：**由几何决定，不由"当前有没有句子"决定**。
-     *
-     * 【3.5.6 第十九轮：这一条曾漏出上一屏的控制条】
-     * 旧实现是 `bands.cc > 0 && !!subtitleText`：两句字幕之间（以及刚开字幕、
-     * 当前时间还没落到任何 cue 上时）subtitleText 是空串，整条 18px 的带子
-     * 就不渲染 —— 但 bands.cc 仍然是 18，那 18px 的 UI 像素**没人画**。
-     * falcon 不主动清屏，上一屏底部控制条的像素就从这条缝里透出来，
-     * 真机看着就是「全屏时多出一条进度条」。
-     * 现在只要几何上有这条带子就渲染它（没有台词时是一块纯黑），
-     * 画的像素和让出的像素严格一对一。 */
-    ccBarVisible() {
-      return this.bands.cc > 0;
-    },
-    /* 字幕状态的唯一说明处：「我的 → CC 字幕」下面那行。播放器里不再解释
-     * （用户要求：播放器内只保留「字幕」二字）。
-     * 为什么需要解释：字幕轨道来自 x/player/v2，**匿名返回 subtitle.subtitles=[]**
-     * （实测同一稿件 view 能看到 12 条轨道，但每条 subtitle_url 都是空串），
-     * 没有登录态就没有任何一条字幕 URL —— 不是渲染坏了。 */
-    ccSettingHint() {
-      if (!this.hasLogin) {
-        return '未登录：B 站匿名接口不返回字幕地址，登录后才能显示字幕。点上方「扫码登录 B 站账号」即可。';
-      }
-      if (this.cc.loading) return '字幕加载中…';
-      if (this.cc.cues.length > 0) {
-        return '已加载 ' + this.cc.cues.length + ' 句字幕' +
-          (this.cc.lanDoc ? '（' + this.cc.lanDoc + '）' : '') + '。';
-      }
-      if (this.cc.tracks.length > 0) {
-        return '已找到 ' + this.cc.tracks.length + ' 条字幕轨，但内容没取到：' +
-          (this.cc.status || '重新打开视频会再试一次') + '。';
-      }
-      if (this.cc.status) return this.cc.status + '。换一个带 CC 字幕的视频试试。';
-      return '播放视频后，这里会显示该稿件的字幕状态（无 CC 字幕 / 下载失败原因）。';
-    },
-    /* 左列最后那一行提示。优先显示播放提示（定位中/加载中/音画不同步恢复中…）；
-     * 没有播放提示时退回互动状态（点赞/投币/收藏的结果）。
-     *
-     * 【3.5.10】`act.status` 以前**模板里根本没有渲染点** —— 投币失败时
-     * `onAddCoin` 认认真真写了「已投满 2 枚」「需要登录后才能投币」「投币失败：…」，
-     * 用户一个都看不到，观感就是「点一下没反应、投币用不了」。这一行就是它的显示位。 */
-    pnoteText() {
-      const n = this.play.note;
-      if (n) return n;
-      return this.act.status || '';
-    },
-    /* 视频盒与字幕带的宽度：恒等于中列宽，必须与 buildVideoRect 下发的盒子
-     * 逐像素相同，否则点击热区与画面错开。 */
-    videoBoxStyle() {
-      /* 【3.5.12】视频洞吃掉中列全高（进度条不在这一列了）：
-       * 266 高、473 宽，16:9 片源出来正好 473x266，没有信箱黑边。
-       * native 矩形按 bandBox 算，扣的是 top + 字幕带，与这里同源。 */
-      return { width: this.midW + 'px', height: this.bands.video + 'px' };
-    },
-    ccBarStyle() {
-      return { width: this.midW + 'px', height: this.bands.cc + 'px' };
-    },
-    /* 右列顶部常驻进度条的样式（宽 = 右列宽，高 = layout.play.barH）。
-     * 它不参与 bands（中列几何），也不跟 ui.chrome 联动：用户要求
-     * 「固定在上方，不随评论区滑动」，所以它常驻、评论列表在它下面滚。 */
-    rightBarStyle() {
-      return this.L.playBar;
-    },
-    /* 中列容器：任何状态都用普通态那份几何。全屏只换左右两列的内容，
-     * 中列（含视频洞位置、字幕带）一个像素都不动。 */
-    midStyle() {
-      return this.L.playMid;
-    },
-    /* 进度条槽位：轨道宽度只从这里出，DOM 与命中测试共用。
-     * 【3.5.12】进度条住在右列（宽 = L.num.right），所以按右列宽算，
-     * 不再是中列宽 —— 写死中列宽会让轨道溢出到左列去。 */
-    barSlots() {
-      /* 只剩「当前时间 / 轨道 / 总时长」三格。
-       * 播放 / ±10s / 字幕 / 全屏早在 3.5.11 就搬到左列 .pleft-ctrl 了。 */
-      return seekMetrics(this.L.num.right);
-    },
-    trackStyle() {
-      return { width: this.seekTrackW + 'px' };
-    },
-    /* 【3.5.6 第十轮】字幕开关在点播态**恒可见**。
-     * 原来是 `tracks.length > 0 || cc.on || cues.length > 0`：这个稿件没有 CC
-     * 轨道时，用户点一下「字幕」（开）、再点一下（关），三个条件同时落空 →
-     * 整个按钮从控制条里消失，用户再也没有入口打开 —— 真机反馈
-     * 「在有字幕的视频中点击关闭字幕后就无法重新打开」。
-     * 恒可见还有个副作用是好事：槽位数固定，轨道宽度不会随开关抖动。 */
-    ccBtnVisible() {
-      return this.mode === 'play' && !this.isLivePlay;
-    },
-    playCurText() {
-      /* 必须用 formatClock 而不是 formatDuration：后者对 0 返回空串（列表卡片上
-       * "时长为 0 不显示"是对的），控制条这格一旦空白，用户看到的就是
-       * 「进度条卡在开头 + 时间没了」——3.5.6 第八轮真机反馈的原始症状之一。 */
-      return formatClock(this.play.positionMs);
-    },
-    playDurText() {
-      const s = this.play.session;
-      if (!s || !(s.durationMs > 0)) return '--:--';
-      return formatClock(s.durationMs);
-    },
-    loadAnim() {
-      return loadingFrame(this.ui.frame);
-    },
-    loadBarStyle() {
-      return { marginLeft: this.loadAnim.dx + 'px' };
-    },
-    subtitleText() {
-      if (!this.ccActive || !this.ccOwned) return '';
-      return cueAt(this.cc.cues, this.cc.posMs);
-    },
-    ccStatusLine() {
-      if (!this.cc.on) return 'CC 字幕：关';
-      if (this.cc.loading) return 'CC 字幕：加载中…';
-      if (!this.cc.cues.length) return this.cc.status || 'CC 字幕：无字幕';
-      return 'CC 字幕：' + (this.cc.lanDoc || '开') + ' · ' + this.cc.cues.length + ' 句';
-    },
-    interactChoices() {
-      const list = this.interact.choices || [];
-      /* type=0 的自动跳转片段只有一个 option="A " 的空选项：它不是给人点的。
-       * 其他题型里若混进空文本项（上游偶发），也一并藏掉，避免出现一行「A」。 */
-      if (this.interact.autoJump) return [];
-      return list.filter((c) => !c.auto);
-    },
-    interactDefault() {
-      return defaultChoice(this.interactChoices);
-    },
-    ipWidth() {
-      return { width: this.L.num.right + 'px' };
-    },
-    /* 【3.5.12】互动面板占满整个右列（进度条只在评论区出现，见 .pright-bar
-       的渲染条件），所以这三段仍是 28 + 体 + 26 = 页高。 */
-    ipHeadStyle() {
-      return { width: this.L.num.right + 'px', height: '28px' };
-    },
-    ipBodyStyle() {
-      /* 右列预算 = 页高 - 头 28 - 底 26，与评论区 L.rightBody 同高不同拆分 */
-      return {
-        width: this.L.num.right + 'px',
-        height: Math.max(80, this.L.num.height - 28 - 26) + 'px'
-      };
-    },
-    ipFootStyle() {
-      return { width: this.L.num.right + 'px', height: '26px' };
-    },
-    ccLanText() {
-      if (!this.cc.tracks.length) return this.cc.status || '自动（暂无轨道）';
-      const t = pickSubtitleTrack(this.cc.tracks, this.cc.lan);
-      return t ? t.lanDoc : '自动';
-    },
-    /* 左列那颗弹幕键的字。键宽只有 ~40px，放不下「弹幕 1/2」这种 6 个字，
-     * 所以用固定的 2~3 字短标：关 / 全屏 / 1-2 / 1-4。
-     * 完整档位名在 dmStatusText 与「我的」设置行里给。 */
-    dmBtnText() {
-      switch (this.dm.mode) {
-        case 'full': return '全屏';
-        case 'half': return '1-2';
-        case 'quarter': return '1-4';
-        default: return '弹幕';
-      }
-    },
-    dmSettingText() {
-      return DM_MODE_LABELS[this.dm.mode] || '弹幕关';
-    },
-    dmSizeText() {
-      return DM_SIZE_LABELS[this.dm.size] || DM_SIZE_LABELS[DM_SIZE_DEFAULT];
-    },
-    dmSettingHint() {
-      /* 状态优先：失败原因比任何说明都重要 */
-      if (this.dm.status) return this.dm.status;
-      if (this.dm.mode === 'off') return '视频帧里不画任何东西，零开销；字号 ' + this.dmSizeText;
-      if (this.isLivePlay) return '直播间暂无弹幕';
-      return (this.dm.ready ? '弹幕已烧进视频帧（UI 层盖不住画面）' : '起播后自动加载') +
-        ' · 字号 ' + this.dmSizeText;
-    },
-    interactTitle() {
-      const n = this.interact.node;
-      const t = n && n.title ? n.title : '互动片段';
-      return '第 ' + (this.interact.segment || 1) + ' 段 · ' + t;
     },
     timeText() {
       const s = this.play.session;
@@ -1783,14 +1590,12 @@ export default {
     ibarTimeCur() {
       if (this.mode === 'article') return '图文';
       const s = this.play.session;
-      if (!s) return '';
-      /* 同 playCurText：0 也要显示 00:00，否则左栏小屏显在起播瞬间是空白。 */
-      return formatClock(this.play.positionMs || 0);
+      return formatDuration((s ? this.play.positionMs || 0 : 0) / 1000);
     },
     ibarTimeDur() {
       if (this.mode === 'article') return '';
       const s = this.play.session;
-      return s && s.durationMs > 0 ? formatClock(s.durationMs) : '--:--';
+      return s ? formatDuration((s.durationMs || 0) / 1000) : '';
     },
     /* 进度条填充宽（px）。几何来自 screen.js（P1-14：以前这里写死 443/453，
      * 布局一改就静默错位）。拖动中用 seekDragMs，松手前不下发 seek。 */
@@ -1799,10 +1604,24 @@ export default {
       const dur = s ? s.durationMs || 0 : 0;
       if (!(dur > 0)) return 0;
       const ms = this.seekDragMs == null ? this.play.positionMs : this.seekDragMs;
-      /* 轨道宽走 seekTrackW（底部条与全屏侧栏共用一份数字）。
-       * 滑块直径（SEEK_KNOB_W，第十六轮 16 → 12，对齐参考系统播放器的滑块尺寸）
-       * 要从最大值里扣掉，否则滑块会顶出轨道右缘。 */
-      return seekFillWidth(ms / dur, Math.max(20, this.seekTrackW - SEEK_KNOB_W));
+      return seekFillWidth(ms / dur);
+    },
+    /* 全屏播放页底栏（移植文件管理 UI）：当前/总时长 + 600px 轨道填充。 */
+    fpCurTime() {
+      const d = (this.play.positionMs || 0) / 1000;
+      return d > 0 ? formatDuration(d) : '00:00';
+    },
+    fpDurTime() {
+      const s = this.play.session;
+      const d = (s && s.durationMs ? s.durationMs : 0) / 1000;
+      return d > 0 ? formatDuration(d) : '00:00';
+    },
+    fpSeekFillW() {
+      const s = this.play.session;
+      const dur = s ? s.durationMs || 0 : 0;
+      if (!(dur > 0)) return 0;
+      const ms = this.seekDragMs == null ? this.play.positionMs : this.seekDragMs;
+      return seekFillWidth(ms / dur, FP_SEEK_FILL_MAX);
     },
     // 左列简介（用户手绘稿 m11950：左列上方显示视频标题和简介）
     playDesc() {
@@ -1811,102 +1630,15 @@ export default {
       const d = s.desc || '';
       return d || '（暂无简介）';
     },
-    /* ==================== 分P / 合集 ====================
-     * 数据来自 view（session.pages / session.season），不额外发请求。
-     * 页签只在"真的有得选"时出现：单 P 且无合集的稿件，右栏和以前完全一样，
-     * 一个像素都不占。
-     *
-     * 列表点击 → switchEp() → onPlayItem()：复用完整的起播流程（重取流、重建
-     * 矩形、刷新评论/字幕/互动），不另写一套"轻量切换"，避免两条路径状态不同步。
-     * ============================================================== */
-    epHasPages() {
-      return this.mode === 'play' && !this.isLivePlay && this.ep.pages.length > 1;
-    },
-    epHasSeason() {
-      return this.mode === 'play' && !this.isLivePlay &&
-        !!(this.ep.season && this.ep.season.count > 0);
-    },
-    epTabsVisible() {
-      return this.epHasPages || this.epHasSeason;
-    },
-    /* 实际渲染的页签：state 里那个可能已经失效（切到了没有分P的稿件），
-     * 失效就回落到评论 —— 否则右栏会空一片，用户找不到评论。 */
-    epTabNow() {
-      if (this.ep.tab === 'pages' && this.epHasPages) return 'pages';
-      if (this.ep.tab === 'season' && this.epHasSeason) return 'season';
-      return 'reply';
-    },
-    epTabsStyle() {
-      return { width: this.L.num.right + 'px', height: EP_TAB_H + 'px' };
-    },
-    /* 评论体：有页签时扣掉 22px。评论区高度必须严格 === 右列预算 - 页签高，
-     * 否则输入框会被挤出视口（真机上就是"发送键点不到"）。 */
-    replyBodyStyle() {
-      const h = this.L.num.rightBodyH - (this.epTabsVisible ? EP_TAB_H : 0);
-      return { width: this.L.num.right + 'px', height: Math.max(80, h) + 'px' };
-    },
-    /* 分P/合集列表：页签之下的全部高度（这个页签下没有输入框，
-     * 但顶部那条常驻进度条仍然占着 barH）。 */
-    epListStyle() {
-      return {
-        width: this.L.num.right + 'px',
-        height: Math.max(80, this.L.num.height - this.L.num.barH - EP_TAB_H) + 'px'
-      };
-    },
-    epPageLabel() {
-      const n = this.ep.pages.length;
-      return '分P ' + n;
-    },
-    epSeasonLabel() {
-      const s = this.ep.season;
-      return '合集 ' + (s ? s.count : 0);
-    },
-    /* 合集按 section 分组渲染；每节前面一行小标题。
-     * 单节合集不显示那行标题（多一行等于少一集可见）。 */
-    epSeasonBlocks() {
-      const s = this.ep.season;
-      if (!s || !Array.isArray(s.sections)) return [];
-      const multi = s.sections.length > 1;
-      return s.sections.map((sec, si) => ({ si: si, title: sec.title, show: multi, items: sec.items }));
-    },
-    /* 合集列表的**扁平行**：节标题行 + 集行混在一个数组里。
-     * 为什么不在模板里嵌套 v-for：falcon 的 template v-for + 内层 v-for
-     * 在真机上出现过只渲染第一组的问题（`.side-body` 里踩过），
-     * 扁平化之后模板只有一个 v-for，行为可预期。 */
-    epSeasonRows() {
-      const out = [];
-      const pos = this.epSeasonPos;
-      const blocks = this.epSeasonBlocks;
-      for (let bi = 0; bi < blocks.length; bi++) {
-        const blk = blocks[bi];
-        if (blk.show) out.push({ kind: 'sec', key: 'si' + blk.si, title: blk.title });
-        for (let ii = 0; ii < blk.items.length; ii++) {
-          const e = blk.items[ii];
-          out.push({
-            kind: 'ep',
-            key: 'e' + e.bvid,
-            row: e,
-            on: blk.si === pos.si && ii === pos.ii,
-            no: ii + 1,
-            dur: fmtDur(e.durationSec)
-          });
-        }
-      }
-      return out;
-    },
-    /* 当前集在合集里的位置：用来高亮 + 显示"第 n / N 集" */
-    epSeasonPos() {
-      const s = this.ep.season;
-      if (!s) return { si: -1, ii: -1, flat: 0 };
-      const idx = episodeIndexOf(s, this.play.session ? this.play.session.bvid : '');
-      if (idx.si < 0) return { si: -1, ii: -1, flat: 0 };
-      let flat = 0;
-      for (let i = 0; i < idx.si; i++) flat += s.sections[i].items.length;
-      return { si: idx.si, ii: idx.ii, flat: flat + idx.ii + 1 };
-    },
-    epSwitchText() {
-      if (this.ep.switching) return '切换中…';
-      return this.ep.note || '';
+    /* 标题滚动展示（用户手绘稿要求「尝试复刻哔哩哔哩终端的滚动展示」）：
+     * falcon 没有 CSS animation/transform，这里用窗口文本按 400ms 左移一格模拟跑马灯。
+     * 短标题（≤16 字）原样显示，长标题才启动（startTitleScroll）。 */
+    titleDisplay() {
+      const s = this.infoTitle || '';
+      if (s.length <= 16) return s;
+      const n = 16;
+      const off = this.titleShift % (s.length + 4);
+      return (s + '    ' + s).slice(off, off + n);
     }
   },
   async created() {
@@ -1914,36 +1646,12 @@ export default {
     this._timers = new Set();
     this._intervals = new Set();
     this._poll = 0;
-    this._ccClock = 0;
-    this._ccAnchor = null;
-    /* 上一 tick 的 native 位置/帧数：两者都不动 = 位置冻结（缓冲/卡顿），
-     * 此时字幕钟必须停止外推（见 tick 里 _ccAnchor 的注释）。 */
-    this._tickPos = -1;
-    this._tickFrames = -1;
-    this._autoChainT = 0;
-    this._choiceT = 0; // 互动题面倒计时（duration>0 时才跑）
-    this._hideT = 0;   // 全屏态控件自动收起句柄（0=没有计时，见 AUTO_HIDE_MS）
-    this._rectDirty = false; // 取流中切过全屏 → 起播后补一次 setVideoRect
-    this._rectPendingReason = ''; // 补发时要用回 full-on/full-off 的原因
-    this._rectKey = '';      // 上一次**成功下发**的物理矩形（去重/防连点抖动用）
-    this._tapAt = 0;         // 上一次被接受的点击时刻（60ms 内的重复事件丢弃）
-    this._tapT = 0;          // 单击延时句柄（两击之内被取消 = 双击）
-    this._ccSaved = null;    // null = 用户从没显式开关过字幕（决定要不要自动打开）
-    this._loadTimer = 0; // 加载动画定时器（120ms 一帧，只在 loading 期间跑）
     this.mixinMemo = {}; // WBI 密钥会话级缓存（播放与搜索共享）
     this.client = createClient({});
-    /* CC 字幕开关是用户设置，读盘不阻塞首屏渲染。 */
-    this.loadCcSettings().then(() => {}, () => {});
-    /* 弹幕模式也是用户设置，同样不阻塞首屏。 */
-    this.loadDmSettings().then(() => {}, () => {});
     /* 播放器实现选择（v1=旧 player.c，v2=新 player2 模块）在这里一次性读盘：
      * 之后每次 open/status 都走内存值，热路径不碰 storage（storage 是同步 FS 调用，
      * 每秒一次轮询里读盘会拖慢 QuickJS 主线程）。 */
     this._playerImpl = await player.loadPlayerImpl();
-    /* 【X7 Pro 适配】预热设备显示参数（视口尺寸 / 面板列偏移 / DRM plane-id）。
-     * 不 await：首屏渲染不能被 storage 读盘挡住；openVideo 里会 await 同一个
-     * Promise，保证播放前一定拿到 profile。 */
-    ensureProfile();
     /* 屏幕保活状态（任务 A）：_keepOn=当前是否在保活；_bgPaused=这次暂停是退后台
      * 触发的（回前台要自动恢复），用户手动暂停的不动。 */
     this._keepOn = false;
@@ -1971,6 +1679,20 @@ export default {
      *   _liveReconnectLogged = 「直播重连中…」是否已打过日志（避免每秒刷屏） */
     this._livePlayed = false;
     this._liveReconnectLogged = false;
+    /* 【3.5.9 同步】CC 字幕钟 / 互动连播 / 控件自动收起 的定时器与锚点。 */
+    this._ccClock = 0;
+    this._ccAnchor = null;
+    this._tickPos = -1;
+    this._tickFrames = -1;
+    this._autoChainT = 0;
+    this._choiceT = 0;
+    this._hideT = 0;
+    this._pinchTimer = 0;
+    this._zoomBusy = false;
+    this._zoomPending = null;
+    this._suppressTapUntil = 0;
+    this._ccSaved = null;
+    await this.loadCcSettings();
     // 关键顺序：先恢复登录 Cookie（loadLocal），其末尾才发起首屏加载 ——
     // 否则首屏 rcmd 会以匿名身份发出，拿到的是默认推荐而非账号个性化推荐
     await this.loadLocal();
@@ -1992,28 +1714,12 @@ export default {
         this._intervals.delete(this._poll);
         this._poll = 0;
       }
-      /* 字幕时钟与轮询同生命周期：轮询停了就别再推进字幕位置。 */
+      /* 字幕插值钟与轮询同生共死：页面离开/换片后不再推进 cue。 */
       if (this._ccClock) {
         clearInterval(this._ccClock);
         this._intervals.delete(this._ccClock);
         this._ccClock = 0;
       }
-    },
-    /* B 站风加载动画（小电视扫描条 + 三个跳动的点）。
-     * falcon 上没有可靠的 @keyframes / transform，所以动画只能靠 120ms 一帧地改样式；
-     * 只在 state==='loading' 期间跑，取流结束立刻停，不白烧 QuickJS 的定时器。 */
-    startLoadingAnim() {
-      if (this._loadTimer) return;
-      this._loadTimer = setInterval(() => {
-        this.ui.frame = (this.ui.frame + 1) % 120;
-      }, CHROME_LOAD_MS);
-      this._intervals.add(this._loadTimer);
-    },
-    stopLoadingAnim() {
-      if (!this._loadTimer) return;
-      clearInterval(this._loadTimer);
-      this._intervals.delete(this._loadTimer);
-      this._loadTimer = 0;
     },
     // 每次操作独立 ctx：generation 变化即视为过期（过期回调不得更新页面）
     makeCtx(myGen) {
@@ -2025,11 +1731,14 @@ export default {
         mediaReferer: REFERER,
         /* 「我的 → 视频调节 / 直播」的选择，play_session 用它算 qn 阶梯、像素预算、帧率上限 */
         videoSettings: this.videoSettings,
+        /* 播放页「样式」：clear = 按无栏（全屏）分辨率解码，显示始终等比信箱；
+         * smooth = 按当前显示矩形解码（旧行为）。 */
+        playStyle: this.videoSettings.playStyle,
+        /* 起播时视频落点：隐藏状态栏时直接用全屏矩形，避免「小窗→拉大」的闪跳；
+         * 字幕带已经占像素时用带字幕的矩形（同一套几何，见 screen.js playAreaFor）。 */
+        videoArea: playAreaFor(this.chromeHidden, this.ccBandVisible),
         nowSec: () => Math.floor(Date.now() / 1000),
         log: logWarn,
-        /* 【播放控件 / CC 字幕】openVideo 用它决定 render-rectangle 的让位量：
-         * top = 顶部悬浮条，bottom = 字幕带 + 控制条。与页面 DOM 同一份数字。 */
-        bandPx: () => this.bandPx(),
         cancelled: () => this.gen !== myGen
       };
     },
@@ -2052,49 +1761,16 @@ export default {
     async loadLocal() {
       const h = await loadHistory();
       this.history = h.items;
+      const sh = await loadSearchHistory();
+      this.searchHistory = sh.items;
+      this.downloads = (await loadDownloads()).items;
+      logWarn('[bili] dl load n=' + this.downloads.length);
       this.videoSettings = await loadVideoSettings();
-      let sess = await loadSession();
+      const sess = await loadSession();
       this.session = sess;
       if (sess.buvid3) {
         // 仅供诊断页/日志使用；「我的」页不展示这种短码，未登录时给用户看得懂的引导文案
         this.buvidShort = sess.buvid3;
-      }
-      /*
-       * 【3.5.10】buvid3/buvid4 必须补齐，否则投币必挂。
-       *
-       * 真机实测（2026-11-18，同一个登录态、同一个 aid）：
-       *   POST /x/web-interface/archive/like  → {"code":0}            ← 点赞不受影响
-       *   POST /x/web-interface/coin/add      → {"code":-401,"message":"非法访问"}
-       * 两者唯一的差别就是投币带了风控决策（`origin_scene: video_coin`，
-       * `decisions: ["verify_captcha_level3"]`），而它依赖 Cookie 里的 buvid。
-       * 给同一个 Cookie 补上 buvid3/buvid4 后，投币立刻返回 {"code":0}。
-       *
-       * 以前只有自检探针会调 fetchFinger()，正常使用路径从没补过 ——
-       * 老用户存储里 buvid3 是空串，就表现为「点赞能用、投币永远失败」。
-       * 这里开机补一次并落盘，后续 cookieFromSession() 自然带上。
-       */
-      if (!sess.buvid3) {
-        try {
-          const fp = await this.client.fetchFinger();
-          if (fp.ok) {
-            sess = Object.assign({}, sess, {
-              version: 2, buvid3: fp.buvid3, buvid4: fp.buvid4 || ''
-            });
-            await saveSession(sess);
-            this.session = sess;
-            this.buvidShort = fp.buvid3;
-            logWarn('[bili] buvid 已补齐（' + fp.buvid3.length + ' 字符）');
-          } else {
-            logWarn('[bili] buvid 补齐失败 ' + fp.stage + ' ' + fp.message);
-          }
-        } catch (e) {
-          logWarn('[bili] buvid 补齐异常 ' + ((e && e.message) || e));
-        }
-      }
-      if (!(sess.login && sess.login.SESSDATA) && sess.buvid3) {
-        /* 未登录也要把匿名触点带上：风控只认 Cookie，匿名请求不带 buvid 一样会被
-         * 判成「非法访问」（投币/部分接口）。这里只补 cookie，不做 nav 验证。 */
-        this.client.setCookie(cookieFromSession(sess));
       }
       if (sess.login && sess.login.SESSDATA) {
         // 登录态恢复：Cookie 立即生效（首屏请求依赖它）；nav 验证放后台不阻塞首屏
@@ -2165,6 +1841,25 @@ export default {
          * 而播放态同一条命令立刻生效。用户报的正是「暂停后点评论框，画面盖住
          * 键盘」，所以这个探针必须在暂停态下跑。 */
         this._probePauseRect = seed.probePauseRect;
+        /* probeMenu：起播 3s 后自动打开右侧设置菜单（验证 menu-overlay 与 pauseRender）。
+         * 仅诊断种子使用；正常启动 seed 为空，不会触发。 */
+        this._probeMenu = seed.probeMenu;
+        /* probeChrome：起播 +26s 自动隐藏状态栏（全屏）、+34s 恢复，验证 setRect 链路。 */
+        this._probeChrome = seed.probeChrome;
+        /* probeSearch：搜索链路取证（关键词 → 结果数/首尾标题）；probeDownload：缓存链路取证。 */
+        this._probeDownload = seed.probeDownload;
+        this._probeStyle = seed.probeStyle;
+    this._probeZoom = seed.probeZoom;
+        const probeSearch = seed.probeSearch;
+        const probeLocalPlay = seed.probeLocalPlay;
+        const probeTab = seed.probeTab;
+        const probeQr = seed.probeQr;
+        /* probeDetail：首屏加载完自动进第一条视频的详情页（纯 UI 验证，不取流播放）。 */
+        const probeDetail = seed.probeDetail;
+        /* probeUp：先进详情页，再点蓝色 UP 名进 UP 主页（验证名片 + 投稿列表解析）。 */
+        const probeUp = seed.probeUp;
+        /* probePlayBackUp：UP 主页 → 视频详情 → 播放 → 返回，验证回到 UP 而不是搜索页。 */
+        const probePlayBackUp = seed.probePlayBackUp;
         /* probeLiveEnd：直播「下播」判据的引擎级自证（纯计算，不取流/不播放/不亮屏）。
          * 为什么需要：真实下播要等主播关播，或断网等 souphttpsrc 重试耗尽才能复现；
          * 而判据跑在真机 QuickJS 上（typeof/Number 行为可能与 Node 有差异）。
@@ -2191,7 +1886,20 @@ export default {
           await this.selectTab('rcmd');
           return;
         }
-        if (liveOnly) this.runLiveAutotest(liveRoom, liveHold);
+        if (probeDetail) {
+          await this.selectTab('rcmd');
+          if (this.rcmdItems.length) await this.onOpenDetail(this.rcmdItems[0]);
+        } else if (probeUp) {
+          this.runUpProbe();
+        } else if (probePlayBackUp) {
+          this.runPlayBackUpProbe();
+        } else if (probeSearch) this.runSearchProbe(probeSearch);
+        else if (probeTab) this.runTabProbe(probeTab);
+        else if (probeQr) {
+          await this.selectTab('mine');
+          await this.onGoLogin();
+        } else if (probeLocalPlay) this.runLocalPlayProbe();
+        else if (liveOnly) this.runLiveAutotest(liveRoom, liveHold);
         else if (wbiStress > 0) this.runWbiStress(wbiStress);
         else if (playProbe > 0) this.runPlayProbe(playProbe, soakBv);
         else if (probeLiveEnd && !hasAutoBody) await this.selectTab('rcmd'); // 只跑自证：停在正常首屏
@@ -2203,6 +1911,9 @@ export default {
          *   - await 会占住 created()，页面迟迟不渲染。
          * 失败只打一行日志，绝不弹窗打扰（autoCheckUpdate 内部全 try/catch）。 */
         this.autoCheckUpdate();
+        /* 预热 WBI 密钥（nav ≈0.3~1.2s）：第一次搜索不用再等密钥请求。
+         * 失败不影响任何功能 —— 真正搜索时还会再取一次。 */
+        ensureMixinResult(this.makeCtx(this.gen)).catch(() => {});
       }
     },
 
@@ -2214,6 +1925,17 @@ export default {
       this.tab = id;
       this.statusText = '';
       if (id === 'mine') return;
+      if (id === 'downloads') {
+        // 只做本地校验（文件被外部删掉就摘掉条目），不发任何网络请求
+        this.refreshDownloads();
+        return;
+      }
+      // 历史独立页（用户要求）：每次进来从 storage 重新读，保证是最新 20 条
+      if (id === 'history') {
+        const h = await loadHistory();
+        this.history = h.items;
+        return;
+      }
       if (id === 'search' && !this.keyword) return; // 空态显示"输入关键词"，不发请求
       const list =
         id === 'rcmd' ? this.rcmdItems : id === 'hot' ? this.hotItems : id === 'search' ? this.searchItems : [];
@@ -2286,7 +2008,7 @@ export default {
         return;
       }
       // 首屏也裁到列数整数倍，保证第一屏就是整行（用户要求 m11950-3）
-      const first = trimToGridRows(r.items, this.L.num.cols);
+      const first = trimToGridRows(r.items, GRID_COLS);
       if (id === 'rcmd') this.rcmdItems = first.items;
       else if (id === 'hot') this.hotItems = first.items;
       else if (id === 'search') this.searchResults[this.searchType] = first.items;
@@ -2312,7 +2034,7 @@ export default {
       const merged = appendDeduped(this.hotItems, r.items);
       // 用户要求 m11950-3：加载更多后条目数必须能被列数整除，否则最后一行填不满。
       // 只裁尾部（不重排），被裁掉的条目会在下一次「加载更多」时由新页补上。
-      const cut = trimToGridRows(merged.items, this.L.num.cols);
+      const cut = trimToGridRows(merged.items, GRID_COLS);
       this.hotItems = cut.items;
       this.hotPn = this.hotPn + 1;
       this.hotNoMore = r.noMore || merged.added === 0;
@@ -2343,15 +2065,50 @@ export default {
           return;
         }
         this.keyword = kw;
+        this.recordSearch(kw);
         // 新关键词：三分栏全部重置（切到 search tab 由 loadTab 拉当前类型首屏）
         this.searchResults = { video: [], article: [], live: [] };
         this.searchPages = { video: 1, article: 1, live: 1 };
         this.searchNoMoreMap = { video: false, article: false, live: false };
         this.statusText = '搜索「' + kw + '」…';
+        /* 系统输入法是独立 miniapp：确认返回后宿主页要几百毫秒才真正回到前台。
+         * 真机日志（2026-11-10 22:25/23:24/09:59）显示：输入法返回后**立刻**发搜索，
+         * 第一发 jsapi.http 每次都挂满 15s 超时，重试才成功 —— 这就是「搜索慢」。
+         * 等 600ms 让宿主恢复前台；搜索本身也已改走 native libcurl（见 feed.js）。 */
+        await this.sleep(600);
         await this.selectTab('search');
+        this.scrollToTop('search'); // 新关键词：列表回到顶部
       } finally {
         this.imBusy = false;
       }
+    },
+    /* ---------- 搜索记录（storage 持久化，最多 10 条、newest-first） ---------- */
+    recordSearch(kw) {
+      const list = pushSearchHistory({ version: 1, items: this.searchHistory }, kw, Date.now());
+      this.searchHistory = list.items;
+      saveSearchHistory(list);
+    },
+    // 点历史条目：复用关键词，清空三分栏缓存后按当前类型重搜
+    async onHistorySearch(kw) {
+      const k = String(kw || '').trim();
+      if (!k) return;
+      const myGen = ++this.gen;
+      this.stopPoll();
+      this.keyword = k;
+      this.searchResults = { video: [], article: [], live: [] };
+      this.searchPages = { video: 1, article: 1, live: 1 };
+      this.searchNoMoreMap = { video: false, article: false, live: false };
+      this.recordSearch(k);
+      logWarn('[bili] history search kwLen=' + k.length);
+      this.loading = true;
+      this.statusText = '搜索「' + k + '」…';
+      await this.loadTab('search', myGen);
+      this.scrollToTop('search'); // 历史条目重搜：列表回到顶部
+    },
+    async onClearSearchHistory() {
+      this.searchHistory = [];
+      await saveSearchHistory({ version: 1, items: [] });
+      logWarn('[bili] search history cleared');
     },
     // 刷新：清缓存重拉（登录态下推荐可能轮换；匿名同参固定——见 feed.js 实测）
     async onRefreshTab() {
@@ -2369,6 +2126,7 @@ export default {
       }
       logWarn('[bili] refresh ' + id);
       await this.loadTab(id, myGen);
+      if (id === 'search') this.scrollToTop('search');
     },
     // 推荐列表耗尽（rcmd 匿名不可翻页，实测）→ 用热门后续底
     async loadMoreFromHot() {
@@ -2390,7 +2148,7 @@ export default {
       this.hotMorePn = this.hotMorePn + 1;
       const merged = appendDeduped(this.rcmdItems, r.items);
       // 同上：尾部裁到列数整数倍（用户要求 m11950-3）
-      const cut = trimToGridRows(merged.items, this.L.num.cols);
+      const cut = trimToGridRows(merged.items, GRID_COLS);
       this.rcmdItems = cut.items;
       this.moreNoMore = r.noMore || merged.added === 0;
       this.statusText = merged.added === 0 ? '没有更多了' : '';
@@ -2429,11 +2187,173 @@ export default {
       this.searchNoMoreMap[st] = r.noMore;
       const merged = appendDeduped(this.searchResults[st], r.items);
       // 同上：尾部裁到列数整数倍（用户要求 m11950-3）
-      const cut = trimToGridRows(merged.items, this.L.num.cols);
+      const cut = trimToGridRows(merged.items, GRID_COLS);
       this.searchResults[st] = cut.items;
+      /* 整页都被相关性守卫裁光（B 站拿相关推荐凑数）→ 别让用户继续点「加载更多」
+       * 重复请求同样不相关的结果。 */
+      if (merged.added === 0) this.searchNoMoreMap[st] = true;
       this.statusText = merged.added === 0 ? '没有更多了' : '';
       logWarn('[bili] search(' + st + ') page ' + r.page + ' +' + merged.added + ' total=' + cut.items.length +
         (cut.trimmed ? ' trim=' + cut.trimmed : ''));
+    },
+
+    /* ---------- 离线缓存（下载页 / 播放页菜单） ---------- */
+    findDownload(bvid, cid) {
+      const c = Number(cid) || 0;
+      for (let i = 0; i < this.downloads.length; i++) {
+        const it = this.downloads[i];
+        if (it.bvid === bvid && (c <= 0 || it.cid === c)) return it;
+      }
+      return null;
+    },
+    dlMeta(it) {
+      const parts = [];
+      if (it.up) parts.push(it.up);
+      const sz = formatBytes(it.sizeBytes);
+      if (sz) parts.push(sz);
+      const d = formatDuration(it.durationSec);
+      if (d) parts.push(d);
+      return parts.join(' · ');
+    },
+    // 进「下载」页时校验文件是否还在（外部删文件/换机不残留死条目）
+    async refreshDownloads() {
+      if (!this.downloads.length) return;
+      const keep = [];
+      for (let i = 0; i < this.downloads.length; i++) {
+        const it = this.downloads[i];
+        const n = await fileSize(it.filePath);
+        if (n > 0) {
+          if (!it.sizeBytes) it.sizeBytes = n;
+          keep.push(it);
+        } else {
+          logWarn('[bili] dl missing ' + it.bvid + '_' + it.cid + ' size=' + n + ' path=' + it.filePath);
+        }
+      }
+      if (keep.length !== this.downloads.length) {
+        this.downloads = keep;
+        saveDownloads({ version: 1, items: keep });
+      }
+    },
+    // 下载页点卡片 → 直接播本地文件（preResolved.local=true，不再取流）
+    async onPlayDownload(it) {
+      if (!it || !it.filePath) return;
+      const n = await fileSize(it.filePath);
+      if (!(n > 0)) {
+        this.statusText = '缓存文件已丢失，已从列表移除';
+        this.downloads = removeDownloadEntry(this.downloads, it.bvid, it.cid);
+        saveDownloads({ version: 1, items: this.downloads });
+        return;
+      }
+      const sec = Number(it.durationSec) || 0;
+      const pre = {
+        ok: true,
+        url: it.filePath,
+        audioUrl: '',
+        qn: 0,
+        cid: it.cid,
+        aid: 0,
+        durationMs: sec * 1000,
+        title: it.title,
+        up: it.up,
+        desc: '离线缓存 · ' + DL_DIR,
+        width: it.width || 640,
+        height: it.height || 360,
+        host: 'local',
+        local: true
+      };
+      this.stopTitleScroll();
+      await this.onPlayItem(
+        { kind: 'video', bvid: it.bvid, cid: it.cid, title: it.title, up: it.up, cover: it.cover, durationSec: sec },
+        pre
+      );
+    },
+    /* 播放页菜单「缓存」行：在线→下载；已缓存/本地→删除；直播→拒绝。
+     * 下载期间菜单保持打开（进度就在这里看），不阻塞轮询/播放。 */
+    async onDownloadCurrent() {
+      const s = this.play.session;
+      if (!s) return;
+      if (s.live) {
+        this.play.note = '直播不支持缓存';
+        return;
+      }
+      if (this.dl.busy) {
+        this.play.note = '已有缓存任务进行中（' + this.dlPercent + '%）';
+        return;
+      }
+      const rec = this.findDownload(s.bvid, s.cid);
+      if (s.local || rec) {
+        await this.deleteDownload(rec || { bvid: s.bvid, cid: s.cid, filePath: dlFilePath(s.bvid, s.cid) });
+        return;
+      }
+      this.dl = { busy: true, bvid: s.bvid, cid: s.cid, bytes: 0, total: 0, done: false, note: '解析中' };
+      this.play.note = '解析缓存地址…';
+      logWarn('[bili] dl resolve ' + s.bvid);
+      const dir = await ensureDlDir();
+      if (!dir.ok) {
+        this.dl = idleDl();
+        this.play.note = '缓存失败：' + dir.message;
+        logWarn('[bili] dl dir fail: ' + dir.message);
+        return;
+      }
+      const r = await resolveDownloadStream(this.makeCtx(this.gen), { bvid: s.bvid, title: s.title, up: s.up });
+      if (!r.ok) {
+        this.dl = idleDl();
+        this.play.note = '缓存失败：' + (r.message || '取流失败');
+        logWarn('[bili] dl resolve fail stage=' + r.stage + ': ' + r.message);
+        return;
+      }
+      const filePath = dlFilePath(s.bvid, r.cid);
+      this.dl = { busy: true, bvid: s.bvid, cid: r.cid, bytes: 0, total: r.sizeBytes || 0, done: false, note: '下载中' };
+      this.play.note = '缓存中…';
+      const dl = await downloadToFile({
+        url: r.url,
+        headers: { 'User-Agent': DEFAULT_UA, Referer: REFERER },
+        filePath: filePath,
+        onProgress: (b) => {
+          if (this.dl.bvid === s.bvid) this.dl.bytes = b;
+        }
+      });
+      let size = Number(dl.bytes) || 0;
+      if (!(size > 0)) size = await fileSize(filePath);
+      if (!dl.ok || !(size > 0)) {
+        this.dl = idleDl();
+        this.play.note = '缓存失败：' + (dl.message || '文件为空');
+        logWarn('[bili] dl fail ' + s.bvid + ': ' + (dl.message || 'empty'));
+        return;
+      }
+      const entry = {
+        bvid: s.bvid,
+        cid: r.cid,
+        title: s.title || r.title,
+        up: s.up || r.up,
+        cover: s.cover || '',
+        durationSec: Math.floor((r.durationMs || 0) / 1000),
+        sizeBytes: size,
+        width: r.width,
+        height: r.height,
+        filePath: filePath,
+        at: Date.now()
+      };
+      this.downloads = upsertDownload(this.downloads, entry);
+      saveDownloads({ version: 1, items: this.downloads });
+      logWarn('[bili] dl save n=' + this.downloads.length + ' path=' + filePath);
+      this.dl = { busy: false, bvid: s.bvid, cid: r.cid, bytes: size, total: size, done: true, note: '' };
+      this.play.note = '已缓存 ' + formatBytes(size);
+      logWarn('[bili] dl done ' + s.bvid + ' cid=' + r.cid + ' ' + size + 'B');
+    },
+    async deleteDownload(rec) {
+      const path = rec.filePath || dlFilePath(rec.bvid, rec.cid);
+      await removeFile(path);
+      this.downloads = removeDownloadEntry(this.downloads, rec.bvid, rec.cid);
+      saveDownloads({ version: 1, items: this.downloads });
+      this.dl = idleDl();
+      logWarn('[bili] dl delete ' + rec.bvid + '_' + rec.cid);
+      if (this.play.session && this.play.session.local) {
+        await this.onBack();
+        this.statusText = '已删除缓存';
+      } else {
+        this.play.note = '已删除缓存';
+      }
     },
 
     /* ---------- 搜索三分栏切换 / 图文 / 直播 ---------- */
@@ -2520,79 +2440,308 @@ export default {
       this.commentsOpen = false;
       this.mode = 'browse';
       this.tab = 'search';
+      this.restoreListScroll('search');
+    },
+
+    /* ---------- 列表滚动位置（用户要求：返回时保留滚动到哪） ----------
+     * scroll 事件对象（Falcon）：{ contentOffset:{y}, contentSize:{height} }，y 为负值。
+     * 只存比例 frac，不依赖原生滚动单位；返回时按 frac 近似选中同一位置的卡片，
+     * 再用 $dom.scrollToElement(ref, {offset:0, animated:false}) 滚过去。
+     * 无法拿到事件时（例如 runtime 不派发 scroll）静默降级为回到顶部。 */
+    onListScroll(key, e) {
+      if (!key || !e) return;
+      const co = e.contentOffset || {};
+      const cs = e.contentSize || {};
+      const y = Math.abs(Number(co.y) || 0);
+      const h = Number(cs.height) || 0;
+      // 每个列表只打一行：确认 runtime 真的派发 scroll + contentOffset/contentSize 形态
+      this._scrollSeen = this._scrollSeen || {};
+      if (!this._scrollSeen[key]) {
+        this._scrollSeen[key] = 1;
+        logWarn('[bili] scroll ' + key + ' y=' + Math.round(y) + ' h=' + Math.round(h));
+      }
+      this.scrollMemo[key] = h > 0 ? { frac: Math.min(1, y / h), y: y, h: h } : { frac: 0, y: y, h: 0 };
+    },
+    scrollListFor(key) {
+      if (key === 'search') return this.searchItems;
+      if (key === 'downloads') return this.downloads;
+      if (key === 'history') return this.history;
+      if (key === 'up') return this.up.items;
+      return this.currentItems; // rcmd / hot
+    },
+    // 回到列表顶部（新搜索/换关键词时用；否则 scroller 会停在上一批结果的滚动位置）
+    scrollToTop(key) {
+      this.scrollMemo[key] = { frac: 0, y: 0, h: 0 };
+      setTimeout(() => {
+        try {
+          const r = this.$refs ? this.$refs['scr-' + key + '-top'] : null;
+          const el = Array.isArray(r) ? r[0] : r;
+          if (!el) return;
+          const page = this.$page || (typeof $falcon !== 'undefined' && $falcon.getPage ? $falcon.getPage(this) : null);
+          if (page && page.$dom && page.$dom.scrollToElement) {
+            page.$dom.scrollToElement(el, { offset: 0, animated: false });
+          }
+        } catch (e) { /* 静默 */ }
+      }, 80);
+    },
+    restoreListScroll(key) {
+      const m = this.scrollMemo[key];
+      if (!m || !(m.frac > 0.01)) return;
+      const list = this.scrollListFor(key);
+      if (!list || !list.length) return;
+      const idx = Math.min(list.length - 1, Math.max(0, Math.floor(m.frac * list.length)));
+      const refName = 'scr-' + key + '-' + idx;
+      // 等列表重新挂载/布局完成（Falcon 约 1~2 帧）
+      setTimeout(() => {
+        try {
+          const r = this.$refs ? this.$refs[refName] : null;
+          const el = Array.isArray(r) ? r[0] : r;
+          if (!el) return;
+          const page = this.$page || (typeof $falcon !== 'undefined' && $falcon.getPage ? $falcon.getPage(this) : null);
+          if (page && page.$dom && page.$dom.scrollToElement) {
+            page.$dom.scrollToElement(el, { offset: 0, animated: false });
+            logWarn('[bili] scroll restore ' + key + ' idx=' + idx + ' frac=' + m.frac.toFixed(2));
+          }
+        } catch (e) {
+          logWarn('[bili] scroll restore fail ' + key + ': ' + ((e && e.message) || e));
+        }
+      }, 150);
+    },
+
+    /* ---------- 标题滚动 ---------- */
+    startTitleScroll() {
+      this.stopTitleScroll();
+      const s = this.infoTitle || '';
+      if (s.length <= 16) return;
+      /* 用全局 setInterval（Vue 组件上没有 this.setInterval 方法，
+       * 直接调会报 "not a function"），句柄记进 _intervals 由 release 清理。 */
+      this._titleTimer = setInterval(() => {
+        this.titleShift = (this.titleShift || 0) + 1;
+      }, 400);
+      this._intervals.add(this._titleTimer);
+    },
+    stopTitleScroll() {
+      if (this._titleTimer) {
+        clearInterval(this._titleTimer);
+        this._intervals.delete(this._titleTimer);
+        this._titleTimer = 0;
+      }
+      this.titleShift = 0;
+    },
+
+    /* ---------- 详情 → 播放 ----------
+     * 用户手绘稿：点首页卡片先到详情页（左 up主/标题/简介，中 16:9 封面，右评论），
+     * 点击封面才启动播放页。resolveDetail 只取流/元信息，不拉起 native 进程；
+     * rs 存进 detail，点封面时直接复用，避免二次取流（弱网下能省 1~2s）。 */
+    async onOpenDetail(item) {
+      if (!item) return;
+      // 直播没有封面/评论语义，直接进原播放页
+      if (item.kind === 'live') return this.onPlayItem(item);
+      this.resetExtras();
+      this.ep = { tab: 'reply', pages: [], season: null, pageIndex: -1, note: '', switching: false };
+      const myGen = ++this.gen;
+      this.stopPoll();
+      this.stopTitleScroll();
+      this.playerMenuOpen = false;
+      this.chromeHidden = false;
+      // 记录来源（UP 主页来的详情，播放返回时才能回 UP 而不是搜索页）
+      this.detailFrom = this.mode === 'up' ? 'up' : 'browse';
+      this.playFrom = '';
+      this.mode = 'detail';
+      this.replies = [];
+      this.replyStatus = '';
+      this.replyLoading = false;
+      this.replyNoMore = false;
+      this.replyPage = 1;
+      this.replyCount = 0;
+      this.commentsOpen = false;
+      this.replyCtx = { oid: 0, type: 1 };
+      this.replyOpen = { root: 0, items: [], shown: 0, page: 1, noMore: false, loading: false };
+      this.favOverlay = false;
+      this.act = { like: 0, coin: 0, fav: false, status: '', busy: false, likeCount: 0, coinCount: 0, favCount: 0 };
+      this.favFolders = [];
+      this.favStatus = '';
+      this.seekDragMs = null;
+      this.cinText = '';
+      this.detail = { item: item, rs: null };
+      this.play = {
+        state: 'loading',
+        session: {
+          kind: 'video',
+          live: false,
+          bvid: item.bvid,
+          cid: item.cid || 0,
+          aid: item.aid || 0,
+          title: item.title || '',
+          up: item.up || '',
+          mid: Number(item.mid) || 0,
+          desc: item.desc || '',
+          cover: item.cover || '',
+          durationMs: (item.durationSec || 0) * 1000,
+          qn: 0
+        },
+        positionMs: 0,
+        frames: 0,
+        note: ''
+      };
+      const ctx = this.makeCtx(myGen);
+      await closeSession(ctx); // 清掉上一条播放会话（详情页没有 native 进程）
+      if (this.gen !== myGen) return;
+      const r = await resolveDetail(ctx, item);
+      if (this.gen !== myGen) return;
+      if (!r.ok) {
+        this.play.state = 'idle';
+        this.play.note = '详情加载失败：' + (r.message || '未知错误');
+        this.startTitleScroll();
+        return;
+      }
+      this.detail = { item: item, rs: r.rs };
+      this.play.session = r.session;
+      this.play.state = 'idle';
+      this.play.note = '';
+      /* 【分P / 合集】详情阶段就把结构挂上右栏页签（不额外请求）。 */
+      this.ep.pages = Array.isArray(r.session.pages) ? r.session.pages : [];
+      this.ep.season = r.session.season || null;
+      this.ep.pageIndex = pageIndexOf(this.ep.pages, r.session.cid);
+      this.replyCtx = { oid: r.session.aid || 0, type: 1 };
+      this.loadReplies(r.session.aid || 0, 1);
+      this.refreshAct();
+      logWarn('[bili] detail open ' + r.session.bvid + ' aid=' + (r.session.aid || 0));
+    },
+    /* ---------- UP 主主页（详情页点蓝色 UP 名进入） ---------- */
+    async onOpenUp() {
+      let mid = this.infoMid;
+      /* 历史旧条目没有 mid（本版之前写的），点 UP 名时信息卡可能还没解析完。
+       * 这里用 bvid 走一次 view 兜底取 owner.mid，保证「历史 → 详情 → UP 主页」能进。 */
+      if (!(mid > 0) && this.detail.item && this.detail.item.bvid) {
+        const startGen = this.gen;
+        logWarn('[bili] up mid missing → fetchView ' + this.detail.item.bvid);
+        const v = await this.client.fetchView(this.detail.item.bvid);
+        if (this.gen !== startGen) return;
+        if (v && v.ok) {
+          mid = Number(v.mid) || 0;
+          if (!this.detail.item.mid) this.detail.item.mid = mid;
+          if (!this.detail.item.up && v.up) this.detail.item.up = v.up;
+          if (this.play.session) {
+            if (!this.play.session.mid) this.play.session.mid = mid;
+            if (!this.play.session.up && v.up) this.play.session.up = v.up;
+          }
+          logWarn('[bili] up mid resolved=' + mid);
+        }
+      }
+      if (!(mid > 0)) {
+        this.play.note = '缺少 UP 信息，无法进入主页';
+        return;
+      }
+      const myGen = ++this.gen;
+      this.stopTitleScroll();
+      this.playerMenuOpen = false;
+      this.mode = 'up';
+      this.up = {
+        mid: mid,
+        name: this.infoUp || '',
+        card: null,
+        items: [],
+        page: 1,
+        noMore: false,
+        loading: true,
+        status: ''
+      };
+      logWarn('[bili] up open mid=' + mid);
+      await this.loadUp(myGen, 1);
+    },
+    // 返回详情页：detail/play.session 都还在内存里，不需要重新解析
+    onBackUp() {
+      ++this.gen;
+      this.mode = 'detail';
+      logWarn('[bili] up back to detail');
+    },
+    async loadUp(myGen, page) {
+      const u = this.up;
+      u.loading = true;
+      u.status = '';
+      const mx = await ensureMixinResult(this.makeCtx(myGen));
+      if (this.gen !== myGen || this.mode !== 'up') return;
+      if (!mx.ok) {
+        u.loading = false;
+        u.status = 'UP 主页解析失败：' + (mx.message || mx.stage);
+        logWarn('[bili] up wbi fail stage=' + mx.stage + ' ' + (mx.message || ''));
+        return;
+      }
+      // 名片只在第一页拉一次；失败不阻塞投稿列表（风控下 card 仍可能成功）
+      if (page === 1 && !u.card) {
+        const c = await fetchUpCard(this.client, u.mid);
+        if (this.gen !== myGen || this.mode !== 'up') return;
+        if (c.ok) {
+          u.card = c.card;
+          if (c.card.name) u.name = c.card.name;
+        } else {
+          logWarn('[bili] up card fail stage=' + c.stage + ' ' + (c.message || ''));
+        }
+      }
+      const name = (u.card && u.card.name) || u.name;
+      const r = await fetchUpVideos(this.client, mx.key, u.mid, page, name);
+      if (this.gen !== myGen || this.mode !== 'up') return;
+      u.loading = false;
+      if (!r.ok) {
+        u.status = '投稿列表获取失败：' + (r.message || r.stage);
+        logWarn('[bili] up videos fail stage=' + r.stage + ' code=' + (r.code != null ? r.code : '-') + ' ' + (r.message || ''));
+        return;
+      }
+      const merged = page === 1 ? r.items : appendDeduped(u.items, r.items).items;
+      u.items = merged;
+      u.page = page;
+      u.noMore = !!r.noMore || r.items.length === 0;
+      if (!u.name && u.card && u.card.name) u.name = u.card.name;
+      logWarn('[bili] up page ' + page + ' +' + r.items.length + ' total=' + u.items.length +
+        ' via=' + (r.via || '-') + ' noMore=' + u.noMore);
+    },
+    async onRefreshUp() {
+      if (!this.up.mid) return;
+      const myGen = ++this.gen;
+      this.up.items = [];
+      this.up.page = 1;
+      this.up.noMore = false;
+      this.up.status = '';
+      await this.loadUp(myGen, 1);
+    },
+    async loadMoreUp() {
+      const u = this.up;
+      if (u.loading || u.noMore) return;
+      await this.loadUp(this.gen, u.page + 1);
+    },
+    upVmeta(it) {
+      const parts = [];
+      const c = formatCount(it.view);
+      if (c) parts.push(c + '播放');
+      const d = formatDuration(it.durationSec);
+      if (d) parts.push(d);
+      return parts.join(' · ');
+    },
+    async onStartPlayFromDetail() {
+      const d = this.detail || {};
+      if (!d.item) return;
+      this.stopTitleScroll();
+      const pre = d.rs;
+      // 直接复用详情阶段解析出的流；失败时 openVideo 会自己重新 resolve
+      await this.onPlayItem(d.item, pre);
     },
 
     /* ---------- 播放 ---------- */
-    /* 模板里不能直接调模块函数（falcon 只看 data/computed/methods），
-     * 时长格式化包一层方法。 */
-    epDur(sec) {
-      return fmtDur(sec);
-    },
-    /* 【分P / 合集】右栏页签切换。失效的 tab 点了不响应（按钮本来也不渲染，
-     * 这里再挡一次——模板 v-if 在某些 falcon 版本上对动态条件不敏感）。 */
-    onEpTab(tab) {
-      if (tab === 'pages' && !this.epHasPages) return;
-      if (tab === 'season' && !this.epHasSeason) return;
-      if (this.ep.tab === tab) return;
-      this.ep.tab = tab;
-      this.ep.note = '';
-    },
-    /* 切一段 / 切一集。
-     *
-     * 为什么不写"轻量 seek"：换 cid 等于换一条流（时长、宽高、音轨都可能不同），
-     * 必须重新 openVideo —— 它会把 hole 矩形、render-rectangle、字幕轨道、互动
-     * graph_version、评论 oid 全部按新稿件重算。复用 onPlayItem 是唯一不会漏项的路。
-     *
-     * kind: 'page'（同一 bvid 的另一 P）| 'season'（合集里的另一集）
-     * row : pages[] 或 season.sections[].items[] 的一项
-     */
-    async switchEp(kind, row) {
-      if (this.ep.switching || !row) return;
-      const s = this.play.session || {};
-      if (kind === 'page' && row.cid === s.cid) return;
-      if (kind === 'season' && row.bvid === s.bvid) return;
-      const tab = this.ep.tab;
-      this.ep.switching = true;
-      this.ep.note = '';
-      try {
-        await this.onPlayItem({
-          bvid: row.bvid || s.bvid,
-          cid: row.cid || 0,
-          useCid: true,
-          /* title 留空：让 openVideo 用 view 里的**稿件标题**。
-           * 分P 的 part 由 session.part 单独带回来，标题不会变成 "P2 第二段"。 */
-          title: '',
-          up: s.up || '',
-          desc: s.desc || '',
-          cover: row.cover || s.cover || '',
-          durationSec: row.durationSec || 0,
-          /* 别清空右栏列表：切换失败时用户还要在原列表里再点一次 */
-          keepEp: true
-        });
-        this.ep.tab = tab;
-      } catch (e) {
-        this.ep.note = '切换失败：' + ((e && e.message) || e);
-      } finally {
-        this.ep.switching = false;
-      }
-    },
-    async onPlayItem(item) {
+    async onPlayItem(item, pre) {
       if (!item) return;
-      /* 【分P / 合集】换稿件（不是切P/切集）时清空旧结构：
-       * 否则上一个视频的分P列表会在新视频取流期间继续挂在右栏上，点一下
-       * 就会用旧的 cid 去请求新 bvid —— 必然 404。
-       * keepEp=true 是 switchEp 传的：切换期间列表必须留着。 */
+      /* 【分P / 合集】换稿件（不是切 P）时清空旧结构；切 P 传 keepEp 保留列表。 */
       if (!item.keepEp) {
-        this.ep.tab = 'reply';
-        this.ep.pages = [];
-        this.ep.season = null;
-        this.ep.pageIndex = -1;
-        this.ep.note = '';
+        this.ep = { tab: 'reply', pages: [], season: null, pageIndex: -1, note: '', switching: false };
       }
-      const myGen = ++this.gen;
-      this.stopPoll();
       /* 换片即清空上一条的字幕与互动会话（cc.on/lan 是用户设置，保留）。 */
       this.resetExtras();
+      const myGen = ++this.gen;
+      this.stopPoll();
+      this.stopTitleScroll();
+      this.playerMenuOpen = false;
+      this.chromeHidden = false; // 每次进播放页都先显示顶/底栏（隐藏是用户主动切的）
+      this.playFrom = this.mode; // 'detail' | 'browse' | 'up'（live 卡直接起播）
       this.mode = 'play';
       // 换视频即清空上一条的评论上下文
       this.replies = [];
@@ -2629,14 +2778,10 @@ export default {
         frames: 0,
         note: ''
       };
-      /* 新片默认展开控件；取流期间整块视频区都是 UI 像素（holeVisible=false），
-       * 正好用来播 B 站那套加载动画。 */
-      this.ui.chrome = true;
-      this.startLoadingAnim();
       const ctx = this.makeCtx(myGen);
       await closeSession(ctx); // 幂等：防止 PLAYER_ALREADY_RUNNING
       if (this.gen !== myGen) return;
-      const r = await openVideo(ctx, item);
+      const r = await openVideo(ctx, item, pre);
       if (this.gen !== myGen) {
         // 被更新的操作顶掉：回收已拉起的会话，不留孤儿进程
         if (r && r.ok) await closeSession(this.makeCtx(this.gen));
@@ -2646,20 +2791,12 @@ export default {
         if (r.stage === 'cancel') return;
         this.play.state = 'error';
         this.play.note = describePlayError(r);
-        this.stopLoadingAnim();
         logWarn('[bili] open fail stage=' + r.stage + ': ' + r.message);
         return;
       }
       this.play.session = r.session;
-      /* 【分P / 合集】起播成功才更新结构：失败时保留旧列表，
-       * 用户可以直接再点一次（不至于"点错一次整栏就空了"）。 */
-      this.ep.pages = Array.isArray(r.session.pages) ? r.session.pages : [];
-      this.ep.season = r.session.season || null;
-      this.ep.pageIndex = pageIndexOf(this.ep.pages, r.session.cid);
-      this.ep.note = '';
       this.play.state = 'playing';
       this.play.note = '';
-      this.stopLoadingAnim();
       /* 起播成功 → 立刻开始屏幕保活（缺陷 C）。
        * 必须在这里而不是"第一帧之后"：起播本身就可能要几秒，且暂停态同样要保活
        * （用户按暂停思考时屏幕变黑同样会触发 600s 背光断电）。 */
@@ -2672,6 +2809,7 @@ export default {
           cid: r.session.cid,
           title: r.session.title,
           up: r.session.up,
+          mid: Number(r.session.mid) || 0,
           cover: r.session.cover,
           durationSec: Math.floor((r.session.durationMs || 0) / 1000),
           at: Date.now()
@@ -2682,30 +2820,114 @@ export default {
       this.replyCtx = { oid: r.session.aid || 0, type: 1 };
       this.loadReplies(r.session.aid || 0, 1); // 评论首屏（不阻塞播放；无 aid 内部直接返回）
       this.refreshAct();  // 点赞/投币/收藏当前态 + 计数徽标
+      this.startTitleScroll();
       this.startPoll(myGen);
-      /* 不阻塞播放：x/player/v2 一次请求同时拿 CC 字幕轨道与互动视频 graph_version，
-       * 失败只影响附加功能，画面与声音不受牵连。 */
-      this.initExtras(myGen, item);
+      /* 【分P / 合集】起播成功才更新结构：失败时保留旧列表，用户可以直接再点一次。 */
+      this.ep.pages = Array.isArray(r.session.pages) ? r.session.pages : [];
+      this.ep.season = r.session.season || null;
+      this.ep.pageIndex = pageIndexOf(this.ep.pages, r.session.cid);
+      this.ep.note = '';
+      /* 附加功能不阻塞播放；失败只影响字幕/互动。 */
+      this.initExtras(myGen);
+      this.scheduleAutoHide();
+      if (this._probeMenu) {
+        // 14s 后才开菜单：首帧实测常在起播后 10~13s 才落屏，太早开 pauseRender
+        // 会把「无帧可暂停」的状态冻住，菜单背后的视频带只能是纯黑/提示字。
+        setTimeout(() => {
+          logWarn('[bili] menu probe open');
+          this.togglePlayerMenu();
+        }, 14000);
+        // 菜单打开 8s 后自动关闭：验证 resumeRender 恢复出画（pauseRender 的对称路径）。
+        setTimeout(() => {
+          logWarn('[bili] menu probe close');
+          this.togglePlayerMenu();
+        }, 22000);
+      }
+      if (this._probeChrome) {
+        /* 隐藏状态栏探针：等首帧落屏（+26s）后切全屏，8s 后再切回。
+         * 判据：日志出现 [bili] chrome hidden/shown + chrome rect … → ok，
+         * 截图看视频是否铺满 640x260（16:9 信箱 462x260 居中）。 */
+        setTimeout(() => {
+          logWarn('[bili] chrome probe hide');
+          this.toggleChrome();
+        }, 26000);
+        setTimeout(() => {
+          logWarn('[bili] chrome probe show');
+          this.toggleChrome();
+        }, 34000);
+      }
+      if (this._probeStyle) {
+        /* 样式探针：+12s 打开菜单、+14s 切「清晰（无栏解码）」、+22s 关菜单。
+         * 切样式要按当前位置重开解码（约 2~6s），关菜单必须等重启完成后再做。
+         * 日志判据：`playStyle -> clear` + `style restart ok ... decode=390x693`。 */
+        setTimeout(() => {
+          logWarn('[bili] style probe menu');
+          this.togglePlayerMenu();
+        }, 12000);
+        setTimeout(() => {
+          logWarn('[bili] style probe switch');
+          this.onCyclePlayStyle();
+        }, 14000);
+        setTimeout(() => {
+          logWarn('[bili] style probe close');
+          this.togglePlayerMenu();
+        }, 22000);
+      }
+      if (this._probeZoom) {
+        /* 放大探针：+10s 先打开顶底栏，+12s 切 2x、+18s 回 1x；
+         * 专门验证「开栏状态下也能放大」与 native setRect+zoom 共存。 */
+        setTimeout(() => {
+          logWarn('[bili] zoom probe show chrome');
+          this.toggleChrome();
+        }, 10000);
+        setTimeout(() => {
+          logWarn('[bili] zoom probe 2x');
+          this.applyZoom(2);
+        }, 12000);
+        setTimeout(() => {
+          logWarn('[bili] zoom probe 1x');
+          this.applyZoom(1);
+        }, 18000);
+      }
+      if (this._probeDownload) {
+        /* 缓存探针：+15s 打开播放菜单、+17s 点「缓存」，之后菜单里能看到进度；
+         * 判据：日志 [bili] dl resolve / dl task id / dl done + 文件存在。 */
+        setTimeout(() => {
+          logWarn('[bili] dl probe menu');
+          this.togglePlayerMenu();
+        }, 15000);
+        setTimeout(() => {
+          logWarn('[bili] dl probe start');
+          this.onDownloadCurrent();
+        }, 17000);
+      }
+      /* 起播期间用户就点了视频区（切状态栏）：open 用的是那一刻的 videoArea，
+       * 这里按最新状态再对齐一次，避免「加载中切换」落在旧矩形上
+       * （恢复栏的方向同样要对齐，不能只在 chromeHidden 时补）。 */
+      await this.applyVideoChromeRect();
+      this.startPinch();
       logWarn('[bili] play start ' + r.session.bvid + ' qn=' + r.session.qn + ' dur=' + r.session.durationMs + 'ms');
     },
-    /* ==================== CC 字幕 / 互动视频 ====================
+    /* ==================== CC 字幕 / 分P / 合集 / 互动视频（3.5.9 同步） ====================
      *
-     * 上游链路（bilibili-API-collect）：
-     *   x/player/v2 (bvid,cid)
-     *     ├─ data.subtitle.subtitles[]  → subtitle_url → {body:[{from,to,content}]}
-     *     └─ data.interaction.graph_version → x/stein/edgeinfo_v2 (edge_id)
-     *          → data.edges.questions[].choices[]（每个片段的选项）
+     * 上游链路：
+     *   x/web-interface/view  → pages[] / ugc_season（分P、合集，零额外请求）
+     *   x/player/v2          → subtitle.subtitles[] → subtitle_url → {body:[{from,to,content}]}
+     *                        → interaction.graph_version → x/stein/edgeinfo_v2
      *
-     * 关键取舍：
-     *   - 视频是 KMS overlay 平面，UI 文字盖不上去 → 字幕带与控制条占视频矩形
-     *     之外的 UI 区域，native render-rectangle 与挖洞区同源收缩（见 bandPx）。
-     *   - 互动片段换 cid **不回列表、不重建页面**，只重建播放会话并保留
-     *     隐藏变量 / 历史，这就是「连播」。
-     *   - 附加功能全部异步、全部按 gen 校验，失败不拖累起播。
-     * ============================================================= */
+     * S6 Pro 的约束：
+     *   · 视频由 native 直接写 /dev/fb0，Falcon 文字**盖不到画面上面** → 字幕必须占
+     *     一条真实 UI 带（30px，见 screen.js playAreaFor），视频矩形同步收缩；
+     *   · 互动题面用「整页替换 + pauseRender」而不是浮层（falcon 无可靠 z-index）；
+     *   · 弹幕整体移除：本分支不引入 danmaku.js，也不调用任何 dm_* native 接口。
+     * ============================================================================ */
     resetExtras() {
+      this.stopPinch();
+      this.zoomValue = 1;
+      this.pinch = { active: false, baseD: 0, baseZoom: 1, miss: 0 };
       this.clearAutoChain();
       this.clearChoiceCountdown();
+      this.clearAutoHide();
       this._ccAnchor = null;
       this._tickPos = -1;
       this._tickFrames = -1;
@@ -2715,11 +2937,6 @@ export default {
       this.cc.status = '';
       this.cc.loading = false;
       this.cc.posMs = 0;
-      this.cc.cid = 0;
-      this.cc.req = 0;
-      /* 弹幕：模式持久化、数据不持久化 —— 换一集还该按原模式显示，
-       * 但上一个稿子的弹幕必须清干净（否则会看到别人视频的弹幕）。 */
-      this.resetDm();
       this.interact = {
         active: false, visible: false, busy: false,
         bvid: '', graphVersion: 0, edgeId: 0, cid: 0,
@@ -2742,187 +2959,66 @@ export default {
       this.cc.on = s.on;
       this.cc.lan = s.lan;
       this.cc.keepOnSegment = s.keepOnSegment;
-      /* 用户**显式**选过没有？null = 从没动过这个开关。
-       * 没动过 + 该稿有字幕轨道 → 起播后自动打开（见 initExtras）：
-       * 真机反馈「字幕无法显示」，其中一半原因是它默认关着、开关又小，
-       * 用户根本不知道该去哪儿点。显式关过一次就永远尊重（存盘里有 on:false）。 */
       this._ccSaved = raw && typeof raw === 'object' && 'on' in raw ? (raw.on === true) : null;
     },
-    async onCcToggle() {
-      this.cc.on = !this.cc.on;
-      this._ccSaved = this.cc.on; // 从这一刻起"用户选过了"，不再自动打开
+    /* 播放页菜单「字幕」行：关 → 开（自动/当前轨）→ 逐轨轮转 → 关。
+     * 笔端没有下拉，轮转是唯一不越屏的交互。 */
+    async onCcMenuTap() {
+      if (this.isLivePlay) return;
+      if (!this.cc.on) {
+        this.cc.on = true;
+      } else if (this.cc.tracks.length > 1) {
+        const idx = this.cc.tracks.findIndex((t) => t.lan === this.cc.lan);
+        if (idx < 0) {
+          this.cc.lan = this.cc.tracks[0].lan;
+        } else if (idx === this.cc.tracks.length - 1) {
+          this.cc.on = false;
+          this.cc.lan = '';
+        } else {
+          this.cc.lan = this.cc.tracks[idx + 1].lan;
+        }
+      } else {
+        this.cc.on = false;
+      }
+      this._ccSaved = this.cc.on;
       this.saveCcSettings();
+      await this.applyCcChange();
+    },
+    /* 「我的」页开关：只切 on/off，不动语言。 */
+    async onCcToggle() {
+      if (this.isLivePlay) return;
+      this.cc.on = !this.cc.on;
+      this._ccSaved = this.cc.on;
+      this.saveCcSettings();
+      await this.applyCcChange();
+    },
+    /* 「我的」页语言行：轮转轨道（不改开关）。 */
+    async onCcLanTap() {
+      if (!this.cc.tracks.length) return;
+      const idx = this.cc.tracks.findIndex((t) => t.lan === this.cc.lan);
+      this.cc.lan = this.cc.tracks[(idx + 1) % this.cc.tracks.length].lan;
+      this.saveCcSettings();
+      if (this.mode === 'play' && !this.isLivePlay && this.cc.on) await this.reloadCc(this.gen);
+    },
+    async applyCcChange() {
       if (this.mode !== 'play' || this.isLivePlay) return;
       if (this.cc.on && !this.cc.cues.length) {
         await this.reloadCc(this.gen);
-        return; // reloadCc 内部已按需重算矩形
-      }
-      await this.applyVideoGeometry('cc');
-    },
-    /* ---------------- 弹幕（3.5.14） ---------------- */
-    saveDmSettings() {
-      setJson(DM_SETTINGS_KEY, { version: 2, mode: this.dm.mode, size: this.dm.size });
-    },
-    async loadDmSettings() {
-      const raw = await getJson(DM_SETTINGS_KEY, null);
-      const s = normalizeDmSettings(raw);
-      this.dm.mode = s.mode;
-      this.dm.size = s.size;
-    },
-    /*
-     * 字号取用户档位（小/中/大 → 16/20/24 屏幕逻辑像素），不再按视频区高度
-     * 自动算 —— 之前的 0.09*videoH 在 266 上正好 24，但 native 还要按平面
-     * 缓冲区宽度再放大一次，用户看到的是"大字"，而且没有地方能调。
-     * 现在档位是唯一来源，native 那个比例换算保持不变（它只是把逻辑像素
-     * 映射到缓冲区像素，不是风格选择）。
-     */
-    dmFontPx() {
-      return dmSizePx(this.dm.size);
-    },
-    dmModeIndex() {
-      const i = DM_MODES.indexOf(this.dm.mode);
-      return i < 0 ? 0 : i;
-    },
-    /* 把当前模式推给 native。mode=0（关闭）时 native 在渲染函数第一行
-     * 就 return，一个像素都不碰 —— 关弹幕是真零开销，不是画成透明。 */
-    async applyDmMode() {
-      const r = await player.dmMode(this.dmModeIndex(), this.dmFontPx());
-      if (r && r.ok === false && r.code !== 'PLAYER_UNSUPPORTED') {
-        logWarn('[dm] dmMode 失败 ' + (r.error || r.code));
-        this.dm.status = '弹幕渲染不可用';
-        this.dm.mode = 'off';
-        this.saveDmSettings();
-      }
-      return r;
-    },
-    /* 切换式开关：off → full → half → quarter → off。
-     * 「1/2」「1/4」指弹幕只在画面上方那一块出现，裁切在 native 里做，
-     * JS 只负责把模式号传下去。 */
-    async onDmToggle() {
-      this.dm.mode = nextDmMode(this.dm.mode);
-      this.saveDmSettings();
-      this.dm.status = DM_MODE_LABELS[this.dm.mode] || '';
-      /* 用户主动拨开关 = 明确的"再试一次"，把拉片失败计数清零 */
-      this.dm.failIdx = 0;
-      this.dm.failCount = 0;
-      logWarn('[dm] mode=' + this.dm.mode);
-      if (this.mode !== 'play' || this.isLivePlay) return;
-      await this.applyDmMode();
-      if (this.dm.mode !== 'off' && !this.dm.list.length) {
-        await this.loadDmSegment(this.gen, this.dm.segIdx || 1);
-      }
-    },
-    /* 字号轮转：小 → 中 → 大 → 小。「我的」页那一行用它。
-     * 只改字号、不碰数据与模式 —— native 侧 dm_set_mode 收到新字号会清字形
-     * 缓存重排，所以切换是立即生效的，不需要重新拉弹幕。 */
-    async onDmSizeToggle() {
-      this.dm.size = nextDmSize(this.dm.size);
-      this.saveDmSettings();
-      logWarn('[dm] size=' + this.dm.size + ' px=' + this.dmFontPx());
-      if (this.mode !== 'play' || this.isLivePlay || this.dm.mode === 'off') return;
-      await this.applyDmMode();
-    },
-    resetDm() {
-      this.dm.size = this.dm.size || DM_SIZE_DEFAULT;
-      this.dm.segIdx = 0;
-      this.dm.list = [];
-      this.dm.seen = null;
-      this.dm.status = '';
-      this.dm.loading = false;
-      this.dm.ready = false;
-      this.dm.failIdx = 0;
-      this.dm.failCount = 0;
-      if (this.dm.cache && typeof this.dm.cache.clear === 'function') this.dm.cache.clear();
-    },
-    async clearDmNative() {
-      try { await player.dmClear(); } catch (e) { /* 老播放器没有这个导出，忽略 */ }
-    },
-    /* 拉一个 6 分钟分片，**整片**喂给 native。
-     * 为什么整片喂而不是每帧喂可见的那几条：native 用 pos_ms 自己筛可见集合，
-     * JS 只在跨分片时过一次网，QuickJS 主线程不被弹幕拖累（v2.7.0 的教训是
-     * 每帧重算文字，占掉 ~20% 解码预算）。
-     * 去重键是 idStr，**不是 content** —— 同一句话被不同人刷是真实弹幕，
-     * 按内容去重会把它们吃掉。 */
-    async loadDmSegment(myGen, idx) {
-      const s = this.play.session;
-      if (!s || s.live || !s.aid || !s.cid) return;
-      if (this.dm.mode === 'off' || this.dm.loading) return;
-      /* 同一片连续失败两次就别再试了：tickDm 是 250ms 一拍，不设闸门
-       * 会把一个 412/风控的片子打成每秒 4 次请求。用户拨一次开关才会重置。 */
-      if (idx === this.dm.failIdx && this.dm.failCount >= 2) return;
-      this.dm.loading = true;
-      this.dm.status = '弹幕加载中…';
-      try {
-        if (!this.dm.cache) this.dm.cache = createSegCache(6);
-        let list = typeof this.dm.cache.get === 'function' ? this.dm.cache.get(idx) : null;
-        if (!list) {
-          const r = await fetchSegment(this.client, { aid: s.aid, cid: s.cid, index: idx });
-          if (this.gen !== myGen) return;
-          if (!r.ok) {
-            this.dm.failIdx = idx;
-            this.dm.failCount += 1;
-            this.dm.status = '弹幕获取失败（' + (r.message || r.stage || '') + '）';
-            logWarn('[dm] seg ' + idx + ' fail(' + this.dm.failCount + '): ' +
-              (r.stage || '') + ' ' + (r.message || ''));
-            return;
-          }
-          if (!this.dm.seen) this.dm.seen = Object.create(null);
-          list = dedupeByKey(r.list, this.dm.seen);
-          if (typeof this.dm.cache.put === 'function') this.dm.cache.put(idx, list);
-          logWarn('[dm] seg ' + idx + ' 新 ' + list.length + ' 条（原始 ' + r.count + '）');
-        }
-        if (this.gen !== myGen) return;
-        this.dm.segIdx = idx;
-        this.dm.failIdx = 0;
-        this.dm.failCount = 0;
-        this.dm.list = list || [];
-        const f = await player.dmFeed(buildFeedText(this.dm.list));
-        if (f && f.ok === false && f.code === 'PLAYER_UNSUPPORTED') {
-          this.dm.status = '当前播放器不支持弹幕';
-          return;
-        }
-        this.dm.ready = true;
-        this.dm.status = (DM_MODE_LABELS[this.dm.mode] || '') + ' · ' + this.dm.list.length + ' 条';
-      } catch (e) {
-        this.dm.failIdx = idx;
-        this.dm.failCount += 1;
-        this.dm.status = '弹幕异常';
-        logWarn('[dm] load 异常: ' + ((e && e.message) || e));
-      } finally {
-        this.dm.loading = false;
-      }
-    },
-    /* 250ms 字幕钟里顺带调一次。同分片内只是整数比较，开销可忽略；
-     * 只有跨 6 分钟边界（含 seek 跳片）才真的发网络请求。 */
-    tickDm(posMs) {
-      if (this.mode !== 'play' || this.isLivePlay || this.dm.mode === 'off') return;
-      const idx = segmentIndexAt(posMs);
-      if (idx !== this.dm.segIdx) {
-        this.clearDmNative();
-        this.loadDmSegment(this.gen, idx).then(() => {}, () => {});
-      }
-    },
-    async onCcLanTap() {
-      if (!this.cc.tracks.length) {
-        this.cc.status = this.hasLogin ? '该稿件暂无 CC 字幕轨道' : '无字幕轨道 · 登录后可看 AI 字幕';
         return;
       }
-      const i = this.cc.tracks.findIndex((t) => t.lan === this.cc.lan);
-      this.cc.lan = this.cc.tracks[(i + 1) % this.cc.tracks.length].lan;
-      this.saveCcSettings();
-      if (this.mode === 'play' && this.cc.on) await this.reloadCc(this.gen);
+      // 开关变化 → 字幕带出现/消失 → 视频矩形同步收缩/恢复
+      await this.applyVideoChromeRect();
     },
-    /* 播放中切换字幕开关/语言：重新拉轨道 + 字幕文件 */
+    /* 重新拉轨道 + 字幕文件（切换开关/语言、切段后都用它）。 */
     async reloadCc(myGen) {
       const s = this.play.session;
       if (!s || s.live) return;
       this.cc.loading = true;
       const m = await ensureMixinResult(this.makeCtx(myGen));
       if (this.gen !== myGen) return;
-      /* 3.5.16：player/v2 的字幕列表是灰度分桶的动态结果（实测同一 cid 连续 6 次
-       * 出现 0 条 / A / 0 条 / B / C / 0 条四种互不相同的 AI 产物），单次请求
-       * 既可能空、也可能只拿到「属于别的剪辑」的那版。所以这里取候选池。 */
       const info = await fetchPlayerV2Tracks(this.client, s.bvid, s.cid, {
+        tries: 3,
+        wantTracks: 2,
         mixinKey: m.ok ? m.key : '',
         nowSec: () => Math.floor(Date.now() / 1000)
       });
@@ -2931,63 +3027,37 @@ export default {
       if (!info.ok) {
         this.cc.status = '字幕信息获取失败';
         logWarn('[cc] player/v2 fail: ' + info.message);
+        await this.applyVideoChromeRect();
         return;
       }
-      this.cc.tracks = info.subtitles;
-      /* 用户手动关开/切语言时同样走重试流程 —— 一次没捞到不该让用户再点一次。 */
-      await this.pullCcUntilGood(myGen, info);
+      this.cc.tracks = info.subtitles || [];
+      await this.loadCcCues(myGen, this.cc.tracks);
     },
-    /* 3.5.16：候选池逐条试。
-     * 上游对同一 cid 会同时挂几条互不对应的 AI 字幕产物（灰度分桶），
-     * 只取首条时用户会看到「字幕和视频完全对不上」。判定不需要理解语义：
-     * 用 subtitleFit() 比对「最后一条 cue / 视频时长」与首句起点，
-     * 挑第一条对得上的；全都对不上时退回首条（不能让用户没字幕）。 */
+    /* 候选池逐条试：上游对同一 cid 会挂几条互不对应的 AI 字幕，按「末条结束时间
+     * / 视频时长」离 1.0 最近的那条取。并发下载，最多 3 条。 */
     async loadCcCues(myGen, tracks) {
       const cands = rankSubtitleTracks(tracks, this.cc.lan);
       if (!cands.length) {
         this.cc.cues = [];
-        this.cc.cid = 0;
-        this.cc.status = this.hasLogin ? '该稿件暂无 CC 字幕' : '无字幕 · 登录后可看 AI 字幕';
-        logWarn('[cc] 无轨道可用 tracks=' + ((tracks && tracks.length) || 0) +
-          ' login=' + (this.hasLogin ? 1 : 0));
-        await this.applyVideoGeometry('cc');
-        return false;
+        this.cc.status = this.hasLogin ? '该稿件暂无 CC 字幕' : '未登录 · B 站匿名接口不返回字幕地址';
+        logWarn('[cc] 无轨道可用 tracks=' + ((tracks && tracks.length) || 0) + ' login=' + (this.hasLogin ? 1 : 0));
+        await this.applyVideoChromeRect();
+        return;
       }
       const s0 = this.play.session;
       const durMs = s0 && s0.durationMs > 0 ? s0.durationMs : 0;
-      /* 本支视频的 cid：整条链都只认同一个，最后写进 cc.cid 作为归属凭证。 */
-      const myCid = (s0 && s0.cid) || 0;
-      /* 请求序号：同一 gen 内可能有两路并发（initExtras 自动拉 +
-       * 用户点字幕键触发的 reloadCc）。只有最后一发的落库。 */
-      const myReq = ++this.cc.req;
-      const limit = Math.min(cands.length, CC_TRY_MAX);
+      const limit = Math.min(cands.length, 3);
       this.cc.loading = true;
-      let best = null;
-      let bestFit = null;
-      /* 【3.5.23】best 是否「双判据都合格」。只在同合格档内比 dev，
-       * 避免为了一条覆盖率极好但内容无关的产物放弃合格的那条。 */
-      let bestGood = false;
-      let lastErr = '';
-      /* 候选**并发**下载再统一打分，取「末条结束时间/视频时长」离 1.0 最近的那条。
-       * 依据：
-       *   ① 必须打分而不是先到先得 —— 实测同一 cid 的三个候选 ratio 是
-       *      0.78 / 1.56 / 4.19，先到的不一定是 0.78 那条；真机还见过
-       *      2.42 / 3.22 / 1.00 三条并列，正确那条排在第三位。
-       *   ② 必须并发 —— 串行 4 条要 3~4s，起播后字幕迟迟不出；
-       *      并发实测 1s 出头就能全部拿到。
-       * 只有「某条已经是完美匹配」时才可能省掉剩下的下载（见 GOOD 早退）。 */
       const tasks = [];
       for (let i = 0; i < limit; i++) tasks.push(fetchSubtitleCues(this.client, cands[i].url));
       const rs = await Promise.all(tasks);
-      if (this.gen !== myGen || myReq !== this.cc.req) {
-        /* 代次已变（用户又切了一集），或同一代次里已经有了更新的一发请求：
-         * 直接走人，但 loading 只能在「自己仍是最新一发」时复位，否则会把
-         * 后来者刚置的 true 打回 false（表现为「字幕加载中」闪一下就没了）。 */
-        if (myReq === this.cc.req) this.cc.loading = false;
-        return false;
+      if (this.gen !== myGen) {
+        this.cc.loading = false;
+        return;
       }
+      let best = null;
+      let lastErr = '';
       for (let i = 0; i < rs.length; i++) {
-        const t = cands[i];
         const r = rs[i];
         if (!r || !r.ok) {
           lastErr = (r && r.message) || '未知错误';
@@ -2995,517 +3065,98 @@ export default {
           continue;
         }
         const fit = subtitleFit(r.cues, durMs);
-        /* 【3.5.23】第二判据：标题关键词命中率。
-         * 覆盖率只能挡「长度不对」的产物，挡不住「长度刚好却完全无关」的
-         * 上游错挂（真机见过 ratio 1.11 的美食视频挂在 AI 稿件上）。
-         * 实测（title-only，7 支稿件）：正确产物 kw 0.25~0.857，
-         * 错挂产物 <=0.143 —— 取 0.18 正好分开。 */
-        const kwFit = subtitleKeywordFit(r.cues, (s0 && s0.title) || '');
-        logWarn('[cc] 候选 ' + (i + 1) + '/' + limit + ' ' + t.lan + ' ' + r.count +
-          ' cues 覆盖=' + fit.ratio.toFixed(2) + ' 偏差=' + fit.dev.toFixed(2) +
-          ' kw=' + kwFit.kw.toFixed(3) + '(' + kwFit.hit + '/' + kwFit.keys + ')' +
-          ' ' + fit.reason);
-        /* kwFit.keys 太少时判据不可用（ok=false 但并非「不合格」），
-         * 这种稿件一律放行，不能因为标题太短就把正确字幕丢掉。 */
-        /* 【3.5.25】关键词判据分三档，而不是一刀切的硬否决。
-         *
-         * 起因是真机上一支 83 秒的鬼畜稿（BV1mUnm6qEbu《领域展开！谁是最强
-         * 狙击手？》）：**正确字幕是 16 条、覆盖 0.97、偏差 0.02**，长度证据
-         * 几乎完美；但标题是玩梗的（「领域展开」出自咒术回战，正文根本不会
-         * 出现），9 个标题关键词只命中 1 个（「狙击」），kw=0.111。
-         * 旧写法一刀切判它不合格，三轮重试全被拦下 —— 用户看到的就是
-         * 「字幕键开着却没有字幕」。同一支稿子里真正错挂的产物覆盖是
-         * 2.67 / 35.39 / 19.36，长度判据本来就挡得住。
-         *
-         * 但也不能只看长度：BV1tVnb6UEmv《耗时三年！打造最好用的远程串流
-         * 软件》（661s）的候选池里**一份本片的都没有**，其中 267 条那条
-         * 覆盖 0.92、偏差 0.08、kw=0.000 —— 偏差极小却完全是别人的字幕
-         * （开头「这位尊敬的委员」）。所以「偏差小就放行」同样是错的。
-         *
-         * 三档规则：
-         *   ① kw >= SUBTITLE_KW_MIN（0.18）           → 强证据，放行；
-         *   ② 命中 >= 1 个关键词 **且** 偏差 <= GOOD    → 长度+弱关键词，放行；
-         *   ③ 其余（一个关键词都不沾，或偏差偏大）      → 判不合格。
-         * 关键词少于 SUBTITLE_KW_KEYS 时判据不可用，一律放行（标题太短不能
-         * 拿来当证据）。
-         *
-         * 回放四支真实候选池：玩梗稿的正确字幕从「全部被拦」变成放行；
-         * 全错挂的 BV1tVnb6UEmv 仍然一条都不放；污染稿 BV1VQsv6QEhV 漏网的
-         * 214 条（偏差 0.14、仅命中 1 个）被拦下；Sora / Google 送中那两支
-         * 的正确产物照常放行。 */
-        const kwUsable = kwFit.keys >= SUBTITLE_KW_KEYS;
-        const kwBad = kwUsable && !kwFit.ok &&
-          !(kwFit.hit > 0 && fit.dev <= SUBTITLE_FIT_GOOD);
-        const good = fit.ok && !kwBad;
-        if (!best || (good && !bestGood) ||
-            (good === bestGood && fit.dev < best.fit.dev)) {
-          best = { t: t, r: r, fit: fit, kw: kwFit, good: good };
-          bestGood = good;
-        }
+        logWarn('[cc] 候选 ' + (i + 1) + '/' + limit + ' ' + cands[i].lan + ' ' + r.count +
+          ' cues 覆盖=' + fit.ratio.toFixed(2) + ' 偏差=' + fit.dev.toFixed(2) + ' ' + fit.reason);
+        if (!best || fit.dev < best.fit.dev) best = { t: cands[i], r: r, fit: fit };
       }
       this.cc.loading = false;
       if (!best) {
         this.cc.cues = [];
-        this.cc.cid = 0;
         this.cc.status = '字幕下载失败：' + (lastErr || '未知错误');
-        logWarn('[cc] ' + this.cc.status);
-        await this.applyVideoGeometry('cc');
-        return false;
-      }
-      /* 【3.5.22】候选全都不合格时不要硬塞。
-       * 实测 BV1VQsv6QEhV：上游给同一 cid 挂了 20 份互不相关的 AI 产物
-       * （蚂蝗/唐僧/刘三少…），最好的那条 dev 也 > SUBTITLE_FIT_TOL。
-       * 与其显示一句完全无关的话，不如明确告诉用户「这首没字幕」。 */
-      if (!best.good) {
-        this.cc.lanDoc = '';
-        this.cc.cid = myCid;
-        this.cc.cues = [];
-        this.cc.status = '该稿件暂无可用 CC 字幕（上游字幕与视频不符）';
-        logWarn('[cc] 候选全部不合格 best=' + best.t.lan + ' ' + best.r.count +
-          ' cues 覆盖=' + best.fit.ratio.toFixed(2) + ' 偏差=' + best.fit.dev.toFixed(2) +
-          ' kw=' + best.kw.kw.toFixed(3) + '(' + best.kw.hit + '/' + best.kw.keys + ')' +
-          ' -> 不出字幕');
-        await this.applyVideoGeometry('cc');
-        return false;
+        await this.applyVideoChromeRect();
+        return;
       }
       this.cc.lanDoc = best.t.lanDoc;
-      this.cc.cid = myCid;
       this.cc.cues = best.r.cues;
-      bestFit = best.fit;
-      /* 走到这里 best.good 已为 true（覆盖率与关键词双合格），但覆盖度仍可能
-       * 只是「勉强落在容差内」（dev 到 0.30）。这种仍要给可见提示，
-       * 别让用户以为字幕一定对得上。 */
-      this.cc.status = bestFit && bestFit.dev > SUBTITLE_FIT_GOOD
-        ? '字幕可能与本视频不完全对应' : '';
-      /* SUBTITLE_FIT_GOOD 只用来区分「几乎完美」与「勉强对得上」，两者都不再重试；
-       * 留这个判据是为了让日志能一眼看出这次是不是真的找准了。 */
-      const perfect = bestFit && bestFit.ok && bestFit.dev <= SUBTITLE_FIT_GOOD;
-      const c0 = best.r.cues[0] || null;
+      this.cc.status = best.fit.ok ? '' : '字幕可能与本视频不完全对应';
       logWarn('[cc] loaded ' + best.r.count + ' cues lang=' + best.t.lan +
-        ' host=' + (best.r.host || '?') + ' fit=' + (bestFit ? bestFit.reason : '?') +
-        ' kw=' + best.kw.kw.toFixed(3) + '(' + best.kw.hit + '/' + best.kw.keys + ')' +
-        (perfect ? ' (perfect)' : '') +
-        ' first=' + (c0 ? (c0.fromMs + '-' + c0.toMs + 'ms ' + c0.text.slice(0, 12)) : 'none'));
-      await this.applyVideoGeometry('cc');
-      /* 【3.5.24】返回「这一轮到底有没有真的拿到字幕」：
-       * 调用方（pullCcUntilGood）靠它决定要不要换池子重试。
-       * 注意不能只看 cues.length —— 上面几处失败分支也会写 cues=[]，
-       * 只有走到这里才代表选中的这条已通过覆盖率 + 关键词双判据。 */
-      return true;
+        ' fit=' + best.fit.reason + ' dev=' + best.fit.dev.toFixed(2));
+      await this.applyVideoChromeRect();
     },
-    /* 【3.5.24】「拉字幕」这件事的整体流程：最多 CC_ROUND_MAX 轮，
-     * 每轮 = 抓一批候选池 → 逐条下载打分 → 双判据筛。
-     * 首轮直接复用调用方已经拿到的 player/v2 结果（省一次往返）；
-     * 后续轮次重新抓池子 —— 池子是随机的，换一个池子往往就有了。
-     *
-     * 返回 true 表示字幕已落库；false 表示所有轮次都没捞到合格产物，
-     * 此时 this.cc.status 里有一句给用户看的原因。
-     */
-    async pullCcUntilGood(myGen, firstInfo) {
-      const s = this.play.session;
-      if (!s || s.live || !this.cc.on) return false;
-      let info = firstInfo;
-      for (let round = 1; round <= CC_ROUND_MAX; round++) {
-        if (this.gen !== myGen) return false;
-        if (info && info.ok) {
-          this.cc.tracks = info.subtitles;
-          if (await this.loadCcCues(myGen, info.subtitles)) return true;
-        } else {
-          logWarn('[cc] 第 ' + round + ' 轮 player/v2 失败: ' +
-            ((info && info.message) || '未知'));
-        }
-        if (round >= CC_ROUND_MAX) break;
-        if (this.gen !== myGen) return false;
-        logWarn('[cc] 第 ' + round + '/' + CC_ROUND_MAX + ' 轮没捞到合格字幕，换池子重试');
-        await this.sleep(CC_ROUND_GAP_MS * round);
-        if (this.gen !== myGen) return false;
-        let mixinKey = '';
-        try {
-          const m = await ensureMixinResult(this.makeCtx(myGen));
-          if (m.ok) mixinKey = m.key;
-        } catch (e) { /* WBI 只用于回退，拿不到就直连 */ }
-        if (this.gen !== myGen) return false;
-        try {
-          info = await fetchPlayerV2Tracks(this.client, s.bvid, s.cid, {
-            mixinKey: mixinKey,
-            nowSec: () => Math.floor(Date.now() / 1000),
-            tries: CC_RETRY_TRIES
-          });
-        } catch (e) {
-          logWarn('[cc] 重试 player/v2 异常: ' + ((e && e.message) || e));
-          info = { ok: false, message: (e && e.message) || '请求异常' };
-        }
-      }
-      return false;
-    },
-    /* 上下让位量（逻辑像素）+ 全屏标记。native 的 render-rectangle 与 falcon
-     * 挖洞同源；全屏标记让 play_session 把信箱盒子的 x/width 也换成整个视口
-     * （页面是唯一知道左右列是否让位的地方）。 */
-    bandPx() {
-      const b = this.bands;
-      /* 【第二十八轮】full 恒 false：全屏退回纯 UI 换装，不动视频几何。
-       * 第二十六轮的整屏 cover 在真机上并没有生效（截图里画面仍在中列），
-       * 却引入了重开流的黑屏与失败风险；左右黑区域用户也明确说不用管。
-       * cc 与 bar 分开报：控制条浮在画面上、不占矩形，组合逻辑在 play_session。 */
-      return { top: b.top, bottom: b.cc, bar: b.bar, full: this.ui.side === true };
-    },
-    /* 控件显隐：只改状态 + 热更新矩形，不重取流。暂停/播完由 chromeForState 强制显示。 */
-    setChrome(v) {
-      const next = !!v;
-      if (this.mode !== 'play' || this.isLivePlay) return;
-      if (this.ui.chrome === next) return;
-      this.ui.chrome = next;
-      this.applyVideoGeometry(next ? 'chrome-show' : 'chrome-hide');
-      /* 控件被点出来后静默 5s 自动收起；点画面任意位置恢复（onVideoTap）。 */
-      if (next) this.scheduleAutoHide();
-      else this.clearAutoHide();
-    },
-    /* 沉浸态（用户 m20514 第 2 条）：点画面把左右两列换成纯黑占位，再点一次变回来。
-     *
-     * 为什么要改矩形而不是只删 DOM：16:9 在 960x266 上永远是「高度受限」，
-     * 画面尺寸一个像素都不会变，只会因为字幕盒子从中列变成整屏而平移 30 物理像素。
-     * 这种「尺寸不变、只平移」的 SET_RECT 在 native 走 overlay 快路径
-     * （session.c 的 size_same 分支），毫秒级、不重建管线、不黑屏。
-     *
-     * 不能只把左右列 v-if 关掉：falcon 不主动清屏，透明空旧像素会残留（第二十六轮事故），
-     * 所以模板里的占位是不透明黑的 .pside-fill。 */
-    setSide(next) {
-      if (this.mode !== 'play' || this.isLivePlay) return;
-      const on = !!next;
-      if (this.ui.side === on) return;
-      this.ui.side = on;
-      /* 沉浸 = 两侧黑 + 控件收起；退出沉浸 = 两侧回来 + 控件展开。
-       * 两者同一侧切，不会出现「侧栏没了但控件还在」的死状态。 */
-      this.ui.chrome = !on;
-      this.applyVideoGeometry(on ? 'side-on' : 'side-off');
-      if (on) this.clearAutoHide();
-      else this.scheduleAutoHide();
-      logWarn('[chrome] side=' + on);
-    },
-    /* 顶栏左侧按钮：全屏态 = 退出全屏（这时候没有左列返回键，别让用户一点就
-     * 连视频一起关掉）；普通态 = 离开播放页。 */
-    onTopBack() {
-      /* 沉浸态没有左列返回键（整列是黑的），所以顶栏这颗先退沉浸，
-       * 免得用户一点就把视频一起关掉。 */
-      if (this.ui.side) {
-        this.setSide(false);
-        return;
-      }
-      this.onIbarBack();
-    },
-    /* "静默 5s 自动收起控件"的计时。计不计时由 canAutoHide 判（纯函数、可单测）：
-     * 控件展开 + 真的在播 + 没有拖动/互动题面时才跑。
-     *
-     * 【3.5.10】普通态也收起（用户要求「5 秒没操作就隐藏，点击播放区重新显示」）。
-     * 收起不改变视频几何（applyVideoGeometry 对 chrome-show/hide 一律跳过），
-     * 不会有「画面自己变大」的观感突变。点画面 → onVideoTap → setChrome(true)。 */
-    scheduleAutoHide() {
-      this.clearAutoHide();
-      if (!canAutoHide(this.play.state, {
-        full: false,
-        chrome: this.ui.chrome,
-        busy: this.seekDragMs != null || this.interact.visible === true
-      })) return;
-      const t = setTimeout(() => {
-        this._hideT = 0;
-        this._timers.delete(t);
-        if (this.play.state === 'playing' && this.ui.chrome) this.setChrome(false);
-      }, AUTO_HIDE_MS);
-      this._hideT = t;
-      this._timers.add(t);
-    },
-    clearAutoHide() {
-      if (!this._hideT) return;
-      clearTimeout(this._hideT);
-      this._timers.delete(this._hideT);
-      this._hideT = 0;
-    },
-    /* 当前布局下应该下发给 native 的**物理矩形**（唯一出口）。
-     *
-     * 两处必须逐像素同源：页面 DOM（bands）与这里。任何一处自己算，
-     * 切 P / 开关字幕就会各走各的，画面和挖洞区错开。 */
-    async buildVideoRect() {
-      const s = this.play.session;
-      if (!s || this.mode !== 'play') return null;
-      const p = await ensureProfile();
-      const b = this.bands;
-      /* 【第二十八轮】普通态只有一种盒子：中列宽 × 中列总高。
-       * 沉浸态（ui.side）只把这张盒子换成整屏，尺寸不变 —— 几何恒定
-       * 是这台机器不出「变扁 / 绿幕 / 错位」的唯一可靠办法。 */
-      const colH = (p.layout.play.videoH || 0) + (p.layout.play.seekH || 0);
-      /* 沉浸态（ui.side）：字幕盒子从「中列」换成「整个视口」。
-       * 16:9 在 960x266 上永远高度受限，所以尺寸不变，只是居中位置随之平移
-       * （native 走 overlay 快路径，不重建、不黑屏）。这一段必须与
-       * play_session.openVideo 里的 areaBox 逐像素同源。 */
-      const area = this.ui.side === true
-        ? { x: 0, y: 0, width: p.logical.width, height: colH }
-        : {
-          x: p.videoArea.x,
-          y: p.videoArea.y,
-          width: p.videoArea.width,
-          height: colH
-        };
-      /* 【第二十五轮：绿幕修复】矩形必须 fit 到画面本身，不能是外框。
-       *
-       * 上一轮用「矩形=外框 + videoscale add-borders=true」做覆盖，真机上
-       * 竖屏视频左右出现大片绿幕：add-borders 补的边是 YUV 全 0（= 绿），
-       * 不是黑。横屏 16:9 只补 11px，看不出来；竖屏要补 150px，整片绿。
-       *
-       * 现在改成：矩形 = 画面（fit 到 中列全高 的框），信箱黑由 **UI 层** 提供
-       * （hole 之外的 fb 黑 / 两侧 UI 像素）。plane 只覆盖画面，没有边可补，
-       * 也就不会有绿幕。控制条那 32px 仍然浮在画面上（bandBox 不扣 bar）：
-       * 画面底部落在控制条区域内，被半透明条盖住。 */
-      /* 【3.5.10】底部让位量与起播路径（play_session 的 reserveBottom）**同源**：
-       * 都调 play_chrome.videoReserve()。以前这里写死 bar:0，X6 上算出的矩形比
-       * 起播高 48 物理像素 —— 起播时画面在控制条上方，一旦字幕开关触发这次重算，
-       * 画面就掉到控制条底下去，用户看到「有时覆盖、有时不覆盖」。 */
-      const box = bandBox(area, { top: b.top, cc: videoReserve(b, p.barOverlay), bar: 0 });
-      const r = playVideoRectsFor(s.width || 640, s.height || 360, p, s.live === true, box);
-      return { physical: r.physical, cropX: 0, cropY: 0 };
-    },
-    /* 字幕带出现/消失时把新的物理矩形热更新给 kmssink（不再用于全屏）。
-     * → true = 样式已下发（或本来就不该下发）；false = native 明确拒绝。 */
-    async applyVideoGeometry(reason) {
-      const s = this.play.session;
-      if (!s || this.mode !== 'play') return true;
-      /* 【3.5.6 第十轮】只有「真的换了盒子」才允许换矩形（现在是字幕开关 +
-       * 沉浸态进/出两个原因）。
-       *
-       * 其它所有原因（chrome-show / chrome-hide / cc / interact / deferred）
-       * 一律 **不下发 setVideoRect**。原因不是效率，是正确性：X7 Pro 起播时
-       * 插了 `videoscale ! video/x-raw,width=<rect.w>,height=<rect.h>`，输出 caps
-       * 按起播矩形定死；播放中改 render-rectangle，kmssink 只会拿旧尺寸 buffer
-       * 去贴新矩形 —— 真机照片里「点一下隐藏进度条，画面变宽却被推到下半屏、
-       * 底部被裁」就是这么来的。控件显隐/字幕开关现在都由 DOM 纯黑占位完成，
-       * 几何恒定，一行 native 调用都不需要。
-       *
-       * 例外只给「改尺寸」的动作（字幕带 18px、以及将来的其它分段变化）：
-       * native 收到 SET_RECT 后不走即时改平面，而是更新 g_w.rect 并投递一次
-       * 原地 seek —— build_pipeline 会用新矩形重算 caps 并重建平面
-       * （见 session.c 的 PB2_CMD_SET_RECT）。
-       *
-       * 沉浸态是**另一类**例外：盒子从中列换成整屏，但 16:9 在这块屏上永远
-       * 高度受限，尺寸一个像素不变，只有 y 平移 30。native 会认成 size_same，
-       * 直接走 GstVideoOverlay 快路径，不重建、不黑屏。 */
-      const tag = reason || '';
-      /* 【3.5.13】允许改几何的只有两个原因：
-       *   · cc        —— 字幕带占/让 18px，是真的动视频洞；
-       *   · side-on/off —— 沉浸态，只平移不改尺寸（见上）。
-       * 其它 reason（chrome-show / chrome-hide / interact / deferred）一律跳过，
-       * 连日志都省了，避免每次点画面刷一行。 */
-      const isCc = tag === 'cc';
-      /* 沉浸态的进/出是唯一另一个允许改矩形的动作：只平移不改尺寸，
-       * native 会走 size_same 分支直接 overlay，不重建管线。 */
-      const isSide = tag === 'side-on' || tag === 'side-off';
-      if (!isCc && !isSide) {
-        logWarn('[chrome] 几何恒定，跳过 setVideoRect (' + tag + ')');
-        return true;
-      }
-      /* 只有真的在出画面时才改矩形：取流中（session 还是占位对象）下发 setRect
-       * 没有意义，只会在日志里刷一行"不支持"。这时候记一个脏标记，
-       * 起播后由轮询的 playing 分支补一次（见 _rectDirty）。 */
-      if (this.play.state !== 'playing' && this.play.state !== 'paused') {
-        this._rectDirty = true;
-        this._rectPendingReason = tag;
-        return true;
-      }
-      const r = await this.buildVideoRect();
-      if (!r) return true;
-      s.rectPhysical = r.physical;
-      /* 【同一个矩形不重复下发】kmssink 的 render-rectangle 是 write-only 属性，
-       * 只在 reconfigure（分配 plane）那一刻被读；暂停态每次下发还要额外把管线
-       * 脉冲 200ms PLAYING。所以：
-       *   · 重复写同一个值纯属浪费（暂停态还掉帧）；
-       *   · 更要命的是**连点**：收起→展开的最终几何和原来一模一样，但两次
-       *     setRect 背靠背到达时，第二次可能写在一个"正在 configure"的属性上，
-       *     平面就停在中间态 —— 真机反馈「点两下屏幕后视频跑到下方 / 只露半截」
-       *     正是这么来的。这里用上一次**成功下发**的物理矩形做短路，点两下等于
-       *     一次都不碰 native。 */
-      const key = r.physical.x + ',' + r.physical.y + ',' + r.physical.width + ',' + r.physical.height;
-      if (key === this._rectKey) {
-        logWarn('[chrome] rect 未变，跳过下发 (' + key + ') ' + (reason || ''));
-        return true;
-      }
-      try {
-        const res = await player.setVideoRect(
-          r.physical.x, r.physical.y, r.physical.width, r.physical.height);
-        if (res && res.ok === false) {
-          logWarn('[chrome] setVideoRect 不支持: ' + (res.code || '') + ' (' + (reason || '') + ')');
-          return false;
-        }
-        this._rectKey = key; // 只有成功才记账，失败还能重试
-        logWarn('[chrome] rect ' + key + ' (' + (reason || '') + ')');
-        return true;
-      } catch (e) {
-        logWarn('[chrome] setVideoRect 异常: ' + ((e && e.message) || e));
-        return false;
-      }
-    },
-    /* ==================== 退后台 / 回前台（第二十三轮重做） ====================
-     *
-     * 【为什么不再"藏成 1x1 再恢复"】
-     * 上一版 onHide 时 setVideoRect(0,0,1,1)、onShow 时再 setVideoRect 回正常
-     * 矩形。两次都是**运行期改矩形**：X7 的管线里有
-     * `videoscale ! video/x-raw,width=<rect>,height=<rect>`，改矩形只能靠 native
-     * 投递一次原地 seek 重建管线去追新 caps；追不上就出现真机照片里的
-     * 「下拉状态栏 → 随便开个界面 → 退回视频，画面变扁」。
-     *
-     * 【现在】退后台就直接把会话关掉 —— 这本来就是用户最初的要求
-     * （「检测到下滑状态栏时关闭视频」）。回前台用 openArgs + 当前矩形重新起
-     * 一路，caps 与矩形从第一帧就一致，不存在"追不上"的中间态，也就不可能变形。
-     *
-     * 代价：回前台有一次 ~0.5~1s 的起播（黑屏）。换来的是**任何一次前后台
-     * 切换都不会改变画面比例**。
-     *
-     * 不关闭会话的情况：直播（没有"停在某一帧"的语义，且 live rebuild 要 1s+
-     * 还会换 CDN），以及还没有 openArgs 的取流中会话。
-     */
-    hideForBackground(where) {
-      const s = this.play.session;
-      if (!s || this.mode !== 'play' || s.live) return null;
-      if (!s.openArgs) return null; /* 取流中：会话还不完整，常规 closeSession 会处理 */
-      if (this._bgClosed) return this._bgTask;
-      this._bgPosMs = Math.max(0, Math.floor(this.play.positionMs || 0));
-      this._bgWasPaused = this.play.state === 'paused';
-      /* **同步**置位：onShow 可能在 closeSession 还没跑完时就到来，
-       * 只看"关闭已完成"会让它掉进 resume 分支（那时会话正在拆，必然失败）。 */
-      this._bgClosed = true;
-      /* 停轮询：后台读 status 只会刷日志，还会让看门狗误判"画面卡死"去自愈 seek。 */
-      this.stopPoll();
-      const myGen = this.gen;
-      logWarn('[chrome] 退后台 → 关闭会话（' + where + '）pos=' + this._bgPosMs +
-        (this._bgWasPaused ? ' paused' : ''));
-      /* 不 await：onHide 是同步生命周期，await 会拖住系统 */
-      this._bgTask = Promise.resolve()
-        .then(() => closeSession(this.makeCtx(myGen)))
-        .then(
-          (r) => r,
-          (e) => logWarn('[chrome] 退后台关闭会话异常: ' + ((e && e.message) || e))
-        );
-      return this._bgTask;
-    },
-    /* 回前台：用当前矩形重开一路（与全屏切换共用 reopenSession，单一入口）。 */
-    async reopenForForeground(where) {
-      if (!this._bgClosed) return;
-      const s = this.play.session;
-      if (!s || this.mode !== 'play' || !s.openArgs) {
-        this._bgClosed = false;
-        return;
-      }
-      const myGen = this.gen;
-      /* 等关闭任务真正落地：native 的 OPEN 是先 teardown 再建，
-       * 上一个会话没拆完就 OPEN 会撞 PLAYER_ALREADY_RUNNING。 */
-      if (this._bgTask) {
-        try { await this._bgTask; } catch (e) { /* 已在 hideForBackground 里记过 */ }
-        this._bgTask = null;
-      }
-      if (this.gen !== myGen || !this._bgClosed) return;
-      this._bgClosed = false;
-      const rect = await this.buildVideoRect();
-      if (this.gen !== myGen) return;
-      if (!rect || !rect.physical) {
-        this.play.note = '回到前台后无法恢复画面，请重新打开视频';
-        return;
-      }
-      const pos = this._bgPosMs || 0;
-      const label = rect.physical.x + ',' + rect.physical.y + ',' +
-        rect.physical.width + ',' + rect.physical.height;
-      logWarn('[chrome] 回前台 → 重开（' + where + '）@' + pos + 'ms rect=' + label);
-      const r = await reopenSession(this.makeCtx(myGen), s, pos, rect.physical);
-      if (this.gen !== myGen) return;
-      if (!r.ok) {
-        logWarn('[chrome] 回前台重开失败: ' + (r.message || '') + ' → 等用户重开');
-        this.play.state = 'error';
-        this.play.note = '回到前台后恢复失败：' + (r.message || '未知原因');
-        return;
-      }
-      this._rectKey = label;
-      s.rectPhysical = rect.physical;
-      this.play.state = this._bgWasPaused ? 'paused' : 'playing';
-      this.play.note = '';
-      if (this._bgWasPaused) {
-        const p = await togglePlay(this.makeCtx(myGen), true);
-        if (this.gen !== myGen) return;
-        if (p && p.ok) this.play.state = 'paused';
-      }
-      this.startPoll(myGen);
-      logWarn('[chrome] 回前台重开完成 out=' + r.outWidth + 'x' + r.outHeight +
-        ' state=' + this.play.state);
-    },
-    async initExtras(myGen, item) {
+    /* 起播后的附加功能入口：一次 player/v2 同时拿字幕轨道与互动 graph_version。
+     * 失败只影响附加功能，画面与声音不受牵连。 */
+    async initExtras(myGen) {
       const s = this.play.session;
       if (!s || s.live) return;
-      /* 弹幕与 player/v2 无关（seg.so 是独立接口、不查登录态），所以放在
-       * 最早的位置起步：即使字幕/互动信息拿不到，弹幕也该照常工作。
-       * 先把模式推给 native（可能还是 off → native 一个像素都不碰），
-       * 再按当前播放位置拉第一片。 */
-      await this.applyDmMode();
-      if (this.gen !== myGen) return;
-      if (this.dm.mode !== 'off') {
-        this.loadDmSegment(myGen, segmentIndexAt(this.play.positionMs || 0)).then(
-          () => {},
-          () => {}
-        );
-      }
       let mixinKey = '';
       try {
         const m = await ensureMixinResult(this.makeCtx(myGen));
         if (m.ok) mixinKey = m.key;
-      } catch (e) { /* WBI 只用于回退，拿不到就直连 */ }
+      } catch (e) { /* WBI 只用于风控回退 */ }
       if (this.gen !== myGen) return;
       const info = await fetchPlayerV2Tracks(this.client, s.bvid, s.cid, {
+        tries: 3,
+        wantTracks: 2,
         mixinKey: mixinKey,
         nowSec: () => Math.floor(Date.now() / 1000)
       });
       if (this.gen !== myGen) return;
-      /* 【3.5.24】首轮 player/v2 就失败（风控 / 网络抖）时，
-       * 旧代码直接 return，字幕一律没机会 —— 而字幕键显示的是用户偏好 cc.on，
-       * 于是又出现「开着却没有」。先让重试流程把池子再抓几轮，再决定要不要报错。 */
-      if (this.cc.on && !info.ok) {
-        try {
-          await this.pullCcUntilGood(myGen, info);
-        } catch (e) {
-          logWarn('[cc] 起播拉字幕异常: ' + ((e && e.message) || e));
-        }
-        if (this.gen !== myGen) return;
-      }
       if (!info.ok) {
-        /* 重试也没救回来、且一句字幕都没有时才报这句；
-         * 如果重试期间已经拿到字幕（info 只是这一发失败），不能覆盖掉状态。 */
-        if (!this.cc.cues.length && !this.cc.status) {
-          this.cc.status = '字幕/互动信息获取失败';
-        }
+        this.cc.status = '字幕/互动信息获取失败';
         logWarn('[extras] player/v2 fail: ' + info.message);
         return;
       }
-      this.cc.tracks = info.subtitles;
-      /* 一行判案日志：匿名（未登录）时 B 站把 subtitle.subtitles 直接返回成空数组，
-       * 同一稿件在 view 接口里能看到轨道但 subtitle_url 全是空串（实测）。
-       * 「字幕无法显示」绝大多数时候断在这一行，而不是渲染。 */
-      logWarn('[cc] player/v2 tracks=' + info.subtitles.length +
+      this.cc.tracks = info.subtitles || [];
+      logWarn('[cc] player/v2 tracks=' + this.cc.tracks.length +
         ' login=' + (this.hasLogin ? 1 : 0) + ' ccOn=' + (this.cc.on ? 1 : 0));
-      /* 【3.5.19】字幕默认**关闭**。
-       * 旧版行为：_ccSaved === null（用户从没动过开关）且稿子有轨道就自动打开。
-       * 用户希望字幕默认不开（与弹幕相反），因此这里不再代人做决定：
-       * 只有 this.cc.on 为真（用户自己在左列点了字幕键，或在「我的」里开过并已持久化）
-       * 才去拉字幕文件。拉不到也不回退开关 —— 让 ccSettingHint 把原因写出来。 */
-      /* 【3.5.24】这里不再直接 loadCcCues 一次算数：一轮没捞到就换池子重试。
-       * 用户看到的「字幕键开着却没有字幕、关开一次才出」就是一轮不够导致的。 */
-      if (this.cc.on) {
-        try {
-          await this.pullCcUntilGood(myGen, info);
-        } catch (e) {
-          logWarn('[cc] 起播拉字幕异常: ' + ((e && e.message) || e));
-        }
-      }
+      if (this.cc.on) await this.loadCcCues(myGen, this.cc.tracks);
       if (info.interactive) {
         logWarn('[interact] graph_version=' + info.graphVersion + ' bvid=' + s.bvid);
-        await this.startInteractive(myGen, info.graphVersion, item);
+        await this.startInteractive(myGen, info.graphVersion);
+      }
+    },
+    /* ---------- 分P / 合集 ---------- */
+    epDur(sec) {
+      return fmtEpDur(sec);
+    },
+    onEpTab(tab) {
+      if (tab === 'pages' && !this.epHasPages) return;
+      if (tab === 'season' && !this.epHasSeason) return;
+      if (this.ep.tab === tab) return;
+      this.ep.tab = tab;
+      this.ep.note = '';
+    },
+    /* 详情页点分P/合集：直接起播该段（换 cid 等于换一条流，必须重开解码）。 */
+    async switchEpFromDetail(kind, row) {
+      if (this.ep.switching || !row) return;
+      const base = this.detail.item || {};
+      if (kind === 'page' && row.cid === this.play.session.cid) return;
+      if (kind === 'season' && row.bvid === this.play.session.bvid) return;
+      this.ep.switching = true;
+      this.ep.note = '切换中…';
+      try {
+        await this.onPlayItem({
+          kind: 'video',
+          bvid: row.bvid || base.bvid,
+          cid: row.cid || 0,
+          useCid: true,
+          title: '',
+          up: base.up || '',
+          cover: row.cover || base.cover || '',
+          durationSec: row.durationSec || 0,
+          keepEp: true
+        });
+        this.ep.note = '';
+      } catch (e) {
+        this.ep.note = '切换失败：' + ((e && e.message) || e);
+      } finally {
+        this.ep.switching = false;
       }
     },
     /* ---------- 互动视频 ---------- */
-    async startInteractive(myGen, graphVersion, item) {
+    async startInteractive(myGen, graphVersion) {
       const s = this.play.session;
+      if (!s) return;
       const it = this.interact;
       it.active = true;
       it.bvid = s.bvid;
@@ -3526,8 +3177,11 @@ export default {
       it.countdown = 0;
       it.leaf = false;
       it.baseItem = {
-        bvid: s.bvid, title: s.title || (item && item.title) || '',
-        up: s.up || '', cover: s.cover || ''
+        kind: 'video',
+        bvid: s.bvid,
+        title: s.title || '',
+        up: s.up || '',
+        cover: s.cover || ''
       };
       await this.gotoEdge(myGen, 0, s.cid);
     },
@@ -3538,14 +3192,11 @@ export default {
       if (this.gen !== myGen) return;
       it.busy = false;
       if (!r.ok) {
-        it.visible = true;
         it.status = '选项加载失败：' + r.message;
         logWarn('[interact] edgeinfo fail: ' + r.message);
         return;
       }
       const node = r.node;
-      /* cid 以「正在播的那一段」为准：parseEdgeInfo 已经按 fallback 优先返回，
-       * 这里再兜一次，保证 replay/回退不会拿到 story_list 里的上一段。 */
       if (!(node.cid > 0)) node.cid = cid;
       it.node = node;
       it.edgeId = node.edgeId || edgeId;
@@ -3558,9 +3209,6 @@ export default {
       it.questionMs = node.question ? node.question.durationMs : 0;
       it.vars = mergeHiddenVars(it.vars, node.hiddenVars);
       it.choices = visibleChoices(node, it.vars);
-      /* 新片段默认不抢评论区：真实互动稿的题面在片尾前 3 秒才出现，
-       * 一进来就把整栏换成选项会让用户整段都看不到评论。
-       * 到 shouldShowChoices 或片尾时再由 tick / handleSegmentEnd 打开。 */
       it.visible = false;
       it.pending = false;
       it.dismissed = false;
@@ -3576,12 +3224,53 @@ export default {
                 ? '片尾会停住，选一个选项继续'
                 : (d ? '倒计时结束自动走默认选项' : '请在片段结束前选择')));
       logWarn('[interact] node edge=' + it.edgeId + ' cid=' + it.cid +
-        ' type=' + (node.question ? node.question.type : '-') +
         ' choices=' + it.choices.length + ' leaf=' + (it.leaf ? 1 : 0) +
-        ' pause=' + (it.pauseVideo ? 1 : 0) +
-        ' lead=' + it.leadMs + ' vars=' + Object.keys(it.vars).length);
+        ' pause=' + (it.pauseVideo ? 1 : 0) + ' lead=' + it.leadMs);
     },
-    /* 重新起播一个片段：复用 openVideo，但 cid 来自选项，不回列表。 */
+    /* 显示/收起互动题面：题面是整页 UI，必须 pauseRender 冻结 native 写屏。 */
+    async openInteractPanel() {
+      if (this.interact.visible) return;
+      this.interact.visible = true;
+      this.interact.pending = true;
+      this.clearAutoHide();
+      try { await player.pauseRender(); } catch (e) { /* 老 native 没有 pauseRender */ }
+    },
+    async closeInteractPanel() {
+      if (!this.interact.visible) return;
+      this.interact.visible = false;
+      try { await player.resumeRender(); } catch (e) { }
+      this.chromeTick = (this.chromeTick || 0) + 1;
+    },
+    onInteractClose() {
+      this.interact.pending = true;
+      this.interact.dismissed = true;
+      this.closeInteractPanel();
+    },
+    async onChoiceTap(choice) {
+      if (!choice || this.interact.busy) return;
+      await this.goToChoice(choice, false);
+    },
+    async goToChoice(choice, auto) {
+      const it = this.interact;
+      if (!it.active || !choice || it.busy) return;
+      this.clearAutoChain();
+      this.clearChoiceCountdown();
+      it.waiting = false;
+      it.dismissed = false;
+      it.history.push({
+        node: it.node, vars: it.vars, cid: it.cid,
+        edgeId: it.edgeId, segment: it.segment
+      });
+      if (it.history.length > 32) it.history.shift();
+      it.vars = applyNativeAction(choice.nativeAction, it.vars);
+      it.segment += 1;
+      const item = buildSegmentItem(it.baseItem, it.node, choice);
+      item.nodeTitle = choice.option;
+      logWarn('[interact] ' + (auto ? 'auto-chain' : 'choice') +
+        ' -> edge=' + choice.id + ' cid=' + choice.cid + ' text=' + choice.option.slice(0, 24));
+      await this.playSegment(item, choice.id, choice.cid, auto);
+    },
+    /* 重新起播一个片段：复用 openVideo，cid 来自选项。 */
     async playSegment(segItem, edgeId, cid, auto) {
       const myGen = ++this.gen;
       this.stopPoll();
@@ -3589,18 +3278,16 @@ export default {
       this.clearChoiceCountdown();
       const it = this.interact;
       it.busy = true;
-      /* 换段时先把旧题面收起来：加载期间右列应该回到评论/输入框，
-       * 否则用户会对着上一段的选项发呆，还可能误点。 */
       it.visible = false;
       it.pending = false;
       it.choices = [];
       it.waiting = false;
       it.countdown = 0;
       it.dismissed = false;
+      try { await player.resumeRender(); } catch (e) { }
       const ctx = this.makeCtx(myGen);
       this.play.state = 'loading';
       this.play.note = auto ? '连播下一段…' : '切换片段…';
-      this.startLoadingAnim();
       await closeSession(ctx);
       if (this.gen !== myGen) return;
       const r = await openVideo(ctx, segItem);
@@ -3613,13 +3300,11 @@ export default {
         this.play.state = 'error';
         this.play.note = describePlayError(r);
         it.status = '片段起播失败：' + r.message;
-        this.stopLoadingAnim();
         return;
       }
       this.play.session = r.session;
       this.play.state = 'playing';
       this.play.note = '';
-      this.stopLoadingAnim();
       this.play.positionMs = 0;
       this.play.frames = 0;
       this._avRecoverCount = 0;
@@ -3627,11 +3312,9 @@ export default {
       it.cid = r.session.cid;
       this.startKeepScreen();
       this.startPoll(myGen);
-      /* 换片段后字幕按新 cid 重拉；旧 cues 先留着撑住字幕带的几何，
-       * 新数据到达后整体替换（避免出现/消失导致画面跳动）。 */
       if (this.cc.on && this.cc.keepOnSegment) this.reloadCc(myGen);
-      /* 用**实际起播的** cid 去问下一节点；服务端可能把 cid 归一（选项 cid 与
-       * story_list 不一致时以实际 session 为准），否则重播/回退会串段。 */
+      await this.applyVideoChromeRect();
+      this.startPinch();
       await this.gotoEdge(myGen, edgeId, r.session.cid);
       logWarn('[interact] segment ' + it.segment + ' playing cid=' + r.session.cid +
         ' dur=' + r.session.durationMs + 'ms');
@@ -3649,123 +3332,41 @@ export default {
       const t = setTimeout(() => {
         this._timers.delete(t);
         this._autoChainT = 0;
-        if (this.interact.active && this.play.state === 'ended' && !this.interact.busy && !this.interact.waiting) {
+        if (this.interact.active && !this.interact.busy && !this.interact.waiting) {
           this.goToChoice(choice, true);
         }
       }, wait);
       this._timers.add(t);
       this._autoChainT = t;
     },
-    async goToChoice(choice, auto) {
-      const it = this.interact;
-      if (!it.active || !choice || it.busy) return;
-      this.clearAutoChain();
-      this.clearChoiceCountdown();
-      it.waiting = false;
-      it.dismissed = false;
-      /* 先把当前片段快照压栈，「回退」时直接还原节点与变量，不再请求网络。 */
-      it.history.push({
-        node: it.node, vars: it.vars, cid: it.cid,
-        edgeId: it.edgeId, segment: it.segment
-      });
-      if (it.history.length > 32) it.history.shift();
-      it.vars = applyNativeAction(choice.nativeAction, it.vars);
-      it.segment += 1;
-      const item = buildSegmentItem(it.baseItem, it.node, choice);
-      item.nodeTitle = choice.option;
-      logWarn('[interact] ' + (auto ? 'auto-chain' : 'choice') +
-        ' -> edge=' + choice.id + ' cid=' + choice.cid + ' text=' + choice.option.slice(0, 24));
-      await this.playSegment(item, choice.id, choice.cid, auto);
-    },
-    async onChoiceTap(choice) {
-      if (!choice || this.interact.busy) return;
-      await this.goToChoice(choice, false);
-    },
-    onInteractClose() {
-      this.interact.visible = false;
-      /* 用户主动收起：本轮不再自动弹回，但保留 pending，输入框位置可以一键再打开。
-       * 换段（gotoEdge）会清掉 dismissed。 */
-      this.interact.pending = true;
-      this.interact.dismissed = true;
-    },
-    onInteractOpen() {
-      this.exitFullForInteract();
-      this.interact.visible = true;
-      this.interact.pending = true;
-      this.interact.dismissed = false;
-    },
-    /* 【第二十一轮】互动题面现在全屏时也画在右列面板里（面板下方的选项区），
-     * 所以**不需要再退全屏** —— 以前退全屏是因为全屏态右列被让位了，题面出现
-     * 时屏幕上没有任何可点的东西（pause_video=1 的题就是停住语义）。现在
-     * 面板常驻，题目一出现就能在同一列里点到，用户不会被打断。
-     * 这个函数保留成"确保控件可见"的入口，调用点不用改。 */
-    exitFullForInteract() {
-      /* 沉浸态右列是黑的，题面没地方画 → 先把侧栏叫回来。
-       * 普通态只需保证控件展开，几何不动。 */
-      if (this.ui.side) this.setSide(false);
-      this.ui.chrome = true;
-      this.clearAutoHide();
-    },
-    async onInteractBack() {
-      const it = this.interact;
-      if (!it.active || it.busy || !it.history.length || it.noBacktracking) return;
-      const snap = it.history.pop();
-      it.vars = snap.vars || {};
-      it.segment = snap.segment || 1;
-      const item = {
-        kind: 'video', bvid: it.bvid, cid: snap.cid, useCid: true,
-        title: it.baseItem.title, up: it.baseItem.up, cover: it.baseItem.cover,
-        nodeTitle: snap.node ? snap.node.title : ''
-      };
-      await this.playSegment(item, snap.edgeId, snap.cid, false);
-    },
-    async onInteractReplay() {
-      const it = this.interact;
-      if (!it.active || it.busy || !(it.cid > 0)) return;
-      const item = {
-        kind: 'video', bvid: it.bvid, cid: it.cid, useCid: true,
-        title: it.baseItem.title, up: it.baseItem.up, cover: it.baseItem.cover,
-        nodeTitle: it.node ? it.node.title : ''
-      };
-      await this.playSegment(item, it.edgeId, it.cid, false);
-    },
-    /* 片段末尾：按 edgeinfo_v2 的题型决定下一步（判定逻辑在 segmentEndPlan）：
-     *   type=0（自动跳转）      → 空选项直接连播，不弹面板
-     *   pause_video=1（真实稿） → 片尾停住等用户点；duration>0 才倒计时走默认项
-     *   pause_video=0 + 默认项  → 短延迟后自动连播
-     * 结局片段不自动跳，留「回退 / 重播」。
-     * 只有**真的要把面板摆出来**时才退全屏（exitFullForInteract）：type=0 的自动
-     * 连播不弹面板，不该因为"过了一个片段"就把用户从全屏里踢出来。 */
+    /* 片段末尾：按 edgeinfo_v2 的题型决定下一步。 */
     handleSegmentEnd() {
       const it = this.interact;
       if (!it.active) return false;
-      it.visible = true;
       it.countdown = 0;
       const plan = segmentEndPlan(it.node, it.choices);
-      const willShow = !(plan.kind === 'auto' && plan.choice);
-      if (willShow) this.exitFullForInteract();
       if (plan.kind === 'leaf') {
         it.leaf = true;
         it.status = '本片段是结局 · 可回退或重播';
         it.pending = true;
+        this.openInteractPanel();
         return true;
       }
       if (plan.kind === 'auto') {
         if (!plan.choice) {
           it.status = '本段没有可点选项，已停住';
           it.pending = true;
+          this.openInteractPanel();
           return true;
         }
-        it.visible = false;
-        it.pending = true;
         it.status = (it.autoJump ? '自动进入下一段：' : '即将自动连播：') + plan.choice.option;
         this.scheduleAutoChain(plan.choice, plan.delayMs || AUTO_CHAIN_DELAY_MS);
         return true;
       }
-      /* wait：片尾停住，无限期等用户点。这是 B 站互动稿的默认语义，
-       * 也是「用户还没来得及读选项就被自动跳走」的根因修复。 */
+      /* wait：片尾停住，无限期等用户点。 */
       it.waiting = true;
       it.pending = true;
+      this.openInteractPanel();
       if (plan.countdownMs > 0) {
         it.status = plan.choice
           ? '请选择（倒计时结束走默认项：' + plan.choice.option + '）'
@@ -3786,7 +3387,6 @@ export default {
       }
       this.interact.waiting = false;
     },
-    /* duration>0：片尾停住后按秒倒计时，到点走默认项（没有默认项就继续等）。 */
     startChoiceCountdown(totalMs, def) {
       this.clearChoiceCountdown();
       const it = this.interact;
@@ -3811,7 +3411,52 @@ export default {
       this._timers.add(t);
       this._choiceT = t;
     },
-    // 等待帧恢复：起播/seek 后解码重启延迟实测 1.5~2.5s+（网络敏感）→ 轮询至多 maxMs
+    async onInteractBack() {
+      const it = this.interact;
+      if (!it.active || it.busy || !it.history.length || it.noBacktracking) return;
+      const snap = it.history.pop();
+      it.vars = snap.vars || {};
+      it.segment = snap.segment || 1;
+      const item = {
+        kind: 'video', bvid: it.bvid, cid: snap.cid, useCid: true,
+        title: it.baseItem.title, up: it.baseItem.up, cover: it.baseItem.cover,
+        nodeTitle: snap.node ? snap.node.title : ''
+      };
+      await this.playSegment(item, snap.edgeId, snap.cid, false);
+    },
+    async onInteractReplay() {
+      const it = this.interact;
+      if (!it.active || it.busy || !(it.cid > 0)) return;
+      const item = {
+        kind: 'video', bvid: it.bvid, cid: it.cid, useCid: true,
+        title: it.baseItem.title, up: it.baseItem.up, cover: it.baseItem.cover,
+        nodeTitle: it.node ? it.node.title : ''
+      };
+      await this.playSegment(item, it.edgeId, it.cid, false);
+    },
+    /* ---------- 控件 5 秒自动收起 ---------- */
+    scheduleAutoHide() {
+      this.clearAutoHide();
+      if (!canAutoHide(this.play.state, {
+        full: false,
+        chrome: !this.chromeHidden,
+        busy: this.seekDragMs != null || this.interact.visible === true
+      })) return;
+      const t = setTimeout(() => {
+        this._timers.delete(t);
+        this._hideT = 0;
+        if (this.play.state === 'playing' && !this.chromeHidden) this.toggleChrome();
+      }, AUTO_HIDE_MS);
+      this._hideT = t;
+      this._timers.add(t);
+    },
+    clearAutoHide() {
+      if (!this._hideT) return;
+      clearTimeout(this._hideT);
+      this._timers.delete(this._hideT);
+      this._hideT = 0;
+    },
+
     async waitForFrames(maxMs) {
       const t0 = Date.now();
       let st = await readStatus(this.makeCtx(this.gen));
@@ -3859,9 +3504,8 @@ export default {
       if (isStreamEnded(st, durMs)) {
         this.play.state = 'ended';
         this.play.note = '';
-        this.play.positionMs = durMs > 0 ? Math.min(pos, durMs) : pos;
-        /* 互动片段不能在自愈路径上丢掉连播入口：tick 的末尾判据会先命中，
-         * 但看门狗先跑到的这一趟也必须走同一出口。 */
+        this.play.positionMs = pos;
+        /* 互动片段不能在自愈路径上丢掉连播入口。 */
         this.handleSegmentEnd();
         this.stopPoll();
         logWarn(
@@ -3893,7 +3537,6 @@ export default {
       this.stopPoll();
       this._pollLogged = false;
       this._audioDeadWarned = false; // 每次新播放重置音频中断提示状态。
-      this._audioOffWarned = false;  // 音频设备被占用的提示也按会话重置
       this._resyncNoteOn = false;
       /* 自愈状态按会话重置（任务 D）：换一个视频就是新会话，配额重新给满。 */
       this._avRecoverAt = 0;
@@ -3911,10 +3554,6 @@ export default {
           this.stopPoll();
           return;
         }
-        /* 加载动画只跟 state 走：任何路径（含看门狗判错）把状态推进到非 loading，
-         * 这里都会把 120ms 定时器停掉，不会出现"已经播起来了还在跳点"。 */
-        if (this.play.state === 'loading') this.startLoadingAnim();
-        else this.stopLoadingAnim();
         const st = await readStatus(this.makeCtx(myGen));
         if (this.gen !== myGen) {
           this.stopPoll();
@@ -3976,21 +3615,8 @@ export default {
         // 不能在"已播完"后再追加无声提示。
         if (st.audioDead && st.state === 'playing' && !this._audioDeadWarned) {
           this._audioDeadWarned = true;
-          this.play.note = '无声：音轨未加载，已自动重试';
-          logWarn(
-            '[bili] audio dead（播放中，已自愈 ' + (st.audioHeals || 0) +
-            ' 次）→ 音轨仍然没有数据，可能是音频 URL 失效或音频输出被占用'
-          );
-        }
-        /*
-         * audioOff：native 因为「音频设备被别的进程占着」主动降级为无声
-         * （先等 400ms 重试过一次，仍然打不开）。这种时候画面是好的，
-         * 提示必须写清「画面正常、只是没声音」，否则用户会以为播放失败。
-         */
-        if (st.audioOff && st.state === 'playing' && !this._audioOffWarned) {
-          this._audioOffWarned = true;
-          this.play.note = '无声：音频设备被占用，已静音播放';
-          logWarn('[bili] audioOff（设备被占，已降级为无声播放，画面不受影响）');
+          this.play.note = '无声：音频输出被其他应用占用';
+          logWarn('[bili] audio chain dead（播放中）→ 音频输出可能被其他应用占用');
         }
         // 起播门诊断（v1.7.1）：音频等待视频首帧的时长（正常=首帧耗时；15000=超时放行）
         if (st.gateWaitMs > 400 && st.gateWaitMs !== this._lastGateMs) {
@@ -4029,12 +3655,17 @@ export default {
          * frames 停涨，这在看门狗看来和"卡死"一模一样。若不放行，用户每拖一次进度条就
          * 可能被自愈逻辑再补一次 seek（雪上加霜，且耗尽 3 次配额）。 */
         const seekBusy = this._seekNoteAt > 0;
-        /* 【唯一声明点】seek 是否仍在等首帧。tick 里有两处要读它：
-         *   ① 上面字幕锚点段（决定要不要更新 _ccAnchor）；
-         *   ② 下面「seek 的『定位中…』」段（算出真值，并决定要不要让「加载中…」让位）。
-         * 必须声明在①之前 —— let/const 在同一函数作用域里有 TDZ，晚声明会在①抛
-         * ReferenceError，整段 tick 从那里断掉（进度条不动 / 字幕不出 / 互动不连播）。 */
-        let seekWaiting = false;
+        /* 【CC 字幕】位置冻结判定 + 锚点（250ms 字幕钟按墙钟外推）。
+         * 缓冲/卡顿时 state 仍是 playing 但 positionMs 不动，锚点必须标 frozen，
+         * 否则字幕会按墙钟一路跑到画面前面去。 */
+        const posStalled = this._tickPos === st.positionMs && this._tickFrames === st.frames;
+        this._tickPos = st.positionMs;
+        this._tickFrames = st.frames;
+        this._ccAnchor = {
+          pos: st.positionMs,
+          at: Date.now(),
+          frozen: st.state !== 'playing' || posStalled || seekBusy
+        };
         /* 直播标志：本 tick 内反复用（终止判据 + 重连提示），取一次避免多次走 computed。 */
         const isLivePlay = this.isLivePlay;
         /* ---------- 流末尾判据（n9，必须在所有自愈看门狗之前） ----------
@@ -4043,59 +3674,20 @@ export default {
          * 原地 seek 回末尾 → 重开 ffmpeg 读 1 秒又死 → 无限循环（真机 08:22 实锤）。
          * 所以这里先确认"其实已经播完了"，直接收尾并停轮询。 */
         let durMs = num(st.durationMs, this.play.session && this.play.session.durationMs);
-        /* 互动片段的时长来自 playurl.timelength；老 native 或 durl 回退偶尔报 0，
-         * 这时用起播时记下的 session.durationMs 兜底，否则末尾判据永远不触发、
-         * 下一段不会连播。 */
-        if (!(durMs > 0) && this.play.session && this.play.session.durationMs > 0) {
-          durMs = this.play.session.durationMs;
-        }
-        /* 【互动视频】以本段 playurl 的 timelength 为准。互动稿的 view.duration 是
-         * 整张剧情图的总时长（示例 1669s），某些 native/容器会把它报上来；一旦
-         * 用错，题面要等到 1669s 的最后一刻才出现，表现为「互动完全不工作」。
-         * session.cid 与当前互动片段一致时才覆盖，普通视频不受影响。 */
+        /* 【互动视频】以本段 playurl 的 timelength 为准：view.duration 是整张剧情图
+         * 的总时长，用错会让题面等到最后一刻才出现。 */
         if (this.interact.active && this.play.session &&
             this.play.session.cid === this.interact.cid &&
             this.play.session.durationMs > 0) {
           durMs = this.play.session.durationMs;
         }
-        /* 【CC 字幕】按墙钟在两次 1s 轮询之间插值，字幕切换精度 250ms 而不是 1s。
-         * seek 期间不更新锚点（此时 positionMs 是乐观值，会让字幕跳到别处）。
-         *
-         * ⚠️ seekWaiting 必须在这里就**已声明**。3.5.6 第八轮的真机事故：本行原先
-         * 读的是函数末尾（下面「seek 的『定位中…』」段）才 let 声明的同名变量，
-         * 同一函数作用域里 const/let 有 TDZ → 每个 tick 都在这一行抛
-         * ReferenceError：Cannot access 'seekWaiting' before initialization。
-         * 结果是 tick 从第 2870 行起整段不执行 —— 位置不回写（进度条卡在开头）、
-         * 字幕锚点不更新（字幕永远取 pos=0 那句）、末尾判据不触发（互动播完没选项）、
-         * state 不跟随 native。一个 TDZ 让四个功能一起哑火，症状看着像四个 bug。 */
-        /* 【3.5.16 修「字幕和视频完全对不上」的主因】旧实现只判 state !== 'playing'，
-         * 但**缓冲/卡顿/取流暂停时 state 仍然是 playing，positionMs 却不动**：
-         * 于是 250ms 的字幕钟继续按墙钟往前插值，字幕一路跑到前面去（真机实测
-         * 卡 12 秒 = 字幕提前 12 秒，恢复后才被拉回）。
-         * 现在多加一条硬判据：这一 tick 的 positionMs 与 frames 都没变 ⇒ 位置冻结，
-         * 锚点按 frozen 处理（只显示 st.positionMs 那一句，不再外推）。
-         * 注意 seekBusy 用的是本 tick 早已算好的值（旧代码读的 seekWaiting 在下文
-         * 才被赋值，同一个 tick 内恒为 false，那是个死守卫）。 */
-        const posStalled = this._tickPos === st.positionMs && this._tickFrames === st.frames;
-        this._tickPos = st.positionMs;
-        this._tickFrames = st.frames;
-        this._ccAnchor = {
-          pos: st.positionMs,
-          at: Date.now(),
-          frozen: st.state !== 'playing' || posStalled || seekBusy || seekWaiting
-        };
-        /* 【互动视频】只在题面窗口打开选项：真实 edgeinfo_v2 的 start_time_r=300
-         * （= 3.00s）表示片尾前 3 秒才出题；type=0 的自动跳转片段根本不出面板。
-         * 用户主动收起（dismissed）后本轮不再自动弹回，可用右列入口手动打开。 */
         if (this.interact.active && !this.interact.leaf && durMs > 0) {
           const remain = Math.max(0, durMs - st.positionMs);
           this.interact.countdown = Math.ceil(remain / 1000);
           const lead = this.interact.leadMs > 0 ? this.interact.leadMs : CHOICE_LEAD_MS;
           if (!this.interact.autoJump && !this.interact.dismissed &&
               shouldShowChoices(st.positionMs, durMs, lead)) {
-            this.exitFullForInteract();
-            this.interact.visible = true;
-            this.interact.pending = true;
+            this.openInteractPanel();
           }
         }
         /* 只在 playing 态判末尾：暂停在最后一秒（用户拖到末尾后按了暂停）不该被判成
@@ -4105,8 +3697,7 @@ export default {
           this.play.note = ''; // 播完不保留"网络不稳定/加载中"之类残留提示
           this.play.frames = st.frames;
           this.play.positionMs = durMs > 0 ? Math.min(st.positionMs, durMs) : st.positionMs;
-          /* 互动视频：末尾不是终点，而是「连播下一个片段」的触发点。
-           * 有默认选项 → 短延迟后自动跳；无默认 → 选项面板保持可见等用户点。 */
+          /* 互动视频：末尾不是终点，而是「连播下一个片段」的触发点。 */
           this.handleSegmentEnd();
           this.stopPoll();
           logWarn(
@@ -4265,6 +3856,7 @@ export default {
          * 旧管线仍在出帧（native 还在 debounce），帧数一涨就被误判成"首帧已到"，
          * 于是下一轮 tick 用 native 的**旧**位置覆盖刚写下的落点 → 进度条往左弹一下。
          * 4s 兜底收起，避免弱网下把用户困在提示里。 */
+        let seekWaiting = false;
         if (this._seekNoteAt > 0) {
           const waited = Date.now() - this._seekNoteAt;
           if (st.seekPending === true) this._seekSawPending = true;
@@ -4358,79 +3950,170 @@ export default {
         if (st.state === 'ended') {
           this.play.state = 'ended';
           this.play.note = ''; // 播完时清掉残留提示。
-          /* 互动片段：native 先报 ended（EOS 到了但位置没到 dur）也要进连播/等选择，
-           * 否则会停在一个没有选项的最后一帧。 */
-          this.handleSegmentEnd();
-          /* 播完要让控件回来：否则隐藏控件后播完，用户既看不到"已播完"
-           * 也没有重播/拖回去的入口。 */
-          this.syncChromeForState();
           this.stopPoll();
           logWarn('[bili] video ended frames=' + st.frames);
         } else if (st.state === 'paused') {
           this.play.state = 'paused';
-          /* 可能被系统/后台暂停：同样要让控件（暂停标记）出现。setChrome 幂等，
-           * 状态没变时不会重复下发 setVideoRect。 */
-          this.syncChromeForState();
         } else if (st.state === 'playing') {
           this.play.state = 'playing';
-          /* 进/出全屏如果发生在取流中（loading），那一轮 setVideoRect 会被
-           * applyVideoGeometry 的"没出画面就不改矩形"挡掉。这里按当时记下的
-           * 原因补一次（必须是 full-*，控件显隐不需要补）。 */
-          if (this._rectDirty) {
-            this._rectDirty = false;
-            const pending = this._rectPendingReason || '';
-            this._rectPendingReason = '';
-            if (pending.indexOf('full-') === 0 || pending === 'cc') {
-              this.applyVideoGeometry(pending);
-            }
-          }
         }
       };
-      /* tick 是 async 的，里面任何一次抛错都会变成「未处理的 promise 拒绝」：
-       * 后面半段（位置回写 / 末尾判据 / 状态跟随）静默不执行，界面看起来就是
-       * 「进度条不走、字幕不出、播完没反应」，而日志里只有一行没人看的红字。
-       * 真机踩过一次 TDZ（见 tick 里 seekWaiting 的注释），所以这里显式兜住并打点：
-       * 保证下一个 1s 还能照常跑，且事故在日志里留下可检索的一行。 */
       this._poll = setInterval(() => {
-        const p = tick();
-        if (p && typeof p.then === 'function') {
-          p.then(null, (err) => {
-            logWarn('[bili] poll tick 异常（本轮中断，下一轮继续）: ' + ((err && err.message) || err));
-          });
-        }
+        tick();
       }, 1000);
       this._intervals.add(this._poll);
       /* 字幕位置插值：native 每秒才回一次 positionMs，1s 粒度会让字幕明显不同步。
-       * 用「上次状态位置 + 墙钟增量」在 250ms 节拍上推进，暂停/seek 时冻结。 */
-      if (this._ccClock) {
-        clearInterval(this._ccClock);
-        this._intervals.delete(this._ccClock);
-      }
+       * 用「上次状态位置 + 墙钟增量」在 250ms 节拍上推进；暂停/seek 时冻结。
+       * 外推上限 1.2s：tick 被长任务拖住时不至于把字幕推到很远。 */
       this._ccClock = setInterval(() => {
-        /* 弹幕搭这趟车，不另开定时器：它只需要在跨 6 分钟分片时动一次，
-         * 其余时候就是一次整数比较。放在字幕的「没开就早退」之前，
-         * 因为字幕关着的时候不代表弹幕也关着。 */
-        this.tickDm(this._ccAnchor && !this._ccAnchor.frozen
-          ? this._ccAnchor.pos + Math.max(0, Date.now() - this._ccAnchor.at)
-          : this.play.positionMs);
-        if (!this.ccActive) {
+        if (!this.ccBandVisible) {
           if (this.cc.posMs !== 0) this.cc.posMs = 0;
           return;
         }
         const a = this._ccAnchor;
         let p = a ? a.pos : this.play.positionMs;
-        /* 外推上限 = 一次轮询间隔 + 余量。tick 若被长任务拖住，没有上限就会把
-         * 字幕推到很远的地方（实测卡顿时 12 秒）。 */
-        if (a && !a.frozen) p = a.pos + Math.min(CC_EXTRAP_MAX_MS, Math.max(0, Date.now() - a.at));
+        if (a && !a.frozen) p = a.pos + Math.min(1200, Math.max(0, Date.now() - a.at));
         if (p !== this.cc.posMs) this.cc.posMs = p;
       }, 250);
       this._intervals.add(this._ccClock);
     },
+    /* ---------- 视频放大（双指捏合 1..4x） ---------- */
+    async onToggleVideoZoom() {
+      const on = this.videoSettings.videoZoom !== true;
+      this.videoSettings = Object.assign({}, this.videoSettings, { videoZoom: on });
+      saveVideoSettings(this.videoSettings);
+      if (!on) {
+        await this.applyZoom(1);
+        this.stopPinch();
+      } else if (this.mode === 'play') {
+        this.startPinch();
+      }
+      logWarn('[zoom] enabled=' + (on ? 1 : 0));
+    },
+    async applyZoom(z) {
+      const v = Math.max(1, Math.min(4, Number(z) || 1));
+      /* 捏合时 50ms 一发，native 调用可能还没返回；这里只保留“最新目标”，
+       * 由在途循环逐个落地，避免最后一帧被 _zoomBusy 吞掉（表现为放大不生效）。 */
+      if (Math.abs(v - this.zoomValue) < 0.03 && this._zoomPending == null) return;
+      this._zoomPending = v;
+      if (this._zoomBusy) return;
+      this._zoomBusy = true;
+      while (this._zoomPending != null) {
+        const target = this._zoomPending;
+        this._zoomPending = null;
+        try {
+          await player.setZoom(target);
+          this.zoomValue = target;
+          logWarn('[zoom] set ' + target.toFixed(2) + 'x');
+        } catch (e) {
+          logWarn('[zoom] setZoom fail: ' + ((e && e.message) || e));
+        }
+      }
+      this._zoomBusy = false;
+    },
+    /* 播放菜单「缩放」行：首次点击开启并 1.5x，之后 1.5→2→3→4→1 轮转。
+     * 提供不依赖双指的手动放大入口（双指与“点画面开栏”容易互相打断）。 */
+    async onZoomCycle() {
+      if (this.videoSettings.videoZoom !== true) {
+        this.videoSettings = Object.assign({}, this.videoSettings, { videoZoom: true });
+        saveVideoSettings(this.videoSettings);
+        this.startPinch();
+        await this.applyZoom(1.5);
+        return;
+      }
+      const levels = [1.5, 2, 3, 4, 1];
+      let next = 1;
+      for (let i = 0; i < levels.length; i++) {
+        if (levels[i] > this.zoomValue + 0.01) { next = levels[i]; break; }
+      }
+      await this.applyZoom(next);
+    },
+    startPinch() {
+      if (this.mode !== 'play' || this.videoSettings.videoZoom !== true) return;
+      if (this._pinchTimer) return;
+      if (typeof pinchStart !== 'function') return;
+      try {
+        pinchStart();
+      } catch (e) {
+        logWarn('[zoom] picpinch unavailable: ' + ((e && e.message) || e));
+        return;
+      }
+      const tick = () => {
+        if (this.mode !== 'play') {
+          this.stopPinch();
+          return;
+        }
+        this.pollPinch();
+        const t = setTimeout(tick, 50);
+        this._pinchTimer = t;
+        this._timers.add(t);
+      };
+      const t = setTimeout(tick, 150);
+      this._pinchTimer = t;
+      this._timers.add(t);
+      logWarn('[zoom] pinch started');
+    },
+    stopPinch() {
+      if (this._pinchTimer) {
+        clearTimeout(this._pinchTimer);
+        this._timers.delete(this._pinchTimer);
+        this._pinchTimer = 0;
+      }
+      this.pinch.active = false;
+      this.pinch.miss = 0;
+      if (typeof pinchStop === 'function') {
+        try { pinchStop(); } catch (e) { /* 模块不存在时忽略 */ }
+      }
+    },
+    pollPinch() {
+      let text = '';
+      try {
+        text = String(pinchRead() || '');
+      } catch (e) {
+        return;
+      }
+      let count = 0;
+      let distance = 0;
+      const parts = text.split(' ');
+      for (let i = 0; i < parts.length; i++) {
+        if (parts[i].indexOf('n=') === 0) count = Number(parts[i].slice(2));
+        else if (parts[i].indexOf('d=') === 0) distance = Number(parts[i].slice(2));
+      }
+      if (count >= 2 && distance > 1) {
+        this.pinch.miss = 0;
+        if (!this.pinch.active) {
+          this.pinch.active = true;
+          this.pinch.baseD = distance;
+          this.pinch.baseZoom = this.zoomValue;
+          /* 捏合开始：取消还没落地的单击定时器，避免 280ms 后误开栏。 */
+          if (this._tapTimer) {
+            clearTimeout(this._tapTimer);
+            this._timers.delete(this._tapTimer);
+            this._tapTimer = 0;
+          }
+          logWarn('[zoom] pinch start d=' + Math.round(distance) + ' base=' + this.pinch.baseZoom);
+        }
+        if (this.pinch.baseD > 0) {
+          this.applyZoom(this.pinch.baseZoom * distance / this.pinch.baseD);
+        }
+      } else if (this.pinch.active) {
+        /* 触摸板偶尔漏报一帧：连续 4 次（约 200ms）没凑齐两指才结束。 */
+        this.pinch.miss = (this.pinch.miss || 0) + 1;
+        if (this.pinch.miss >= 4) {
+          this.pinch.active = false;
+          this.pinch.miss = 0;
+          this._suppressTapUntil = Date.now() + 800;
+          logWarn('[zoom] pinch end -> ' + this.zoomValue.toFixed(2) + 'x');
+        }
+      }
+    },
+
     async onTogglePlay() {
       const st = this.play.state;
-      // 未起播时点视频区没有意义动作 —— 以前会写一条「当前不可控制（取流中…）」，
-      // 属于用户已经能从画面看出来的多余状态说明（PStore 规则 4），现在静默忽略。
-      if (st !== 'playing' && st !== 'paused') return;
+      if (st !== 'playing' && st !== 'paused') {
+        this.play.note = '当前不可控制（' + (STATE_LABELS[st] || st) + '）';
+        return;
+      }
       const myGen = this.gen;
       const wasPlaying = st === 'playing';
       const r = await togglePlay(this.makeCtx(myGen), wasPlaying);
@@ -4443,85 +4126,183 @@ export default {
       if (r.state === 'playing' || r.state === 'paused') this.play.state = r.state;
       else this.play.state = wasPlaying ? 'paused' : 'playing';
       this.play.note = '';
-      /* 暂停必须让控件出现：暂停标记就画在顶部悬浮条里（画面中间压不到，
-       * 见 play_chrome.js 顶部的设备约束）。 */
-      this.syncChromeForState();
+      /* 暂停时控件必须可见（否则用户找不到继续键）；继续播放重新计时 5 秒。 */
+      if (this.play.state === 'paused') {
+        this.clearAutoHide();
+        if (this.chromeHidden) await this.toggleChrome();
+      } else {
+        this.scheduleAutoHide();
+      }
       logWarn('[bili] toggle → ' + this.play.state);
     },
-    /* 暂停/播完/出错 → 强制展开控件；播放中保持用户当前选择。
-     * 恢复播放时要重新开始"全屏静默收起"的计时（暂停期间是清掉的）。 */
-    syncChromeForState() {
-      if (chromeForState(this.play.state) === true) {
-        this.clearAutoHide(); // 暂停态不该被自动收起
-        this.setChrome(true);
+    /* 全屏播放页：单击 = 显示/隐藏顶底栏；双击 = 暂停/继续（3.5.13 同步）。
+     * 单双击共存：第一次点击延时 280ms 执行单击，期间第二击取消单击并切暂停。
+     * 菜单打开时点空白处先关菜单（菜单按钮本身被隐藏，正常碰不到）。 */
+    async onVideoTap() {
+      if (this.playerMenuOpen) {
+        await this.togglePlayerMenu();
         return;
       }
-      if (this.play.state === 'playing') this.scheduleAutoHide();
-    },
-    /* 单击画面空白处：展开/收起整套控件（用户要求）。
-     * 暂停态点画面 = 继续播放（B 站习惯：暂停时点画面不会把暂停标记藏起来）；
-     * 直播没有控件（无时长、seek 无意义），点画面仍旧是暂停/继续。
-     * 全屏态再多一条：控件展开后静默 3.5s 自动收起（见 scheduleAutoHide）。 */
-    /* 点画面 = 展开/收起控件（暂停态点画面 = 继续播）。
-     *
-     * 【连点闸】`.pvideo` 和 `<hole>` 都绑了 click（falcon 的点击不一定从子节点
-     * 冒泡，只绑父级会有一半面积点不动，见模板注释）。代价是真机上有机会**两个
-     * 都收到** —— 一次物理点击 toggle 两次 = 等于没变，却下发两次 setVideoRect。
-     * 300ms 内的重复点击只认第一次：手感上"点一下"就是一次，而连点这种设备
-     * 抖动/双击习惯不会再让画面矩形来回抖。
-     * （另一半保险在 applyVideoGeometry：几何没变就一次都不下发。） */
-    onVideoTap() {
-      const now = Date.now();
-      const st = this.play.state;
-      if (st === 'loading') return; // 取流中不抢交互，避免误触
-      if (this.isLivePlay) {
-        this.onTogglePlay();
-        return;
-      }
-      /* 同一次物理点击会被 .pvideo 与 <hole> 各收一次（falcon 的点击不一定从子
-       * 节点冒泡，所以两个都必须绑）。不先把这个重复判掉，它会被当成一次真正的
-       * 双击 → 点一下就暂停。60ms 内丢弃重复事件；真人双击的两下间隔普遍
-       * 120~250ms，不会被误吞。 */
-      if (now - (this._tapAt || 0) < 60) return;
-      this._tapAt = now;
-      /* 双击仲裁：第一击不立即生效，挂一个延时；延时内又来一击 = 暂停/播放，
-       * 否则延时到期才切沉浸态。 */
-      if (this._tapT) {
-        clearTimeout(this._tapT);
-        this._timers.delete(this._tapT);
-        this._tapT = 0;
-        this.onTogglePlay();
+      /* 双指期间/刚结束时不要把手势尾部当成一次点击去开/关栏。 */
+      if (this.pinch.active || Date.now() < (this._suppressTapUntil || 0)) return;
+      if (this._tapTimer) {
+        clearTimeout(this._tapTimer);
+        this._timers.delete(this._tapTimer);
+        this._tapTimer = 0;
+        logWarn('[bili] double tap -> toggle play');
+        await this.onTogglePlay();
+        await this.showChromeForControl();
         return;
       }
       const t = setTimeout(() => {
         this._timers.delete(t);
-        this._tapT = 0;
-        this.setSide(!this.ui.side);
-      }, TAP_DELAY_MS);
-      this._tapT = t;
+        this._tapTimer = 0;
+        this.toggleChrome();
+      }, 280);
+      this._tapTimer = t;
       this._timers.add(t);
     },
-    /* 控件收起时顶栏/控制条只剩纯黑占位：点这两条也要能把控件叫回来。
-     * 真机反馈「全屏后点下方不出进度条」—— 那 32px 当时既没有进度条、
-     * 也没有绑点击，点了当然没反应。 */
-    onBarTap() {
-      if (this.play.state === 'loading') return;
-      if (!this.ui.chrome) this.setChrome(true);
+    /* 操作后确保栏可见：隐藏态先切回来；可见态只是重置 5 秒自动收起计时。 */
+    async showChromeForControl() {
+      if (this.chromeHidden) await this.toggleChrome();
+      else this.scheduleAutoHide();
     },
-    /* 顶部条的快进/快退（参考系统播放器的六档跳转：-10m/-1m/-10s/+10s/+1m/+10m）。
-     * 笔尖拖进度条本来就不精确，分钟级跳转对 20 分钟以上的稿件很实用；这里取
-     * 中间四档（±10s / ±1m）—— 中列 457 宽，6 个按钮会挤掉标题。
-     * 目标位置由 seekGoal 钳到 [0, dur-1s]，右端留 1s 免得停在 dur 触发"播完"。 */
-    async onSeekStep(deltaMs) {
-      const s = this.play.session;
-      const st = this.play.state;
-      if (!s || !(s.durationMs > 0)) {
-        this.play.note = '时长未知，无法定位';
+    /* 隐藏/恢复状态栏：纯切换（v-if + native setRect），不做动画。
+     * 隐藏时停掉标题跑马灯：栏都没了，滚动只会制造无谓的整页重绘。
+     *
+     * 3.9.2 修复「关栏后再次打开闪烁」：恢复栏必须**先**收窄 native 矩形、再切 UI。
+     * 旧实现先切 UI、等 120ms 才 setRect，这 120ms 里 native 仍按全屏矩形每 33ms
+     * 整屏覆写，Falcon 刚画好的顶/底栏被反复刷掉 → 用户看到闪烁。先收窄后，
+     * native 只写视频带，栏区彻底交给 Falcon；末尾再重贴一次最后一帧，
+     * 补回整页重绘（chromeTick）可能刷黑、暂停态又没有新帧可等的视频带。 */
+    async toggleChrome() {
+      const showBars = this.chromeHidden;
+      if (showBars) {
+        await this.applyVideoChromeRect(false); // 先停止整屏覆写，再让 Falcon 画栏
+        this.chromeHidden = false;
+        this.chromeTick = (this.chromeTick || 0) + 1;
+        this.startTitleScroll();
+        logWarn('[bili] chrome shown');
+        await this.sleep(120);
+        await this.applyVideoChromeRect(false); // 整页重绘之后重贴，避免视频带被刷黑
+        this.scheduleAutoHide();
         return;
       }
-      if (st !== 'playing' && st !== 'paused') return;
-      const goal = seekGoal(this.play.positionMs, s.durationMs, deltaMs);
-      await this.seekTo(goal);
+      this.clearAutoHide();
+      this.chromeHidden = true;
+      this.chromeTick = (this.chromeTick || 0) + 1; // 触发整页重绘，清掉信箱区残影
+      logWarn('[bili] chrome hidden (fullscreen)');
+      this.stopTitleScroll();
+      /* 等 Falcon 先把新布局画出来（约 1~2 帧），再让 native 用最后一帧重贴。
+       * 顺序反了会看到「视频先铺满 → 被整页重绘刷黑 → 33ms 后补回」的闪跳。 */
+      await this.sleep(120);
+      await this.applyVideoChromeRect(true);
+    },
+    /* 把「栏显示/隐藏」对应的视频矩形下发给 native（不重启解码）。
+     * hidden 显式传入目标态：恢复栏时要在 chromeHidden 翻之前先收窄矩形
+     * （见 toggleChrome），不能依赖 this.chromeHidden 的当前值。
+     * 起播前/无会话时 native 返回 PLAYER_NO_SESSION 属正常：open 会按
+     * makeCtx().videoArea 直接开在正确几何上。 */
+    async applyVideoChromeRect(hidden) {
+      if (this.mode !== 'play') return;
+      const fullscreen = typeof hidden === 'boolean' ? hidden : this.chromeHidden;
+      const s = this.play.session || {};
+      const rects = playVideoRects(
+        s.videoWidth || 640,
+        s.videoHeight || 360,
+        playAreaFor(fullscreen, this.ccBandVisible)
+      );
+      const p = rects.physical;
+      try {
+        const r = await player.setVideoRect(p.x, p.y, p.width, p.height);
+        logWarn('[bili] chrome rect ' + [p.x, p.y, p.width, p.height].join(',') +
+          ' → ' + (r && r.ok ? 'ok' : ((r && r.code) || 'fail')));
+      } catch (e) {
+        logWarn('[bili] chrome rect fail: ' + ((e && e.message) || e));
+      }
+    },
+    /* 切「样式」：清晰/流畅的解码尺寸不同，必须按当前位置重开一次解码管线
+     * （native 的 scale 尺寸在 open 时固定，setRect 只改显示落点）。
+     * 重开不重新取流：沿用 session.stream（同一条 URL），只在当前位置重启。
+     * 显示矩形始终等比信箱 —— 不裁切、不拉伸，彻底修掉旧「铺满裁切」的变形。 */
+    async onCyclePlayStyle() {
+      const next = nextPlayStyle(this.videoSettings);
+      this.videoSettings = Object.assign({}, this.videoSettings, { playStyle: next });
+      saveVideoSettings(this.videoSettings);
+      logWarn('[bili] playStyle -> ' + next);
+      await this.applyVideoStyle();
+    },
+    async applyVideoStyle() {
+      if (this.mode !== 'play') return;
+      const s = this.play.session;
+      if (!s) return;
+      if (!s.stream) {
+        // 老会话没有流信息（理论上不会发生）：只能改显示落点，解码尺寸保持不变
+        await this.applyVideoChromeRect();
+        return;
+      }
+      const pos = s.live ? 0 : (Number(this.play.positionMs) || 0);
+      /* 重开解码会短暂没有 native 会话，旧 poll 若在空窗期读 status 会拿到错误态并
+       * 触发看门狗。这里换一代 gen：先停旧 poll，成功后再用新 gen 重启轮询。 */
+      const myGen = ++this.gen;
+      this.stopPoll();
+      const ctx = this.makeCtx(myGen);
+      this.play.state = 'loading';
+      this.play.note = '切换样式…';
+      logWarn('[bili] style restart pos=' + pos + ' style=' + this.videoSettings.playStyle);
+      await closeSession(ctx);
+      if (this.gen !== myGen) return;
+      const item = {
+        kind: s.kind,
+        bvid: s.bvid,
+        cid: s.cid,
+        roomid: s.roomid,
+        title: s.title,
+        up: s.up,
+        cover: s.cover
+      };
+      const r = await openVideo(ctx, item, s.stream, pos);
+      if (this.gen !== myGen) {
+        if (r && r.ok) await closeSession(this.makeCtx(this.gen));
+        return;
+      }
+      if (!r.ok) {
+        this.play.state = 'error';
+        this.play.note = describePlayError(r);
+        logWarn('[bili] style restart fail stage=' + r.stage + ': ' + r.message);
+        return;
+      }
+      this.play.session = r.session;
+      this.play.state = 'playing';
+      this.play.note = '';
+      this.play.frames = 0;
+      this._noFrameAt = Date.now(); // 重开解码有 1~3s 首帧，别让看门狗立刻判死
+      /* 菜单还开着时，新会话默认会立刻贴帧把菜单盖掉；重新暂停 fb 输出，
+       * 让菜单一直可见，等用户关菜单时再 resumeRender。 */
+      if (this.playerMenuOpen) {
+        try { await player.pauseRender(); } catch (e) { /* 仅影响菜单遮挡 */ }
+      }
+      this.startPoll(myGen);
+      logWarn('[bili] style restart ok pos=' + pos + ' out=' + r.session.outWidth + 'x' + r.session.outHeight +
+        ' decode=' + (r.session.decodePhysical ? r.session.decodePhysical.width + 'x' + r.session.decodePhysical.height : 'display'));
+    },
+    /* 右侧设置菜单（移植文件管理播放器）：打开时停 native 写 fb，
+     * 否则下一帧视频会把 Falcon 画的菜单盖掉（文件管理播放器同款处理）。 */
+    async togglePlayerMenu() {
+      const open = !this.playerMenuOpen;
+      this.playerMenuOpen = open;
+      logWarn('[bili] playerMenu ' + (open ? 'open' : 'close'));
+      /* 菜单打开期间暂停标题跑马灯：标题每 400ms 触发一次整页重绘，
+       * 而 pauseRender 已停写 fb —— 重绘会把视频带刷黑后没人补帧，
+       * 冻结的画面就丢了。关闭菜单后恢复滚动。 */
+      if (open) this.stopTitleScroll();
+      try {
+        if (open) await player.pauseRender();
+        else await player.resumeRender();
+      } catch (e) {
+        logWarn('[bili] playerMenu render ' + (open ? 'pause' : 'resume') + ' fail: ' + ((e && e.message) || e));
+      }
+      if (!open) this.startTitleScroll();
     },
     async onSeek(deltaSec) {
       const s = this.play.session;
@@ -4608,8 +4389,18 @@ export default {
     /* ---------- 左图标栏 ---------- */
     // 返回：播放态走 onBack（停会话回列表），图文态走 onBackArticle（回搜索结果）
     onIbarBack() {
-      if (this.mode === 'article') this.onBackArticle();
-      else this.onBack();
+      if (this.mode === 'article') return this.onBackArticle();
+      /* 详情来自 UP 主页时，返回箭头回 UP（而不是一路回列表）——
+       * 否则「搜索 → UP → 详情」按返回会跳回搜索页，上下文全丢。 */
+      if (this.mode === 'detail' && this.detailFrom === 'up') {
+        ++this.gen;
+        this.stopTitleScroll();
+        this.mode = 'up';
+        logWarn('[bili] detail back to up');
+        this.restoreListScroll('up');
+        return;
+      }
+      this.onBack();
     },
     // 图文态图标栏的评论开关
     toggleArticleComments() {
@@ -4672,20 +4463,15 @@ export default {
       }
     },
     async onToggleLike() {
-      if (this.act.busy) {
-        logWarn('[bili] like skip: busy');
-        return;
-      }
+      if (this.act.busy) return;
       const aid = this.playAid();
       if (!(aid > 0)) {
         this.act.status = '拿不到稿件号';
-        logWarn('[bili] like skip: noaid');
         return;
       }
       const csrf = await this.csrfToken();
       if (!csrf) {
         this.act.status = '需要登录后才能点赞';
-        logWarn('[bili] like skip: nocsrf');
         return;
       }
       const on = !(this.act.like > 0);
@@ -4703,44 +4489,33 @@ export default {
       logWarn('[bili] like → ' + this.act.like);
     },
     async onAddCoin() {
-      /* 【3.5.10】四个早退分支以前**一行日志都没有**，设备日志里连
-       * `POST /x/web-interface/coin/add` 都查不到（= 根本没进网络），完全没法定位。
-       * 现在每个分支都打一行 `[bili] coin skip: ...`，并带上判定所需的原始值。 */
-      if (this.act.busy) {
-        logWarn('[bili] coin skip: busy');
-        return;
-      }
+      if (this.act.busy) return;
       const aid = this.playAid();
       if (!(aid > 0)) {
         this.act.status = '拿不到稿件号';
-        logWarn('[bili] coin skip: noaid session=' + JSON.stringify(this.play.session && this.play.session.aid) +
-          ' ctxOid=' + (this.replyCtx && this.replyCtx.oid));
         return;
       }
       if (this.act.coin >= 2) {
         this.act.status = '已投满 2 枚';
-        logWarn('[bili] coin skip: full coin=' + this.act.coin + ' aid=' + aid);
         return;
       }
       const csrf = await this.csrfToken();
       if (!csrf) {
         this.act.status = '需要登录后才能投币';
-        logWarn('[bili] coin skip: nocsrf');
         return;
       }
       this.act.busy = true;
-      logWarn('[bili] coin post aid=' + aid + ' multiply=1');
       const r = await addCoin(this.client, aid, 1, false, csrf);
       this.act.busy = false;
       if (!r.ok) {
         this.act.status = '投币失败：' + r.message;
-        logWarn('[bili] coin fail stage=' + r.stage + ' code=' + r.code + ' msg=' + r.message);
+        logWarn('[bili] coin fail stage=' + r.stage + ' code=' + r.code);
         return;
       }
       this.act.coin = Math.min(2, this.act.coin + 1);
       this.act.coinCount = (this.act.coinCount || 0) + 1;
       this.act.status = '已投 ' + this.act.coin + ' 枚';
-      logWarn('[bili] coin ok → ' + this.act.coin);
+      logWarn('[bili] coin → ' + this.act.coin);
     },
     async loadFavFolders() {
       const aid = this.playAid();
@@ -4810,31 +4585,12 @@ export default {
     /* ---------- 可拖动进度条（任务 E：拖动中不下发 seek） ---------- */
     // falcon 运行时只有 changedTouches[0].pageX / pageY（offsetX/clientX/touches 全为 0），
     // 没有 panstart/panmove，所以自己按逻辑坐标算比例。
-    // 几何唯一来源是 play_chrome.seekMetrics：轨道 = 中列 − 两个时间 − 两道路径间隙。
-    // pageX 是「相对被触摸元素」的坐标，不是整页坐标 —— 实测在绑定元素内点 x=37
-    // 拿到的就是 37；现在绑定在 .cb-hit（轨道本身）上，所以不需要再减 8px padding。
+    // 几何统一由 screen.js 提供（seekRatioFromX）：轨道 = 中列 469 − 2×8 padding = 453。
+    // pageX 是「相对被触摸元素」的坐标，不是整页坐标 —— 实测在 .seek 内点 x=37 得到的
+    // pageX 就是 37，所以只需减 8px 左 padding，不用再减中列的绝对 x。
     seekRatioAt(x) {
-      /* 轨道宽 = seekTrackW（底部条 / 全屏侧栏面板），DOM 与命中测试共用。 */
-      return trackRatioFromX(x, this.seekTrackW);
-    },
-    /* 加载动画的三个点：当前帧高亮哪一个（其余是暗点）。
-     * 用三个 computed 而不是 loadDotClass(i)：falcon 的模板对 `:class` 里的
-     * 方法调用没有先例（既有代码只在插值里调方法），三元 + computed 最稳。 */
-    loadDot0() {
-      return this.loadAnim.dot === 0 ? 'pl-dot pl-dot-on' : 'pl-dot';
-    },
-    loadDot1() {
-      return this.loadAnim.dot === 1 ? 'pl-dot pl-dot-on' : 'pl-dot';
-    },
-    loadDot2() {
-      return this.loadAnim.dot === 2 ? 'pl-dot pl-dot-on' : 'pl-dot';
-    },
-    /* 图文图片宽度：不改原图比例，只把超过正文可用宽（X6 880 / X7 856）的压回来。
-     * 以前模板里写死 880，X7 Pro 上正文 872 宽，图片会顶到右边缘（裁 8px）。 */
-    articleImgW(dw) {
-      const max = this.L.num.cover;
-      const w = Number(dw) > 0 ? Number(dw) : max;
-      return (w > max ? max : w) + 'px';
+      // 全屏底栏轨道 600px（物理 400），与 .fp-track 宽度一致
+      return seekRatioFromX(x, FP_SEEK_TRACK_WIDTH);
     },
     /* 拖动中：**只更新本地 seekDragMs，绝不下发 seek**。
      *
@@ -5199,9 +4955,53 @@ export default {
       this.loadMoreChildren();
     },
 
+    /* 播放页返回（与详情/图文的 onBack 分开）：
+     * 用户反馈「搜索 → UP 主页 → 详情 → 播放，返回却回到搜索页」——
+     * 这里按来源回 UP 主页；其余情况回列表，并恢复列表滚动位置。 */
+    async onPlayBack() {
+      if (this.interact.visible) {
+        await this.closeInteractPanel();
+        return;
+      }
+      const myGen = ++this.gen;
+      this.stopPoll();
+      this.stopTitleScroll();
+      this.clearAutoHide();
+      this.clearAutoChain();
+      this.clearChoiceCountdown();
+      this.resetExtras();
+      this.playerMenuOpen = false;
+      this.chromeHidden = false;
+      this.closeComments();
+      // 主动离开播放页：停保活（真正该停的地方，不是 onHide）
+      keepScreenOff();
+      this._keepOn = false;
+      this._bgPaused = false;
+      await closeSession(this.makeCtx(myGen));
+      this.play = idlePlay();
+      if (this.playFrom === 'detail' && this.detailFrom === 'up') {
+        this.mode = 'up';
+        this.playFrom = '';
+        logWarn('[bili] play back to up');
+        this.restoreListScroll('up');
+        return;
+      }
+      this.mode = 'browse';
+      this.detailFrom = '';
+      this.playFrom = '';
+      logWarn('[bili] play back to browse');
+      this.restoreListScroll(this.tab);
+    },
     async onBack() {
       const myGen = ++this.gen;
       this.stopPoll();
+      this.stopTitleScroll();
+      this.clearAutoHide();
+      this.clearAutoChain();
+      this.clearChoiceCountdown();
+      this.resetExtras();
+      this.playerMenuOpen = false;
+      this.chromeHidden = false;
       this.closeComments();
       // 主动离开播放页：停保活（真正该停的地方，不是 onHide）
       keepScreenOff();
@@ -5210,12 +5010,10 @@ export default {
       await closeSession(this.makeCtx(myGen));
       this.mode = 'browse';
       this.play = idlePlay();
-      /* 【3.5.21】退出播放页就把字幕/弹幕的会话数据清干净。
-       * 以前这里只换 play，cc.cues 会一路留到下一次 onPlayItem 的
-       * resetExtras —— 中间这段「有字幕数据但没有正在播的视频」的窗口
-       * 正是「A 的字幕配 B 的画面」这类串片缺陷的温床。 */
-      this.resetExtras();
+      this.detailFrom = '';
+      this.playFrom = '';
       logWarn('[bili] back to browse');
+      this.restoreListScroll(this.tab);
     },
     /* ---------- 扫码登录 ---------- */
     async onGoLogin() {
@@ -5329,14 +5127,6 @@ export default {
       await this.sleep(1200);
       if (myGen !== this.gen) return;
       this.mineView = 'info';
-      /* 登录后补一次字幕：player/v2 的字幕轨道要 Cookie，登录前那一轮必然是
-       * 空列表（见 ccSettingHint 的注释）。这里不 await —— 别让网络往返拖住"登录成功"
-       * 的回列表动作，字幕晚半秒出来无所谓。 */
-      if (this.mode === 'play' && this.play.session && !this.play.session.live && this.cc.on) {
-        this.reloadCc(this.gen).then(null, (e) => {
-          logWarn('[cc] 登录后补拉失败: ' + ((e && e.message) || e));
-        });
-      }
     },
     onCancelQr() {
       this.gen++; // 轮询循环 guard 退出
@@ -5407,8 +5197,17 @@ export default {
     lqText() {
       return liveQualityLabel(this.videoSettings);
     },
+    /* 播放页菜单的紧凑写法：大字号下「480p 30fps（省流）」会顶到菜单右边缘，
+     * 去掉 " fps" 与空格（360p 30fps → 360p30），语义不变、省约 2 个字宽。
+     * 「我的」页仍用完整写法（那一页有整行宽度）。 */
+    vqMenuText() {
+      return videoQualityLabel(this.videoSettings).replace(/\s+(\d+)fps/i, '$1');
+    },
+    lqMenuText() {
+      return liveQualityLabel(this.videoSettings).replace(/\s+(\d+)fps/i, '$1');
+    },
 
-    /* ---------- 检查更新（双源 Release：GitCode 主 / GitHub 备）----------
+    /* ---------- 检查更新（GitHub Release，v3.5.5）----------
      *
      * 三条硬约束（都是真机实测，别按常识改）：
      *   1) 检测走**直连** api.github.com。镜像 v4.gh-proxy.org 访问 api.github.com
@@ -5425,9 +5224,8 @@ export default {
       this.upd = {
         visible: true,
         mode: m,
-        source: SOURCES[0].id,
         stage: 'checking',
-        message: '正在检查最新正式版本…',
+        message: '正在连接 GitHub 检查最新正式版本…',
         release: null,
         lines: [],
         tip: ''
@@ -5444,7 +5242,6 @@ export default {
       }
       if (!isNewer(r.release.tag, APP_VERSION)) {
         this.upd = Object.assign({}, this.upd, {
-          source: r.source || this.upd.source,
           stage: 'latest',
           message: '当前 v' + APP_VERSION + ' 已是线上最新的正式版本（' + r.release.tag + '）',
           release: r.release,
@@ -5454,23 +5251,22 @@ export default {
         });
         return;
       }
-      this.updShowReady(m, r.release, r.source);
+      this.updShowReady(m, r.release);
     },
 
     // 「发现新版本」：把发布说明切成行（<text> 里不能有换行，见 base.less 铁律）
-    updShowReady(mode, release, source) {
+    updShowReady(mode, release) {
       this.upd = {
         visible: true,
         mode: mode,
-        source: source || this.upd.source || SOURCES[0].id,
         stage: 'ready',
         message: '新版本 ' + release.tag + ' · 当前 v' + APP_VERSION,
         release: release,
         lines: bodyLines(release.body),
         tip: ''
       };
-      logWarn('[bili] upd ready ' + release.tag + ' src=' + this.upd.source +
-              ' asset=' + (release.assetName || '-') + ' size=' + (release.assetSize || 0));
+      logWarn('[bili] upd ready ' + release.tag + ' asset=' + (release.assetName || '-') +
+              ' size=' + (release.assetSize || 0));
     },
 
     // 进入软件时的自动检测（静默失败：检查更新绝不能打断正常观看）
@@ -5487,7 +5283,7 @@ export default {
                   ' quiet=' + (st.quietDay || '-') + ' remote=' + r.release.tag + ')');
           return;
         }
-        this.updShowReady('auto', r.release, r.source);
+        this.updShowReady('auto', r.release);
       } catch (e) {
         logWarn('[bili] upd auto check error: ' + ((e && e.message) || e));
       }
@@ -5533,147 +5329,69 @@ export default {
       logWarn('[bili] upd release page: ' + url);
     },
 
-    /* 换源下载：按指定平台重新取 Release 再直连下载。
-     * 为什么需要两个按钮而不是只留一个：「部分用户网络环境无法连接 github」是真实的，
-     * 反过来 GitHub 在某些海外/校园网又比 GitCode 稳。两个平台互为备用，
-     * 但**都走直连** —— 用户明确要求去掉镜像（v3.5.6）。 */
-    async onUpdInstallFrom(onlyId) {
-      const id = onlyId || this.upd.source;
-      const cur = this.upd.release;
-      // 目标源就是当前命中的源、包也已经在手 -> 不用再请求一次
-      if (id === this.upd.source && cur && cur.assetUrl) {
-        await this.onUpdInstall();
-        return;
-      }
-      const tag = cur ? cur.tag : '-';
-      this.upd = Object.assign({}, this.upd, {
-        stage: 'checking',
-        message: '正在从 ' + sourceLabel(id) + ' 获取 ' + tag + '…',
-        tip: ''
-      });
-      logWarn('[bili] upd switch source -> ' + id + ' for ' + tag);
-      const r = await fetchLatestRelease(id);
-      if (!r.ok || !r.release || !r.release.assetUrl) {
-        this.upd = Object.assign({}, this.upd, {
-          stage: 'ready',
-          message: '新版本 ' + tag + ' · 当前 v' + APP_VERSION,
-          tip: sourceLabel(id) + ' 暂时取不到该版本，可点另一个按钮重试'
-        });
-        logWarn('[bili] upd switch source fail ' + id + ': ' + (r.message || '-'));
-        return;
-      }
-      // 两个平台的发布顺序不保证同步：目标平台上可能还没有这个 tag。
-      // 这时**不能**把手上那个源的包当作"从目标源下载"去下 —— 日志和提示都会说谎，
-      // 用户也会以为 GitHub 能通（实际根本没连到 GitHub）。宁可明确报"还没有"。
-      const sameOrNewer = r.release.tag === tag || isNewer(r.release.tag, tag);
-      if (!sameOrNewer) {
-        this.upd = Object.assign({}, this.upd, {
-          stage: 'ready',
-          message: '新版本 ' + tag + ' · 当前 v' + APP_VERSION,
-          tip: sourceLabel(id) + ' 上还没有 ' + tag + '，可点另一个按钮'
-        });
-        logWarn('[bili] upd switch source: ' + id + ' has ' + r.release.tag +
-                ' < ' + tag + ' -> keep ' + this.upd.source);
-        return;
-      }
-      this.upd = Object.assign({}, this.upd, {
-        source: r.source,
-        stage: 'ready',
-        release: r.release,
-        message: '新版本 ' + r.release.tag + ' · 当前 v' + APP_VERSION
-      });
-      await this.onUpdInstall();
-    },
-
-    /* 下载 + 安装，**只走直连**（v3.5.6 起没有镜像按钮）。
-     * altSourceId 给了且首源失败时，换另一个平台再试一次：
-     * 「我的」页手动检测只有 2 个按钮，用户没法自己换源，必须有兜底。 */
-    async onUpdInstall(altSourceId) {
+    // 下载：先试用户选定的源；失败且没指定镜像时自动改用镜像再试一次。
+    // 为什么自动回退：「我的」页手动检测只有 2 个按钮（用户在需求里明确不要选源），
+    // 直连被墙时必须有兜底，否则「立即更新」在国内基本等于不可用。
+    async onUpdInstall(useMirror) {
       const r = this.upd.release;
       if (!r || !r.assetUrl) {
         this.upd = Object.assign({}, this.upd, { tip: '该版本没有可用安装包，请到发布页手动下载' });
         return;
       }
-      if (await this.updTryInstall(r, this.updSourceLabel)) return;
-      if (!altSourceId) return;
-      // 换源重试：换的是**源**，不是镜像前缀
-      const alt = sourceById(altSourceId);
-      this.upd = Object.assign({}, this.upd, {
-        stage: 'checking',
-        message: '正在从 ' + alt.label + ' 重试…',
-        tip: ''
-      });
-      logWarn('[bili] upd retry via source ' + alt.id);
-      const r2 = await fetchLatestRelease(alt.id);
-      if (!r2.ok || !r2.release || !r2.release.assetUrl) {
+      const order = useMirror ? [true, false] : [false, true];
+      for (let i = 0; i < order.length; i++) {
+        const mirror = order[i];
+        const url = downloadUrl(r.assetUrl, mirror);
+        if (!url) continue;
+        const label = mirror ? '镜像' : '直连';
         this.upd = Object.assign({}, this.upd, {
-          stage: 'error',
-          message: '两个平台都取不到安装包',
-          tip: '请到发布页手动下载'
+          stage: 'downloading',
+          message: '正在下载 ' + (r.assetName || '安装包') + '（' + label + '加速）…',
+          tip: progressText(0, r.assetSize)
+        });
+        logWarn('[bili] upd download via ' + label + ': ' + url);
+        const d = await downloadFileToDisk(url);
+        if (!d.ok) {
+          logWarn('[bili] upd download fail via ' + label + ': ' + (d.message || ''));
+          if (i === order.length - 1) {
+            this.upd = Object.assign({}, this.upd, {
+              stage: 'error',
+              message: '下载失败：' + (d.message || '未知错误'),
+              tip: '两个下载源都失败了，可稍后重试或到发布页手动下载'
+            });
+            return;
+          }
+          continue;
+        }
+        logWarn('[bili] upd downloaded via ' + label + ' -> ' + d.filePath);
+        this.upd = Object.assign({}, this.upd, {
+          stage: 'installing',
+          message: '下载完成，正在安装…',
+          tip: d.filePath || ''
+        });
+        const ins = await installAmr(d.filePath);
+        if (!ins.ok) {
+          logWarn('[bili] upd install fail: ' + (ins.message || '') + ' rc=' + (ins.rc == null ? '?' : ins.rc));
+          this.upd = Object.assign({}, this.upd, {
+            stage: 'error',
+            message: '安装失败：' + (ins.message || '未知错误'),
+            tip: '安装包已下载到 ' + (d.filePath || SAVE_DIR)
+          });
+          return;
+        }
+        logWarn('[bili] upd install done ' + r.tag);
+        this.upd = Object.assign({}, this.upd, {
+          stage: 'done',
+          message: '已安装 ' + r.tag,
+          tip: '重新打开软件即可使用新版本'
         });
         return;
       }
       this.upd = Object.assign({}, this.upd, {
-        source: r2.source,
-        stage: 'ready',
-        release: r2.release,
-        message: '新版本 ' + r2.release.tag + ' · 当前 v' + APP_VERSION
+        stage: 'error',
+        message: '没有可用的下载地址',
+        tip: '请到发布页手动下载'
       });
-      await this.updTryInstall(r2.release, alt.label);
-    },
-
-    /* 单个源上的一次完整「下载 -> 安装」。成功返回 true；失败返回 false 并把
-     * 阶段的 message/tip 写好（调用方决定要不要换源重试）。 */
-    async updTryInstall(rel, label) {
-      const url = downloadUrl(rel.assetUrl, false);
-      if (!url) {
-        this.upd = Object.assign({}, this.upd, {
-          stage: 'error',
-          message: '没有可用的下载地址',
-          tip: '请到发布页手动下载'
-        });
-        return false;
-      }
-      this.upd = Object.assign({}, this.upd, {
-        stage: 'downloading',
-        message: '正在从 ' + label + ' 下载 ' + (rel.assetName || '安装包') + '…',
-        tip: progressText(0, rel.assetSize)
-      });
-      logWarn('[bili] upd download via ' + label + ' 直连: ' + url);
-      const d = await downloadFileToDisk(url);
-      if (!d.ok) {
-        logWarn('[bili] upd download fail via ' + label + ': ' + (d.message || ''));
-        this.upd = Object.assign({}, this.upd, {
-          stage: 'error',
-          message: '下载失败：' + (d.message || '未知错误'),
-          tip: d.message || ''
-        });
-        return false;
-      }
-      logWarn('[bili] upd downloaded via ' + label + ' -> ' + d.filePath);
-      this.upd = Object.assign({}, this.upd, {
-        stage: 'installing',
-        message: '下载完成，正在安装…',
-        tip: d.filePath || ''
-      });
-      const ins = await installAmr(d.filePath);
-      if (!ins.ok) {
-        logWarn('[bili] upd install fail: ' + (ins.message || '') +
-                ' rc=' + (ins.rc == null ? '?' : ins.rc));
-        this.upd = Object.assign({}, this.upd, {
-          stage: 'error',
-          message: '安装失败：' + (ins.message || '未知错误'),
-          tip: '安装包已下载到 ' + (d.filePath || SAVE_DIR)
-        });
-        return false;
-      }
-      logWarn('[bili] upd install done ' + rel.tag);
-      this.upd = Object.assign({}, this.upd, {
-        stage: 'done',
-        message: '已安装 ' + rel.tag,
-        tip: '重新打开软件即可使用新版本'
-      });
-      return true;
     },
 
     /* ---------- 「我的」页手动检测更新 ---------- */
@@ -5699,8 +5417,8 @@ export default {
       const newer = isNewer(r.release.tag, APP_VERSION);
       logWarn('[bili] UPD-PROBE newer=' + (newer ? 1 : 0) + ' prompt=' +
               (shouldAutoPrompt(normalizeUpdateState(null), r.release.tag, APP_VERSION, Date.now()) ? 1 : 0));
-      const link = downloadUrl(r.release.assetUrl, false);
-      logWarn('[bili] UPD-PROBE direct url=' + (link || '(none)'));
+      const link = downloadUrl(r.release.assetUrl, true);
+      logWarn('[bili] UPD-PROBE mirror url=' + (link || '(none)'));
       if (!link) {
         logWarn('[bili] UPD-PROBE FAIL at url');
         return;
@@ -5730,28 +5448,10 @@ export default {
     teardown(note) {
       this.gen++;
       this.stopPoll();
-      this.stopLoadingAnim();
-      this.ui.chrome = true; // 下次进播放页默认展开控件
-      this.ui.side = false;  // 沉浸态是"这一次播放"的状态，离开就复位（回列表还是三列）
-      this.ui.frame = 0;
-      this.clearAutoHide();  // 自动收起句柄必须先清：下面 forEach 只 clearTimeout 不置零
-      this._rectDirty = false;
-      this._rectPendingReason = '';
-      /* 新会话必须清掉矩形记忆：管线是新建的，平面按 build_pipeline 的盒子
-       * 重配过，跟我们上一轮记的 chrome 盒子不一定相同。 */
-      this._rectKey = '';
-      this._bgClosed = false;
-      this._bgPosMs = 0;
-      this._bgWasPaused = false;
+      this.stopPinch();
       this._timers.forEach((t) => clearTimeout(t));
       this._timers.clear();
-      this.resetExtras(); // 顺手停掉自动连播定时器、清空互动历史与字幕时轴
-      /* 弹幕数据必须让 native 也丢掉：下次起播是另一个稿子，
-       * 留着旧列表会看到别人的弹幕飘在当前视频上。模式（self.dm.mode）
-       * 不动 —— 那是用户设置，换集之后仍按原档显示。 */
-      this.clearDmNative();
       this._seekDebounceT = 0; // 排队中的 seek 已随 _timers 一起清掉
-      this._choiceT = 0;       // 互动倒计时句柄同上（resetExtras 已 clear）
       this._seekNoteAt = 0;
       cancelNativePosts(); // 丢弃在途 form POST（幂等）
       input.dispose(); // 退订系统输入法回调（幂等）
@@ -5796,15 +5496,7 @@ export default {
       if (wasOn) logWarn('[bili] 屏幕保活停止（' + where + '）ticks=' + ticks);
     },
     onShow() {
-      /* 【第二十三轮】回前台第一件事：把 onHide 关掉的会话重开。
-       * 必须在恢复播放之前 —— 后台期间会话是关掉的，先 resume 没有对象。
-       * 重开成功后再走"恢复播放"分支（此时已在播，_bgPaused 已被清掉）。 */
-      if (this.mode === 'play' && this._bgClosed) {
-        this.startKeepScreen();
-        this._bgPaused = false;
-        this.reopenForForeground('onShow');
-        return;
-      }
+      if (this.mode === 'play') this.startPinch();
       /* 回前台：若退后台时暂停过播放，这里恢复。
        * 只恢复"我们自己暂停的那一次"，用户手动暂停的不动。
        * 不自动联网（列表/播放状态原样保留）。 */
@@ -5828,6 +5520,7 @@ export default {
       }
       // 后台期间保活被停过，回前台仍处播放态则重启
       if (this.mode === 'play') this.startKeepScreen();
+      if (this.mode === 'play') this.startPinch();
     },
     onHide() {
       // 系统输入法拉起/关闭会触发 onHide —— 输入会话中不做任何处理
@@ -5836,16 +5529,7 @@ export default {
         logWarn('[bili] onHide during IM session → skip');
         return;
       }
-      /* 【第二十三轮】退后台 = 关闭会话：既满足「下拉状态栏时视频不要浮在
-       * 系统面板上面」，又避免用 setVideoRect 改矩形（那条路会让画面变扁，
-       * 见 hideForBackground 的注释）。回前台由 reopenForForeground 重开。 */
-      if (this.mode === 'play') this.hideForBackground('onHide');
-      /* 会话已经（或正在）关闭：不要再下发 pause —— 那会和 teardown 抢同一个
-       * 管线，日志里只会多一条"暂停失败"。直播不走这条路（上面 return 了）。 */
-      if (this.mode === 'play' && this._bgClosed) {
-        this.stopKeepScreen('onHide');
-        return;
-      }
+      this.stopPinch();
       /* 应用退后台：**保留会话**，只暂停 + 停保活。
        *
        * 为什么暂停而不是让它后台播：本机音频输出是独占的（alsasink），后台继续播会
@@ -5968,6 +5652,125 @@ export default {
         await this.onBack();
       } catch (e) {
         logWarn('[bili] LIVE AUTOTEST FAIL: ' + ((e && e.message) || e));
+      }
+    },
+    /* 标签页探针（种子 {enabled:true, autotest:true, probeTab:'downloads'}）：
+     * 启动后直接切到指定标签并停住，纯 UI 取证（不点按、不起播）。 */
+    async runTabProbe(tab) {
+      logWarn('[bili] probe tab begin ' + tab);
+      try {
+        this.downloads = (await loadDownloads()).items;
+        await this.selectTab(tab);
+        logWarn('[bili] probe tab done ' + this.tab + ' dl=' + this.downloads.length);
+      } catch (e) {
+        logWarn('[bili] probe tab FAIL: ' + ((e && e.message) || e));
+      }
+    },
+    /* 搜索探针（种子 {enabled:true, autotest:true, probeSearch:'关键词'}）：
+     * 跑一次真实搜索并打点耗时/条数/首尾标题 —— 用于验证「搜索慢」与
+     * 「末尾结果不符」两件事，不在正常路径上执行。 */
+    async runSearchProbe(kw) {
+      logWarn('[bili] probe search begin kw=' + kw);
+      try {
+        await this.selectTab('rcmd');
+        this.keyword = kw;
+        this.searchResults = { video: [], article: [], live: [] };
+        this.searchPages = { video: 1, article: 1, live: 1 };
+        this.searchNoMoreMap = { video: false, article: false, live: false };
+        const t0 = Date.now();
+        await this.selectTab('search');
+        const ms = Date.now() - t0;
+        const n = this.searchItems.length;
+        const first = n ? this.searchItems[0].title : '-';
+        const last = n ? this.searchItems[n - 1].title : '-';
+        logWarn('[bili] probe search result n=' + n + ' ms=' + ms + ' first=' + first + ' last=' + last);
+      } catch (e) {
+        logWarn('[bili] probe search FAIL: ' + ((e && e.message) || e));
+      }
+    },
+    /* UP 主页探针（种子 {enabled:true, autotest:true, probeUp:true}）：
+     * 首屏 → 第一条视频详情 → 点蓝色 UP 名 → 停在 UP 主页供截图 + 日志取证。
+     * 只读链路（详情会取流解析，但不启动 native 播放）。 */
+    async runUpProbe() {
+      logWarn('[bili] probe up begin');
+      try {
+        await this.selectTab('rcmd');
+        if (!this.rcmdItems.length) {
+          logWarn('[bili] probe up FAIL: 推荐列表为空');
+          return;
+        }
+        const item = this.rcmdItems[0];
+        logWarn('[bili] probe up detail bv=' + item.bvid + ' itemMid=' + item.mid);
+        await this.onOpenDetail(item);
+        await this.sleep(600);
+        logWarn('[bili] probe up detail ready mid=' + this.infoMid + ' up=' + this.infoUp);
+        await this.onOpenUp();
+        await this.sleep(1500);
+        const c = this.up.card;
+        logWarn('[bili] probe up result mode=' + this.mode + ' mid=' + this.up.mid +
+          ' card=' + (c ? c.name : '-') + ' fans=' + (c ? c.fans : 0) +
+          ' items=' + this.up.items.length + ' noMore=' + this.up.noMore +
+          ' status=' + this.up.status);
+        if (this.up.items.length) {
+          logWarn('[bili] probe up first=' + this.up.items[0].bvid + ' title=' + this.up.items[0].title);
+        }
+      } catch (e) {
+        logWarn('[bili] probe up FAIL: ' + ((e && e.message) || e));
+      }
+    },
+    /* 播放返回探针（种子 {enabled:true, autotest:true, probePlayBackUp:true}）：
+     * 推荐 → 详情 → UP 主页 → UP 投稿详情 → 播放 → onPlayBack，
+     * 日志应出现 mode=up（而不是 browse/search）。用于钉住 3.9.5 的返回栈修复。 */
+    async runPlayBackUpProbe() {
+      logWarn('[bili] probe playback-up begin');
+      try {
+        await this.selectTab('rcmd');
+        if (!this.rcmdItems.length) {
+          logWarn('[bili] probe playback-up FAIL: 推荐列表为空');
+          return;
+        }
+        await this.onOpenDetail(this.rcmdItems[0]);
+        await this.sleep(600);
+        await this.onOpenUp();
+        await this.sleep(1200);
+        if (!this.up.items.length) {
+          logWarn('[bili] probe playback-up FAIL: UP 投稿为空 status=' + this.up.status);
+          return;
+        }
+        await this.onOpenDetail(this.up.items[0]);
+        await this.sleep(600);
+        logWarn('[bili] probe playback-up detailFrom=' + this.detailFrom + ' mode=' + this.mode);
+        await this.onStartPlayFromDetail();
+        await this.sleep(2500);
+        logWarn('[bili] probe playback-up playFrom=' + this.playFrom + ' mode=' + this.mode);
+        await this.onPlayBack();
+        await this.sleep(700);
+        logWarn('[bili] probe playback-up result mode=' + this.mode +
+          ' upItems=' + this.up.items.length + ' tab=' + this.tab);
+      } catch (e) {
+        logWarn('[bili] probe playback-up FAIL: ' + ((e && e.message) || e));
+      }
+    },
+    /* 本地缓存起播探针（种子 {enabled:true, autotest:true, probeLocalPlay:true}）：
+     * 进「下载」页播第一条缓存，验证「本地 mp4 → player.open → 出帧」整条链路。 */
+    async runLocalPlayProbe() {
+      logWarn('[bili] probe local begin');
+      try {
+        await this.selectTab('rcmd');
+        this.downloads = (await loadDownloads()).items;
+        await this.refreshDownloads();
+        logWarn('[bili] probe local n=' + this.downloads.length);
+        if (!this.downloads.length) {
+          logWarn('[bili] probe local FAIL: 缓存列表为空');
+          return;
+        }
+        await this.selectTab('downloads');
+        await this.onPlayDownload(this.downloads[0]);
+        const w = await this.waitForFrames(20000);
+        logWarn('[bili] probe local play state=' + this.play.state + ' frames=' + (w.st && w.st.frames) +
+          ' firstFrame=' + w.ms + 'ms note=' + this.play.note);
+      } catch (e) {
+        logWarn('[bili] probe local FAIL: ' + ((e && e.message) || e));
       }
     },
     /* 播放探针（缺陷 C / 屏幕保活取证专用）。

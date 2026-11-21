@@ -15,8 +15,12 @@
 // 为什么视频区高度是 240 而不是 266：X6 Pro 的视频走 KMS overlay 平面，
 // **盖在 Falcon UI 之上**，UI 画不上去。所以进度条必须落在视频矩形之外。
 
-export const LOGICAL = { width: 960, height: 266 };
-export const PHYSICAL = { width: 266, height: 960 };
+export const LOGICAL = { width: 960, height: 390 };
+/* JS 下发给 native 的「物理面」坐标：390×960。
+ * 面板实际是 260×640，native 的 scale_rect_for_fb() 再统一乘 k = 640/960 = 2/3
+ * 并夹到 fb 范围。宽度必须等于 LOGICAL.height（390），不是旧布局的 266 ——
+ * 390 布局改版时这里漏改会让 x+w 越界判断失灵（视频右侧被误判出屏）。 */
+export const PHYSICAL = { width: 390, height: 960 };
 export const DIRECTION = 270;
 
 // 面板列偏移：266 宽的逻辑列在 480 宽面板里的起始列。
@@ -27,15 +31,18 @@ export const PANEL_X_OFFSET = 107;
 // 主页左栏宽度（76 + 884 = 960）
 export const BAR_WIDTH = 76;
 
-// 主页视频网格列数：.grid 870 宽 / .vrow 174（166 + margin-right 8）⇒ 5 列。
-// 用户要求 m11950-3：加载更多后条目数必须能被列数整除，否则最后一行填不满。
-export const GRID_COLS = 5;
+// 主页视频网格列数：.grid 870 宽 / .vrow 439（431 + margin-right 8）⇒ 2 列。
+// 用户手绘稿要求首页改成两列大卡片（原来的 5 列字太小）。
+export const GRID_COLS = 2;
 
 // 把条目列表裁到列数的整数倍（尾部余数丢掉），并报告是否发生了裁剪。
 // 只裁尾部、不重排，保证已有卡片位置不变。
 export function trimToGridRows(items, cols) {
   const list = Array.isArray(items) ? items : [];
   const n = Math.max(1, Math.round(Number(cols) || GRID_COLS));
+  /* 不满一行时全保留：相关性裁剪后可能只剩 1 条（搜 "PenBili" 实测 20→1），
+   * 再按列数取整会把它裁成 0 条 —— 用户看到「无搜索结果」，比排版不齐严重得多。 */
+  if (list.length < n) return { items: list, trimmed: 0 };
   const rem = list.length % n;
   if (rem === 0) return { items: list, trimmed: 0 };
   return { items: list.slice(0, list.length - rem), trimmed: rem };
@@ -48,11 +55,11 @@ export const MID_COL_WIDTH = 469;
 export const RIGHT_COL_WIDTH = 278;
 
 // 左列上下两块高度（1.8 : 0.7 单位，1 单位 = 106.4px）
-export const LEFT_INFO_H = 192;
-export const LEFT_BTN_H = 74;
+export const LEFT_INFO_H = 282;
+export const LEFT_BTN_H = 108;
 
-// 右列上下两块高度（2.25 : 0.25 单位）
-export const RIGHT_BODY_H = 240;
+// 右列上下两块高度（390 = 364 评论 + 26 输入框）
+export const RIGHT_BODY_H = 364;
 export const RIGHT_INPUT_H = 26;
 
 // 视频下方进度条高度
@@ -93,7 +100,33 @@ export function seekFillWidth(ratio, fillMax) {
 }
 
 // 播放态视频区（逻辑面坐标）：x 紧接左列，底部 26px 留给进度条
-export const VIDEO_AREA = { x: LEFT_COL_WIDTH, y: 0, width: MID_COL_WIDTH, height: 240 };
+// 390 设计高 = 364 视频 + 26 进度条（见 base.less .pvideo/.seek）
+export const VIDEO_AREA = { x: LEFT_COL_WIDTH, y: 0, width: MID_COL_WIDTH, height: 364 };
+
+/* 全屏播放页（移植文件管理 shell 播放器 UI）：整页 960x390 =
+ *   顶栏 96 + 视频带 216 + 底栏 78
+ * 视频带在顶栏下方；native 只写这条带，顶/底栏由 Falcon 绘制，互不覆盖。
+ * 结构对应 base.less .fp-nav/.fp-video/.fp-bottom。 */
+export const FP_NAV_H = 96;
+export const FP_VIDEO_H = 216;
+export const FP_BOTTOM_H = 78;
+/* CC 字幕带（3.5.9 同步）：字幕是 Falcon UI 像素，不能盖在 native 视频帧上，
+ * 所以开字幕时从视频带底部让出 30px（物理 20px，正好放一行 16px 字）。 */
+export const FP_CC_H = 30;
+export const FULL_VIDEO_AREA = { x: 0, y: FP_NAV_H, width: 960, height: FP_VIDEO_H };
+export const FULL_VIDEO_AREA_CC = { x: 0, y: FP_NAV_H, width: 960, height: FP_VIDEO_H - FP_CC_H };
+/* 隐藏状态栏后的全屏视频区：整幅 960x390（native setRect 运行中切换，不重启解码）。
+ * 16:9 稿件按信箱适配 → 逻辑 693x390，物理落在面板正中（上下留 89px 黑边）。 */
+export const FULLSCREEN_VIDEO_AREA = { x: 0, y: 0, width: 960, height: 390 };
+export const FULLSCREEN_VIDEO_AREA_CC = { x: 0, y: 0, width: 960, height: 390 - FP_CC_H };
+/* 按「栏显隐 + 字幕开」选视频区：页面 DOM 与 native setRect 必须同源。 */
+export function playAreaFor(chromeHidden, ccOn) {
+  if (chromeHidden) return ccOn ? FULLSCREEN_VIDEO_AREA_CC : FULLSCREEN_VIDEO_AREA;
+  return ccOn ? FULL_VIDEO_AREA_CC : FULL_VIDEO_AREA;
+}
+/* 全屏底栏进度条：600 宽轨道（物理 400），填充最多 590（留圆点直径）。 */
+export const FP_SEEK_TRACK_WIDTH = 600;
+export const FP_SEEK_FILL_MAX = 590;
 
 // 直播态视频区：没有进度条，整列 266 全给画面（用户反馈 m07570-3）。
 //
@@ -101,7 +134,7 @@ export const VIDEO_AREA = { x: LEFT_COL_WIDTH, y: 0, width: MID_COL_WIDTH, heigh
 // 它盖在 falcon UI 之上，所以 falcon 侧把 .pvideo 撑到 266（.pvideo-live）之后，
 // 若平面仍是 240 高，画面下方 26px 会留一条黑边，而 hole 的点击热区却是 266 ——
 // 用户点那条黑边能暂停、看着却像没画面。两边必须严格一致。
-export const LIVE_VIDEO_AREA = { x: LEFT_COL_WIDTH, y: 0, width: MID_COL_WIDTH, height: 266 };
+export const LIVE_VIDEO_AREA = { x: LEFT_COL_WIDTH, y: 0, width: MID_COL_WIDTH, height: 390 };
 
 // 旧名兼容（图文态仍用「图标栏」这个概念时不再需要，保留导出避免既有 import 报错）
 export const ICON_BAR_WIDTH = LEFT_COL_WIDTH;
@@ -173,22 +206,11 @@ export function logicalRectToPhysicalRect(rect, logical, physical) {
   const y = Math.round(typeof rect.y === 'number' ? rect.y : 0);
   const w = Math.round(num(rect.width, box.height));
   const h = Math.round(num(rect.height, box.width));
-  /*
-   * 【3.5.6 第二十九轮】输出必须对齐到偶数 —— NV12 的 UV 平面按 2x2 采样。
-   *
-   * 真机横屏视频**左侧那条纯绿细线**就是这里来的：中列 457x280 里 fit 出
-   * 逻辑 457x257，物理变成 {x:12, y:271, w:257, h:457}。native 的
-   * normalize_video_rect 只把宽高改成了 256/456，**起点 y=271 仍是奇数**，
-   * 色度相位错位，最边缘那一列取到 YUV 全 0（= 绿）。
-   *
-   * x/y 向上取偶（不把上一列无效 chroma 包进来），宽高向下取偶；
-   * 最多挪 1px，肉眼无感，但色度相位一定对齐。
-   */
   return {
-    x: (y + 1) & ~1,
-    y: (panel.height - (x + w) + 1) & ~1,
-    width: Math.max(2, h & ~1),
-    height: Math.max(2, w & ~1)
+    x: y,
+    y: panel.height - (x + w),
+    width: h,
+    height: w
   };
 }
 
@@ -208,6 +230,9 @@ export function playVideoRects(videoWidth, videoHeight, area) {
   // area 缺省 = 点播视频区（240 高）。直播传 LIVE_VIDEO_AREA（266 高）。
   // 只换 box 的 height/x/width 来源，信箱适配与物理换算复用同一套逻辑，
   // 避免为直播另写一份换算（旋转变换错了极难排查，见上面 logicalRectToPhysicalRect 注释）。
+  //
+  // 「清晰」样式不再改变显示矩形（旧的 cover 铺满裁切会切掉大半画面，用户反馈变形）；
+  // 它只把**解码尺寸**换成无栏（全屏信箱）矩形，显示始终等比信箱 → 永不裁切/拉伸。
   const box = area || VIDEO_AREA;
   const fit = fitLogicalRect(videoWidth, videoHeight, {
     width: box.width,

@@ -21,8 +21,8 @@
 
 /* ---------- 根 ---------- */
 .page {
-  width: 100vw;
-  height: 100vh;
+  width: 960px;
+  height: 266px;
   flex-direction: row;
   background-color: @background-color;
 }
@@ -38,13 +38,13 @@
 /* ---------- 左侧栏（浏览态导航）---------- */
 /* 用户要求：左栏收窄到刚好包住按钮文字，把宽度让给推荐视频（76 + 884 = 960） */
 .bar {
-  width: 7.9167vw;
-  height: 100vh;
+  width: 76px;
+  height: 266px;
   flex-direction: column;
-  padding-left: 0.625vw;
-  padding-right: 0.625vw;
-  padding-top: 3.0075vh;
-  padding-bottom: 3.0075vh;
+  padding-left: 6px;
+  padding-right: 6px;
+  padding-top: 8px;
+  padding-bottom: 8px;
   background-color: @nav-background;
 }
 
@@ -52,18 +52,18 @@
    直接复用桌面图标 app_icon.png（粉色电视 + 天线），tools/make_icons.py 缩到 60x60。
    左栏 76 宽 - 左右 padding 12 = 64 可用，30x30 居中。 */
 .bar-logo {
-  width: 3.125vw;
-  height: 3.125vw;
-  margin-left: 1.7708vw;
-  margin-bottom: 0.7519vh;
+  width: 30px;
+  height: 30px;
+  margin-left: 17px;
+  margin-bottom: 2px;
 }
 
 /* 导航标签（圆角方形，radius 8）：未选=深底，选中=品牌粉底白字 */
 .tab {
-  width: 6.6667vw;
-  height: 15.7895vh;
-  margin-top: 2.2556vh;
-  border-radius: 0.8333vw;
+  width: 64px;
+  height: 42px;
+  margin-top: 6px;
+  border-radius: 8px;
   justify-content: center;
   align-items: center;
   background-color: @background-color;
@@ -74,7 +74,7 @@
 }
 
 .tab-text {
-  font-size: 1.5625vw;
+  font-size: 15px;
   color: @text-color-dim;
   text-align: center;
 }
@@ -89,30 +89,40 @@
 }
 
 .bar-status {
-  margin-top: 3.7594vh;
+  margin-top: 10px;
   flex-grow: 1;
   flex-shrink: 1;
   flex-basis: 0px;
-  font-size: 1.0417vw;
+  font-size: 10px;
   color: @text-color-dim;
   lines: 5;
   text-overflow: ellipsis;
 }
 
+/* UP 主主页左栏的返回按钮（复用 .tab，但比浏览标签更大更好点） */
+.tab-back {
+  height: 56px;
+  border-radius: 10px;
+}
+.tab-back-icon {
+  width: 30px;
+  height: 30px;
+}
+
 /* ---------- 左图标栏（播放 / 图文态）---------- */
 /* 纯图标，无文字：参考 iPad 版 B站的播放页左工具条 */
 .ibar {
-  width: 6.6667vw;
-  height: 100vh;
+  width: 64px;
+  height: 266px;
   flex-direction: column;
   align-items: center;
-  padding-top: 1.5038vh;
+  padding-top: 4px;
   background-color: @nav-background;
 }
 
 .ibtn {
-  width: 6.6667vw;
-  height: 14.2857vh;
+  width: 64px;
+  height: 38px;
   flex-direction: row;
   justify-content: center;
   align-items: center;
@@ -125,28 +135,28 @@
 /* 点赞/投币/收藏：图标放大 + 计数挪到图标**下方**（用户要求 m09254）。
  * 三个按钮合计 3x50=150，加返回 38 + 播放 38 + 时间约 30 = 256，仍在 266 内。 */
 .ibtn-big {
-  height: 18.797vh;
+  height: 50px;
   flex-direction: column;
   justify-content: flex-start;
 }
 
 .ibtn-icon {
-  width: 2.7083vw;
-  height: 2.7083vw;
+  width: 26px;
+  height: 26px;
 }
 
 .ibtn-icon-big {
-  width: 3.3333vw;
-  height: 3.3333vw;
+  width: 32px;
+  height: 32px;
 }
 
 /* 图标下方的全站计数（m06919-4 起带计数，m09254 起改到下方）：
  * 未操作=灰，操作成功=品牌粉。显式 width/height 防被 flex 压扁后文字不渲染。 */
 .ibtn-count {
   margin-top: 1px;
-  width: 6.6667vw;
-  height: 4.5113vh;
-  font-size: 0.9375vw;
+  width: 64px;
+  height: 12px;
+  font-size: 9px;
   color: @text-color-dim;
   text-align: center;
   lines: 1;
@@ -159,9 +169,9 @@
 
 /* 进度小屏显（图标栏底部） */
 .ibar-time {
-  margin-top: 1.5038vh;
-  width: 6.6667vw;
-  font-size: 1.1458vw;
+  margin-top: 4px;
+  width: 64px;
+  font-size: 11px;
   font-weight: 600;
   color: @accent;
   text-align: center;
@@ -169,8 +179,8 @@
 }
 
 .ibar-time-sub {
-  width: 6.6667vw;
-  font-size: 0.9375vw;
+  width: 64px;
+  font-size: 9px;
   color: @text-color-dim;
   text-align: center;
   lines: 1;
@@ -178,10 +188,10 @@
 
 /* 通用按钮（扫码页主按钮、评论面板关闭按钮复用） */
 .ctrl {
-  width: 16.25vw;
-  height: 13.5338vh;
-  margin-top: 3.0075vh;
-  border-radius: 0.8333vw;
+  width: 156px;
+  height: 36px;
+  margin-top: 8px;
+  border-radius: 8px;
   background-color: @ctrl-background;
   justify-content: center;
   align-items: center;
@@ -192,7 +202,7 @@
 }
 
 .ctrl-text {
-  font-size: 1.4583vw;
+  font-size: 14px;
   font-weight: 600;
   color: @text-color;
   text-align: center;
@@ -208,29 +218,29 @@
 
 /* ---------- 内容区（浏览）---------- */
 .content {
-  width: 92.0833vw;
-  height: 100vh;
+  width: 884px;
+  height: 266px;
   flex-direction: column;
 }
 
 .list {
-  width: 92.0833vw;
-  height: 100vh;
+  width: 884px;
+  height: 266px;
 }
 
 /* 卡片网格容器：5 列，卡宽 166 + 右间距 8 = 174 ×5 = 870（内容区 884，左缩进 7） */
 .grid {
-  width: 90.625vw;
-  margin-left: 0.7292vw;
+  width: 870px;
+  margin-left: 7px;
   flex-direction: row;
   flex-wrap: wrap;
 }
 
-/* 视频卡片：封面在上 + 标题 + 元信息（bilibili.com 首页封面卡片） */
+/* 视频卡片：封面在上 + 标题 + 元信息（用户手绘稿：首页两列大卡片） */
 .vrow {
-  width: 17.2917vw;
-  margin-right: 0.8333vw;
-  margin-top: 3.0075vh;
+  width: 427px;
+  margin-right: 8px;
+  margin-top: 8px;
   flex-direction: column;
 }
 
@@ -238,37 +248,38 @@
   opacity: 0.7;
 }
 
+/* 两列大卡片：427x242（(427+8)×2=870 正好铺满网格）。242 是最终设计值，字节码缩放工具会跳过它。 */
 .thumb {
-  width: 17.2917vw;
-  height: 34.9624vh;
-  border-radius: 0.8333vw;
+  width: 427px;
+  height: 242px;
+  border-radius: 12px;
   background-color: @card-border-color;
 }
 
 .vinfo {
-  width: 17.2917vw;
-  margin-top: 1.5038vh;
+  width: 427px;
+  margin-top: 6px;
   flex-direction: column;
 }
 
 .vtitle {
-  font-size: 1.25vw;
+  font-size: 12px;
   color: @text-color;
   lines: 1;
   text-overflow: ellipsis;
 }
 
 .vmeta {
-  margin-top: 0.7519vh;
-  font-size: 1.0417vw;
+  margin-top: 2px;
+  font-size: 10px;
   color: @text-color-dim;
   lines: 1;
   text-overflow: ellipsis;
 }
 
 .more {
-  width: 90vw;
-  height: 12.782vh;
+  width: 864px;
+  height: 34px;
   justify-content: center;
   align-items: center;
 }
@@ -278,20 +289,20 @@
 }
 
 .more-text {
-  font-size: 1.3542vw;
+  font-size: 13px;
   color: @accent;
   text-align: center;
 }
 
 .empty {
-  width: 90vw;
-  height: 75.188vh;
+  width: 864px;
+  height: 200px;
   justify-content: center;
   align-items: center;
 }
 
 .empty-text {
-  font-size: 1.4583vw;
+  font-size: 14px;
   color: @text-color-dim;
   text-align: center;
   lines: 2;
@@ -299,17 +310,17 @@
 
 /* 底部双按钮：刷新 | 加载更多（圆角方形） */
 .more-row {
-  width: 90vw;
+  width: 864px;
   flex-direction: row;
   justify-content: space-between;
-  margin-top: 4.5113vh;
-  margin-bottom: 4.5113vh;
+  margin-top: 12px;
+  margin-bottom: 12px;
 }
 
 .more-half {
-  width: 44.1667vw;
-  height: 15.0376vh;
-  border-radius: 0.8333vw;
+  width: 424px;
+  height: 40px;
+  border-radius: 8px;
   background-color: @card-background-color;
   justify-content: center;
   align-items: center;
@@ -321,23 +332,23 @@
 
 /* ---------- 我的 ---------- */
 .mine-head {
-  width: 90vw;
+  width: 864px;
   flex-direction: row;
   align-items: center;
-  margin-top: 3.7594vh;
-  padding-left: 1.25vw;
-  padding-right: 1.25vw;
-  padding-top: 3.7594vh;
-  padding-bottom: 3.7594vh;
-  border-radius: 1.0417vw;
+  margin-top: 10px;
+  padding-left: 12px;
+  padding-right: 12px;
+  padding-top: 10px;
+  padding-bottom: 10px;
+  border-radius: 10px;
   background-color: @card-background-color;
 }
 
 .avatar {
-  width: 4.5833vw;
-  height: 4.5833vw;
-  margin-right: 1.0417vw;
-  border-radius: 2.2917vw;
+  width: 44px;
+  height: 44px;
+  margin-right: 10px;
+  border-radius: 22px;
   background-color: @card-border-color;
 }
 
@@ -346,14 +357,14 @@
  * （实测：只显示第一行，卡片里留一段空白）。.vinfo（封面卡标题+元信息）因为写了显式宽度所以正常，
  * 这里照同样写法。 */
 .mine-idcol {
-  width: 87.5vw;
-  height: 13.5338vh;
+  width: 840px;
+  height: 36px;
   flex-direction: column;
 }
 
 .mine-name {
-  width: 87.5vw;
-  font-size: 1.5625vw;
+  width: 840px;
+  font-size: 15px;
   font-weight: 600;
   color: @text-color;
   lines: 1;
@@ -361,40 +372,40 @@
 }
 
 .mine-id {
-  width: 87.5vw;
-  margin-top: 0.7519vh;
-  font-size: 1.1458vw;
+  width: 840px;
+  margin-top: 2px;
+  font-size: 11px;
   color: @text-color-dim;
   lines: 1;
   text-overflow: ellipsis;
 }
 
 .mine-secrow {
-  width: 90vw;
-  margin-top: 3.7594vh;
-  padding-left: 0.2083vw;
-  padding-bottom: 0.7519vh;
+  width: 864px;
+  margin-top: 10px;
+  padding-left: 2px;
+  padding-bottom: 2px;
   flex-direction: row;
   align-items: center;
 }
 
 /* 分组标题：粉色短竖条 + 文字 */
 .mine-sec {
-  font-size: 1.3542vw;
+  font-size: 13px;
   font-weight: 600;
   color: @accent;
   lines: 1;
 }
 
 .mine-row {
-  width: 90vw;
-  height: 15.7895vh;
-  margin-top: 3.0075vh;
+  width: 864px;
+  height: 42px;
+  margin-top: 8px;
   flex-direction: row;
   align-items: center;
-  padding-left: 1.4583vw;
-  padding-right: 1.4583vw;
-  border-radius: 1.0417vw;
+  padding-left: 14px;
+  padding-right: 14px;
+  border-radius: 10px;
   background-color: @card-background-color;
 }
 
@@ -406,27 +417,54 @@
   flex-grow: 1;
   flex-shrink: 1;
   flex-basis: 0px;
-  font-size: 1.4583vw;
+  font-size: 14px;
   color: @text-color;
   lines: 1;
   text-overflow: ellipsis;
 }
 
 .mine-value {
-  font-size: 1.25vw;
+  font-size: 12px;
   color: @text-color-dim;
   lines: 1;
 }
 
+/* 下载页顶部信息行：左侧「共 N 个 · 总大小」，右侧缓存目录（与卡片网格同宽） */
+.dl-head {
+  width: 870px;
+  height: 30px;
+  margin-left: 7px;
+  margin-top: 2px;
+  flex-direction: row;
+  align-items: center;
+}
+
+.dl-head-text {
+  font-size: 12px;
+  color: @text-color;
+  lines: 1;
+}
+
+.dl-head-dir {
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0px;
+  text-align: right;
+  font-size: 10px;
+  color: @text-color-dim;
+  lines: 1;
+  text-overflow: ellipsis;
+}
+
 /* 关于区：左侧文字 + 右侧 GitHub 二维码（横向并排，整体宽 864 与其它 mine-row 对齐） */
 .mine-about {
-  width: 90vw;
-  margin-top: 3.0075vh;
-  margin-bottom: 6.015vh;
+  width: 864px;
+  margin-top: 8px;
+  margin-bottom: 16px;
   flex-direction: row;
   align-items: flex-start;
-  padding: 1.25vw 1.4583vw;
-  border-radius: 1.0417vw;
+  padding: 12px 14px;
+  border-radius: 10px;
   background-color: @card-background-color;
 }
 
@@ -438,7 +476,7 @@
 }
 
 .mine-about-title {
-  font-size: 1.3542vw;
+  font-size: 13px;
   font-weight: 600;
   color: @text-color;
   lines: 1;
@@ -446,16 +484,16 @@
 }
 
 .mine-about-line {
-  margin-top: 1.8797vh;
-  font-size: 1.1458vw;
+  margin-top: 5px;
+  font-size: 11px;
   color: @text-color-dim;
   lines: 1;
   text-overflow: ellipsis;
 }
 
 .mine-about-note {
-  margin-top: 2.2556vh;
-  font-size: 1.0417vw;
+  margin-top: 6px;
+  font-size: 10px;
   color: @text-color-dim;
   lines: 2;
   text-overflow: ellipsis;
@@ -470,7 +508,7 @@
   margin-left: 12px;
   flex-direction: column;
   background-color: #ffffff;
-  border-radius: 0.4167vw;
+  border-radius: 4px;
   overflow: hidden;
 }
 
@@ -484,9 +522,9 @@
 }
 
 .mine-notice {
-  width: 90vw;
-  margin-top: 3.0075vh;
-  font-size: 1.1458vw;
+  width: 864px;
+  margin-top: 8px;
+  font-size: 11px;
   color: @text-color-dim;
   lines: 2;
   text-overflow: ellipsis;
@@ -494,15 +532,15 @@
 
 /* ---------- 搜索 ---------- */
 .searchbar {
-  width: 90vw;
-  height: 17.2932vh;
-  margin-top: 3.7594vh;
-  margin-bottom: 3.0075vh;
+  width: 864px;
+  height: 46px;
+  margin-top: 10px;
+  margin-bottom: 8px;
   flex-direction: row;
   align-items: center;
-  padding-left: 1.6667vw;
-  padding-right: 0.625vw;
-  border-radius: 2.3958vw;
+  padding-left: 16px;
+  padding-right: 6px;
+  border-radius: 23px;
   background-color: @card-background-color;
 }
 
@@ -510,16 +548,16 @@
   flex-grow: 1;
   flex-shrink: 1;
   flex-basis: 0px;
-  font-size: 1.4583vw;
+  font-size: 14px;
   color: @text-color;
   lines: 1;
   text-overflow: ellipsis;
 }
 
 .search-btn {
-  width: 7.9167vw;
-  height: 12.782vh;
-  border-radius: 0.8333vw;
+  width: 76px;
+  height: 34px;
+  border-radius: 8px;
   background-color: @accent;
   justify-content: center;
   align-items: center;
@@ -530,24 +568,86 @@
 }
 
 .search-btn-text {
-  font-size: 1.4583vw;
+  font-size: 14px;
   font-weight: 600;
   color: #ffffff;
   text-align: center;
 }
 
+/* 搜索记录（空态）：标题行（右「清空」）+ 4 列关键词胶囊（206+8）×4 = 856 ≤ 864 */
+.sh-wrap {
+  width: 864px;
+  margin-left: 7px;
+  margin-bottom: 6px;
+  flex-direction: column;
+}
+.sh-head {
+  width: 864px;
+  height: 30px;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+}
+.sh-title {
+  font-size: 12px;
+  color: @text-color-dim;
+}
+.sh-clear {
+  width: 64px;
+  height: 26px;
+  border-radius: 6px;
+  background-color: @card-background-color;
+  justify-content: center;
+  align-items: center;
+}
+.sh-clear:active {
+  opacity: 0.7;
+}
+.sh-clear-text {
+  font-size: 10px;
+  color: @text-color-dim;
+}
+.sh-list {
+  width: 864px;
+  flex-direction: row;
+  flex-wrap: wrap;
+}
+.sh-item {
+  width: 206px;
+  height: 38px;
+  margin-right: 8px;
+  margin-bottom: 8px;
+  border-radius: 8px;
+  background-color: @card-background-color;
+  justify-content: center;
+  align-items: center;
+  padding-left: 8px;
+  padding-right: 8px;
+}
+.sh-item:active {
+  opacity: 0.7;
+}
+.sh-text {
+  width: 190px;
+  font-size: 12px;
+  color: @text-color;
+  text-align: center;
+  lines: 1;
+  text-overflow: ellipsis;
+}
+
 .stype-row {
-  width: 90vw;
-  height: 12.782vh;
-  margin-bottom: 1.5038vh;
+  width: 864px;
+  height: 34px;
+  margin-bottom: 4px;
   flex-direction: row;
 }
 
 .stype {
-  width: 10vw;
-  height: 12.0301vh;
-  margin-right: 0.8333vw;
-  border-radius: 0.8333vw;
+  width: 96px;
+  height: 32px;
+  margin-right: 8px;
+  border-radius: 8px;
   justify-content: center;
   align-items: center;
   background-color: @card-background-color;
@@ -558,7 +658,7 @@
 }
 
 .stype-text {
-  font-size: 1.3542vw;
+  font-size: 13px;
   color: @text-color-dim;
   text-align: center;
 }
@@ -578,34 +678,27 @@
  * 「半透明白 + 圆角 + 细边框」叠在深底上模拟毛玻璃的雾面观感。
  * 视频区不能用玻璃底（会盖掉 KMS 平面），所以只有信息卡/按钮/评论卡/输入框用。 */
 .pleft {
-  width: 22.1875vw;
-  height: 100vh;
+  width: 213px;
+  height: 266px;
   flex-direction: column;
   background-color: @nav-background;
 }
 
-/* 【3.5.13】沉浸态（点画面隐藏左右侧栏）用的不透明占位。
- * **必须是不透明纯黑**：falcon 不会主动清屏，透明容器擦不掉上一帧的像素
- * （第二十六轮真机事故：左右列留下残影）。宽高一律由内联 style 给
- * （L.playLeft / L.playRight），这里只管底色。 */
-.pside-fill {
-  background-color: #000000;
-}
-
-/* 左列上：返回 + 标题 + UP 主 + 简介 */
+/* 左列上：返回 + 标题 + UP 主 + 简介（3.9.3 用户要求整体放大字体）
+ * 266 的预算重新分配：196(info) + 70(btns)（两个都 >=70，构建期同倍缩放到 390） */
 .pleft-info {
-  width: 22.1875vw;
-  height: 59.3985vh;
+  width: 213px;
+  height: 196px;
   flex-direction: column;
-  padding-left: 1.0417vw;
-  padding-right: 1.0417vw;
-  padding-top: 3.0075vh;
+  padding-left: 10px;
+  padding-right: 10px;
+  padding-top: 2px;
 }
 
 .pback {
-  width: 3.125vw;
-  height: 2.7083vw;
-  border-radius: 0.8333vw;
+  width: 42px;
+  height: 36px;
+  border-radius: 10px;
   border-width: 1px;
   border-color: rgba(255, 255, 255, 0.14);
   background-color: rgba(255, 255, 255, 0.08);
@@ -618,157 +711,134 @@
 }
 
 .pback-icon {
-  width: 2.2917vw;
-  height: 2.2917vw;
+  width: 30px;
+  height: 30px;
 }
 
 .ptitle {
-  margin-top: 2.2556vh;
-  width: 20.1042vw;
-  height: 12.782vh;
-  font-size: 1.3542vw;
+  margin-top: 2px;
+  width: 193px;
+  /* 13→15：物理 20px（旧 17.3）；两行行高约 1.25× = 50 物理 = 75 逻辑，76 刚好。
+     196 预算：2(pt) + 26(pback) + 2 + 76 + 2 + 30(pup) + 4 + 28(pdesc) + 2 + 24(pnote) = 196 */
+  height: 76px;
+  font-size: 15px;
   font-weight: 600;
   color: @text-color;
   lines: 2;
   text-overflow: ellipsis;
 }
 
+/* UP 名：div 容器承接点击（点进 UP 主页），文本在 .pup-text 里 */
 .pup {
-  margin-top: 1.5038vh;
-  width: 20.1042vw;
-  height: 5.2632vh;
-  font-size: 1.0417vw;
+  margin-top: 2px;
+  width: 193px;
+  height: 30px;
+  flex-direction: row;
+  align-items: center;
+}
+
+.pup-text {
+  width: 193px;
+  font-size: 11px;
   color: @accent-blue;
   lines: 1;
   text-overflow: ellipsis;
 }
 
 /* 简介：可滚动区（手绘稿左列上方「视频标题和简介」）
- * 高度从 96(lines 7) 收到 72，把最下面 20px 让给 .pnote（播放提示）。
- * 【3.5.11】.pleft-info 从 192 降到 158：中间腾出 34px 给左列控制条
- * （播放 / ±10s / 字幕 / 全屏，用户要求这几颗键从底部条搬到简介下方）。
- * 预算：8(pt) + 26(pback) + 6 + 34(ptitle) + 4 + 14(pup) + 6 + 38(pdesc)
- *   + 4 + 16(pnote) = 156，留 2px 余量。
- * 简介因此从 72 收到 38（约 4 行 10px 字），仍可上下滚动看全文。
+ * 192→196 预算的明细见 .ptitle 注释（3.9.3 字体放大后重新分配）。
  *
  * 【为什么是 scroller 不是 text】用户反馈「长简介无法上下滑动，看不到全部」。
  * 之前这里是 <text lines:5>，超过 5 行直接省略号截断 —— 用户没有任何办法看全文。
  * 现在外层是 scroller，内层 .pdesc-text 是**不带 lines** 的 text：带 lines 会先在
  * scroller 内部截断再滚动，等于白滚。
  *
- * 【必须显式定高】scroller 在 column 容器里如果不给 flex-grow:0 + flex-basis:72px，
+ * 【必须显式定高】scroller 在 column 容器里如果不给 flex-grow:0 + flex-basis:28px，
  * 会被内容撑开（高度变成简介全文高度），把 .pnote 和下方 .pleft-btns 挤出可视区。
- * height:72px 与 flex-basis 同时写是刻意的：前者兜底，后者让 flex 布局不参与拉伸。 */
+ * 28 逻辑（物理 18.7）够一行（字号 11 行高 18.4），scroller 可上下滑动看全文。 */
 .pdesc {
-  margin-top: 2.2556vh;
-  width: 20.1042vw;
-  height: 14.2857vh;
+  margin-top: 4px;
+  width: 193px;
+  height: 28px;
   flex-grow: 0;
   flex-shrink: 0;
-  flex-basis: 14.2857vh;
+  flex-basis: 28px;
 }
 
 /* 简介正文：不设 lines / text-overflow，全文参与滚动 */
 .pdesc-text {
-  width: 20.1042vw;
-  font-size: 1.0417vw;
+  width: 193px;
+  /* 9→11：物理 14.7（旧 12），28 逻辑可视 18.7 正好一行 */
+  font-size: 11px;
   color: @text-color-dim;
 }
 
 /* 播放提示行（「定位中…」「加载中…」「音画不同步，正在恢复…」「起播失败 · 可返回重试」…）
  * 以前这些文案只写进 this.play.note，模板没有渲染 → 用户什么都看不到（P0-2 要求 2）。
- * 现在恒定占位 16px（无提示时内容为空串），不随提示出现/消失改变布局，避免视频区抖动。
+ * 现在恒定占位 24px（无提示时内容为空串），不随提示出现/消失改变布局，避免视频区抖动。
  * 颜色用品牌粉：这些是"正在进行/出事了"的状态字，必须比简介灰更显眼。 */
 .pnote {
-  margin-top: 1.5038vh;
-  width: 20.1042vw;
-  height: 6.015vh;
-  font-size: 1.0417vw;
+  margin-top: 2px;
+  width: 193px;
+  /* 8→9.5：物理 12.7（旧 10.7），24 逻辑可视 16 正好一行（行高 15.8） */
+  height: 24px;
+  font-size: 9.5px;
   color: @accent;
   lines: 1;
   text-overflow: ellipsis;
 }
 
-/* 左列下：点赞 / 投币 / 收藏（横向三枚，图标在上、计数在下） */
-/* 【3.5.11】左列控制条：播放 / -10s / +10s / 字幕 / 全屏。
- * 用户要求「暂停、+-10、字幕、全屏移动到点赞投币收藏上方，简介下方」，
- * 底部那条带子因此只留进度条本体（时间 + 轨道）。
- *
- * 【3.5.12】用户 m19885：「把你添加的 5 个新按钮拉伸，铺满左侧」。
- * 原来是 5 颗固定 30px 方块 + 4 道 3px 间隙 = 162，213 宽的左列右侧空了
- * 39px，看着像没对齐。改成等分拉伸：flex-grow/flex-shrink + flex-basis:0
- * （与 .ep-tab 同一套写法，falcon 上已验证），每颗吃掉 (内容宽 - 间隙)/5。
- * 左右内边距做成 6 / 3：最后一颗还带着 3px 的 margin-right，右缘合计 6，
- * 与左缘对称；间隙总数仍是 5×3，视觉上 5 颗等距。
- *
- * 底色用导航栏色：这一段是 UI 像素，统一成 @nav-background 才不会看出
- * 「这里挖了一条」。 */
-.pleft-ctrl {
-  width: 22.1875vw;
-  height: 12.782vh;
+/* UP 主主页（mode='up'）：左栏 76 + 内容区 884，复用首页 .grid/.vrow 卡片 */
+.up-head {
+  width: 864px;
+  margin-left: 7px;
+  margin-top: 10px;
   flex-direction: row;
-  align-items: center;
-  padding-left: 0.625vw;
-  padding-right: 0.3125vw;
-  background-color: @nav-background;
+  align-items: flex-end;
+  justify-content: space-between;
 }
-
-.pctrl-btn {
-  flex-grow: 1;
-  flex-shrink: 1;
-  flex-basis: 0px;
-  height: 3.125vw;
-  margin-right: 0.3125vw;
-  border-radius: 0.625vw;
-  background-color: rgba(255, 255, 255, 0.08);
-  align-items: center;
-  justify-content: center;
+.up-title {
+  width: 640px;
+  height: 46px;
+  font-size: 18px;
+  font-weight: 600;
+  color: @text-color;
+  lines: 1;
+  text-overflow: ellipsis;
 }
-
-.pctrl-btn:active {
-  opacity: 0.6;
-}
-
-/* 播放键恒粉（与底部条同口径）：状态只由图标三角/双竖条表达。 */
-.pctrl-play {
-  background-color: @accent-play;
-}
-
-.pctrl-on {
-  background-color: @accent-play;
-}
-
-.pctrl-ic {
-  width: 1.667vw;
-  height: 1.667vw;
-}
-
-.pctrl-t {
-  font-size: 1.1458vw;
-  color: #DDDDDD;
-  text-align: center;
+.up-stat {
+  font-size: 10px;
+  color: @text-color-dim;
   lines: 1;
 }
-
-.pctrl-t-on {
-  color: @accent-play;
+.up-sign {
+  width: 864px;
+  margin-left: 7px;
+  margin-top: 2px;
+  height: 24px;
+  font-size: 10px;
+  color: @text-color-dim;
+  lines: 1;
+  text-overflow: ellipsis;
 }
 
+/* 左列下：点赞 / 投币 / 收藏（横向三枚，图标在上、计数在下）
+ * 74→70 把 4 让给上面的信息卡（.pbtn 仍是 62，垂直居中不受影响） */
 .pleft-btns {
-  width: 22.1875vw;
-  height: 27.8195vh;
+  width: 213px;
+  height: 70px;
   flex-direction: row;
   align-items: center;
-  padding-left: 0.625vw;
-  padding-right: 0.625vw;
+  padding-left: 6px;
+  padding-right: 6px;
 }
 
 .pbtn {
-  width: 6.7708vw;
-  height: 6.4583vw;
-  margin-left: 0.2083vw;
-  margin-right: 0.2083vw;
-  border-radius: 1.0417vw;
+  width: 65px;
+  height: 62px;
+  margin-left: 2px;
+  margin-right: 2px;
+  border-radius: 10px;
   border-width: 1px;
   border-color: rgba(255, 255, 255, 0.12);
   background-color: rgba(255, 255, 255, 0.07);
@@ -782,25 +852,27 @@
 }
 
 .pbtn-icon {
-  width: 2.7083vw;
-  height: 2.7083vw;
+  width: 26px;
+  height: 26px;
 }
 
 .pbtn-count {
-  margin-top: 0.7519vh;
-  width: 6.25vw;
-  height: 4.5113vh;
-  font-size: 0.9375vw;
+  margin-top: 2px;
+  width: 60px;
+  /* 12→26：字号放大后 12 逻辑（8 物理）比字高还矮，真机直接不渲染计数；
+   * 20（13.3 物理）仍裁字，26（17.3 物理）足够一行（行高 14.7） */
+  height: 26px;
+  font-size: 8px;
   color: @text-color-dim;
   text-align: center;
   lines: 1;
 }
 
 .pbtn-count-on {
-  margin-top: 0.7519vh;
-  width: 6.25vw;
-  height: 4.5113vh;
-  font-size: 0.9375vw;
+  margin-top: 2px;
+  width: 60px;
+  height: 26px;
+  font-size: 8px;
   font-weight: 600;
   color: @accent;
   text-align: center;
@@ -809,19 +881,11 @@
 
 /* 中列：视频 + 进度条 */
 .pmid {
-  width: 48.8542vw;
-  height: 100vh;
+  width: 469px;
+  height: 266px;
   flex-direction: column;
-  /* 这里**故意不给底色**。中列左右那两条信箱黑（16:9 画面比列窄时露出来的部分）
-   * 本来就由 fb 兜着：播放态根节点套 .page-live（透明），fb 里那片像素是黑的。
-   * 若给 .pmid 铺一层不透明黑，等于把 hole 的父级也涂掉 —— 一旦某些固件是
-   * 「视频帧 blit 进 fb + hole 打透明」的合成方式，就会把画面整块盖死。
-   * 观感上的"无缝"由三条控件带自己保证（它们都是 #000，见下方播放悬浮控件）。 */
 }
 
-/* 【3.5.12】这三个盒子的宽高**一律由内联 style 给**（videoBoxStyle = 中列宽 ×
- * bands.video，中列宽按 16:9 反算、bands.video = 页高 − 字幕带）。这里只留
- * "最小可渲染"的兜底值，写死 469x240 那种旧数字会让人以为布局还是那套。 */
 .pvideo {
   width: 469px;
   height: 240px;
@@ -861,393 +925,634 @@
   height: 266px;
 }
 
+/* 详情页中列（用户手绘稿）：整列 469x390 黑底，16:9 封面居中，上下留黑边。
+ * 点击封面才启动播放页（见 index.vue onStartPlayFromDetail）。
+ * 390/264 这两个数字故意写成最终设计值：字节码缩放工具会跳过它们。 */
+.detail-cover-wrap {
+  width: 469px;
+  height: 390px;
+  background-color: #000000;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+}
+
+.detail-cover {
+  width: 469px;
+  height: 264px;
+  background-color: #000000;
+}
+
+.detail-play-hint {
+  margin-top: 8px;
+  font-size: 12px;
+  color: @text-color-dim;
+  text-align: center;
+  lines: 1;
+}
+
+/* ---------------- 全屏播放页（移植文件管理 shell 播放器 UI） ----------------
+ * 960x390 = 顶栏 96 + 视频带 216 + 底栏 78。
+ * 视频带在 native 的 FULL_VIDEO_AREA 内（screen.js），顶/底栏由 Falcon 绘制，
+ * 两条黑栏不会被视频覆盖。96/216/78 是最终设计值，字节码缩放工具会跳过。 */
+.fp-root {
+  width: 960px;
+  height: 390px;
+  flex-direction: column;
+  background-color: @nav-background;
+}
+
+.fp-nav {
+  width: 960px;
+  height: 96px;
+  flex-direction: row;
+  align-items: center;
+  padding-left: 18px;
+  padding-right: 12px;
+  background-color: #000000;
+}
+
+/* 返回胶囊：与文件管理播放器顶栏一致的深灰圆角块 */
+.fp-back {
+  height: 64px;
+  padding-left: 22px;
+  padding-right: 22px;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  border-radius: 32px;
+  background-color: #333333;
+}
+
+.fp-back:active {
+  opacity: 0.65;
+}
+
+.fp-back-text {
+  font-size: 18px;
+  color: #ffffff;
+  lines: 1;
+}
+
+.fp-title {
+  flex-grow: 1;
+  flex-shrink: 1;
+  margin-left: 18px;
+  font-size: 20px;
+  color: #ffffff;
+  lines: 1;
+  text-overflow: ellipsis;
+}
+
+.fp-note {
+  margin-left: 12px;
+  font-size: 14px;
+  color: @accent;
+  lines: 1;
+  text-overflow: ellipsis;
+}
+
+.fp-menu-btn {
+  width: 60px;
+  height: 64px;
+  align-items: center;
+  justify-content: center;
+}
+
+.fp-menu-dots {
+  font-size: 24px;
+  color: #dddddd;
+  text-align: center;
+}
+
+.fp-video {
+  width: 960px;
+  height: 216px;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  background-color: #000000;
+}
+
+/* 隐藏状态栏（顶/底栏 v-if 不渲染）后视频带撑满整页：960x390，与
+ * FULLSCREEN_VIDEO_AREA 严格一致（native 用 setRect 把画面改成 693x390 信箱）。
+ * 390 是最终设计值，qjs-style-scale 会跳过它。 */
+.fp-video-full {
+  height: 390px;
+}
+
+.fp-hole {
+  width: 960px;
+  height: 216px;
+  background-color: rgba(0, 0, 0, 0);
+}
+
+.fp-idle {
+  width: 960px;
+  height: 216px;
+  justify-content: center;
+  align-items: center;
+}
+
+.fp-bottom {
+  width: 960px;
+  height: 78px;
+  flex-direction: row;
+  align-items: center;
+  padding-left: 18px;
+  padding-right: 18px;
+  background-color: #000000;
+}
+
+.fp-play {
+  width: 69px;
+  height: 54px;
+  border-radius: 27px;
+  align-items: center;
+  justify-content: center;
+  background-color: #222222;
+}
+
+.fp-play:active {
+  opacity: 0.7;
+}
+
+.fp-play-icon {
+  width: 46px;
+  height: 36px;
+}
+
+.fp-time {
+  /* 112：字号放大到物理 26.7px 后，"01:57" 在 96 逻辑宽（物理 64px）里会挤；
+     底栏总宽 18+69+112+6+600+6+112+18=941 < 960，仍有 19px 余量。 */
+  width: 112px;
+  font-size: 20px;
+  color: #ffffff;
+  text-align: center;
+}
+
+.fp-seek {
+  width: 600px;
+  height: 78px;
+  flex-direction: row;
+  align-items: center;
+  margin-left: 6px;
+  margin-right: 6px;
+}
+
+.fp-track {
+  width: 600px;
+  height: 10px;
+  flex-direction: row;
+  align-items: center;
+  border-radius: 5px;
+  background-color: @progress-track;
+}
+
+.fp-fill {
+  height: 6px;
+  border-radius: 3px;
+  background-color: @accent;
+}
+
+.fp-knob {
+  width: 10px;
+  height: 10px;
+  border-radius: 5px;
+  background-color: #ffffff;
+}
+
+/* 右侧设置菜单：fixed 覆盖整页右侧，native 已 pauseRender，不会被视频盖掉 */
+.fp-menu-overlay {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  /* 432（物理 288）而不是 384：菜单最长的「直播画质 480p 30fps（省流）」
+     在 18px 字号下需要约 231px 物理宽，384 逻辑宽（256 物理）扣掉内边距后
+     标签和数值会贴在一起；432 留出约 20px 间距。 */
+  width: 432px;
+  flex-direction: column;
+  background-color: #111111;
+  z-index: 300;
+}
+
+.fp-menu-head {
+  height: 54px;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  padding-left: 16px;
+  padding-right: 12px;
+  background-color: #1a1a1a;
+}
+
+.fp-menu-title {
+  font-size: 20px;
+  color: #ffffff;
+}
+
+.fp-menu-close {
+  border-radius: 14px;
+  padding-left: 16px;
+  padding-right: 16px;
+  padding-top: 6px;
+  padding-bottom: 6px;
+  background-color: #333333;
+}
+
+.fp-menu-close-text {
+  font-size: 16px;
+  color: #ffffff;
+}
+
+/* 54 而不是 62：3.5.9 同步新增「字幕」行，6 行 + 54 头部 = 378 < 390，整菜单不越屏。
+ * 54 仍在 qjs-style-scale 的阈值 70 以下，不会被构建期放大。 */
+.fp-menu-row {
+  width: 432px;
+  height: 54px;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  padding-left: 16px;
+  padding-right: 16px;
+}
+
+/* 菜单行字号 16（物理 21.3）：全局放大到 2 倍后 18 源字号（物理 24）
+ * 会让「直播画质 + 480p30（省流）」顶到右边缘，16 仍在原 18px 之上。 */
+.fp-menu-label {
+  font-size: 16px;
+  color: #ffffff;
+}
+
+.fp-menu-value {
+  font-size: 16px;
+  color: #ffcf00;
+}
+
+/* ============ 3.5.9 同步：CC 字幕带 / 分P 合集页签 / 互动题面 ============ */
+/* 字幕带：native 视频帧覆盖不了 UI，字幕占真实 30px（screen.js playAreaFor）。 */
+.fp-cc {
+  width: 960px;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  background-color: #000000;
+}
+
+.fp-cc-text {
+  width: 940px;
+  font-size: 12px;
+  color: #ffffff;
+  lines: 1;
+  text-align: center;
+  text-overflow: ellipsis;
+}
+
+/* 分P / 合集页签：278 宽右栏三等分。 */
+.ptabs {
+  width: 278px;
+  height: 40px;
+  flex-direction: row;
+  align-items: center;
+  padding-left: 4px;
+  padding-right: 4px;
+  background-color: @nav-background;
+}
+
+.ptab {
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0px;
+  height: 30px;
+  margin-left: 3px;
+  margin-right: 3px;
+  border-radius: 15px;
+  align-items: center;
+  justify-content: center;
+  background-color: #222222;
+}
+
+.ptab-on {
+  background-color: @accent;
+}
+
+.ptab-t {
+  font-size: 12px;
+  color: #dddddd;
+  lines: 1;
+  text-align: center;
+  text-overflow: ellipsis;
+}
+
+.ptab-t-on {
+  color: #ffffff;
+}
+
+/* 有页签时评论区让出 40px（239 - 40 = 199，经缩放后仍与输入行共处一屏）。 */
+.pright-body-tabs {
+  height: 199px;
+}
+
+/* 分P / 合集列表行 */
+.ep-row {
+  width: 262px;
+  height: 44px;
+  margin-left: 8px;
+  margin-top: 6px;
+  border-radius: 8px;
+  flex-direction: row;
+  align-items: center;
+  padding-left: 10px;
+  padding-right: 10px;
+  background-color: #1b1b1b;
+}
+
+.ep-row-on {
+  width: 262px;
+  height: 44px;
+  margin-left: 8px;
+  margin-top: 6px;
+  border-radius: 8px;
+  flex-direction: row;
+  align-items: center;
+  padding-left: 10px;
+  padding-right: 10px;
+  background-color: #3a3a3a;
+}
+
+.ep-row:active {
+  opacity: 0.7;
+}
+
+.ep-row-t {
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0px;
+  font-size: 12px;
+  color: #dddddd;
+  lines: 1;
+  text-overflow: ellipsis;
+}
+
+.ep-row-t-on {
+  color: #ffffff;
+}
+
+.ep-row-d {
+  width: 56px;
+  font-size: 10px;
+  color: @text-color-dim;
+  text-align: right;
+}
+
+.ep-note {
+  width: 262px;
+  margin-left: 8px;
+  margin-top: 10px;
+  margin-bottom: 10px;
+  font-size: 10px;
+  color: @text-color-dim;
+  lines: 2;
+}
+
+.ep-head {
+  width: 262px;
+  margin-left: 8px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: @accent;
+  lines: 1;
+  text-overflow: ellipsis;
+}
+
+.ep-sec {
+  width: 262px;
+  margin-left: 8px;
+  margin-top: 8px;
+  font-size: 10px;
+  color: @text-color-dim;
+  lines: 1;
+}
+
+/* 互动题面：整页替换（native 已 pauseRender），不依赖 z-index。 */
+.ip-page {
+  width: 960px;
+  height: 390px;
+  flex-direction: column;
+  background-color: #0b0b0b;
+}
+
+.ip-head {
+  width: 960px;
+  height: 60px;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  padding-left: 18px;
+  padding-right: 18px;
+  background-color: #1a1a1a;
+}
+
+.ip-title {
+  flex-grow: 1;
+  flex-shrink: 1;
+  font-size: 16px;
+  color: #ffffff;
+  lines: 1;
+  text-overflow: ellipsis;
+}
+
+.ip-count {
+  margin-left: 12px;
+  font-size: 14px;
+  color: @accent;
+  lines: 1;
+}
+
+.ip-list {
+  width: 960px;
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0px;
+}
+
+.ip-choice {
+  width: 924px;
+  height: 54px;
+  margin-left: 18px;
+  margin-top: 8px;
+  border-radius: 10px;
+  flex-direction: row;
+  align-items: center;
+  padding-left: 14px;
+  padding-right: 14px;
+  background-color: #1f1f1f;
+}
+
+.ip-choice-def {
+  width: 924px;
+  height: 54px;
+  margin-left: 18px;
+  margin-top: 8px;
+  border-radius: 10px;
+  flex-direction: row;
+  align-items: center;
+  padding-left: 14px;
+  padding-right: 14px;
+  background-color: #333333;
+}
+
+.ip-choice:active {
+  opacity: 0.7;
+}
+
+.ip-choice-idx {
+  width: 26px;
+  font-size: 14px;
+  color: @accent;
+}
+
+.ip-choice-text {
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0px;
+  font-size: 14px;
+  color: #ffffff;
+  lines: 1;
+  text-overflow: ellipsis;
+}
+
+.ip-choice-tag {
+  margin-left: 10px;
+  font-size: 10px;
+  color: @text-color-dim;
+}
+
+.ip-status {
+  width: 924px;
+  margin-left: 18px;
+  margin-top: 10px;
+  font-size: 11px;
+  color: @text-color-dim;
+  lines: 2;
+}
+
+.ip-foot {
+  width: 960px;
+  height: 64px;
+  flex-direction: row;
+  align-items: center;
+  padding-left: 18px;
+  padding-right: 18px;
+  background-color: #1a1a1a;
+}
+
+.ip-btn {
+  height: 40px;
+  margin-right: 12px;
+  border-radius: 20px;
+  padding-left: 18px;
+  padding-right: 18px;
+  align-items: center;
+  justify-content: center;
+  background-color: #333333;
+}
+
+.ip-btn:active {
+  opacity: 0.65;
+}
+
+.ip-btn-t {
+  font-size: 13px;
+  color: #ffffff;
+  lines: 1;
+}
+
 .play-idle-text {
-  font-size: 1.4583vw;
+  font-size: 14px;
   color: @text-color-dim;
   text-align: center;
   lines: 2;
 }
 
-/* ==================== 播放悬浮控件（控制条 / 字幕带 / 加载动画） ====================
- * 视频是 KMS overlay 平面（zpos 高于 Falcon UI），控件不能"浮"在画面上，只能占
- * 中列里真实的 UI 像素：
- *     [视频洞][(字幕带 18)][控制条]   —— 之和 = 视口高
- * 段高由 play_chrome.planBands 算好走内联 style，这里只负责配色与排版。
- *
- * 【3.5.6 第十四轮：顶栏删除】
- * 用户要求「把视频放大，占满视频区，本身就没有多大的地方，进度条还占些」。
- * 这块屏 3.34:1，16:9 永远高度受限，所以那 18px 标题栏是最该省的一段
- * （标题在左列本来就有）。顶栏的四件事都有了新去处：
- *   · 标题     → 左列顶部；
- *   · 暂停标记 → 控制条的播放键（第十六轮起恒为品牌粉，状态只靠图标）；
- *   · ±10s     → 控制条里的 .cb-step；
- *   · 返回     → **全屏侧栏面板**的 .cb-back（第十六轮：底部条那份已删，
- *                全屏只剩一个「退出」入口，见 play_chrome.BAR_BACK_W 注释）。
- *
- * 【3.5.6 第九轮 · 让控件"看起来像透明的"】
- * 用户拿参考系统播放器的照片对比，说「人家的进度条是透明的，你这是挖洞」。
- * 物理上做不到真透明 —— 视频平面盖在 UI 之上，控件只能占让出来的像素。但观感可以
- * 骗过去：只要中列（.pmid）和各条控件带的底色**和视频自己的信箱黑完全一致**，
- * 就看不出"这里是挖出来的一条"。所以这一段里所有背景统一 #000：原来是
- * #0D1015 / #101318（带蓝的深灰），和视频黑差得一眼就能看出来，正是"挖洞感"的来源。
- * 也不加边框/圆角容器 —— 参考系统播放器的控制条同样没有边框，控件是直接"长"在黑底上的。
- * 第十四轮进一步把顶栏也删了：黑带上只剩一条 32px 的进度条，上下都没有"框"。 */
-
-/* 【3.5.12】右列顶部那条**常驻**进度条（用户要求「移至评论区最上方、
- * 固定在上方、不随评论区滑动」）。
- *
- * 与 .chrome-bar 的区别：
- *   · 它不浮在画面上，是一块实心 UI 像素（背景 = 右列底色，不透明）；
- *   · 它不跟 ui.chrome 显隐联动 —— 定位是"固定"，收起会让评论列表跳高；
- *   · 槽位只有「时间 / 轨道 / 时间」，宽高由 rightBarStyle（= L.playBar）给。
- * 底色用 @nav-background 而不是半透明黑：右列背后没有画面，透出来只会是
- * fb 残留。 */
-.pright-bar {
+/* 可拖动进度条：469x26 横条，轨道 453x10（左右各留 8），
+ * 填充与圆点同一行排布（falcon 上 position:absolute 不可靠，用 flex 自然排列）。 */
+.seek {
+  width: 469px;
+  height: 26px;
   flex-direction: row;
   align-items: center;
-  background-color: @nav-background;
-  border-bottom-width: 1px;
-  border-bottom-color: rgba(255, 255, 255, 0.08);
+  padding-left: 8px;
+  padding-right: 8px;
 }
 
-/* 视频 + 字幕那一条竖列（普通态与全屏态共用，宽度恒等于中列宽）。 */
-.pstage {
-  flex-direction: column;
-}
-
-/* ==================== 【3.5.13】全屏面板已下线 ====================
- * 用户明确「主播放界面已经填充满了，可以把全屏移除」，全屏键与整块 fsp 面板
- * 都已从模板删除，改为「点画面隐藏/显示左右侧栏」（.pside-fill）。
- * 这里不保留任何 .fsp-* / .pleft-fs / .fs-clear 规则，避免死样式漂移。
- * ==================================================================== */
-
-/* 时间码：#DDDDDD / 11px / 42 宽（=== BAR_TIME_W）。
- * 参考系统播放器的 bottom-bar 里 `time-current` 是 42 宽、#dddddd；原来我们 40 宽、10px，
- * 数字挤在一起，且颜色比参考系统播放器白一档（#E9ECF0）。 */
-.cb-time {
-  width: 4.375vw;
-  margin-left: 0.3125vw;
-  font-size: 1.1458vw;
-  color: #DDDDDD;
-  text-align: center;
-  lines: 1;
-}
-
-/* 命中区撑满控制条高度：轨道视觉只有 4px，但手指要能稳稳按住 */
-/* 3.5.11：底部条只剩「时间 / 轨道 / 时间」，条高降到 24。
- * 首格时间不能带 margin-left —— seekMetrics 的 fixed 只算了 2 道 BAR_GAP，
- * 首格再留 3px 会让整条溢出 3px（轨道右端被裁）。 */
-.cb-time-lead {
-  margin-left: 0;
-}
-
-.cb-hit {
-  height: 11.2782vh;
-  margin-left: 0.3125vw;
+.seek-track {
+  width: 453px;
+  height: 10px;
   flex-direction: row;
   align-items: center;
-}
-
-/* 轨道：**4px 细线**，不是 10px 的槽。
- *
- * 【3.5.6 第十六轮 · 逐值对齐参考 seekbar】
- * 参考系统播放器的 seekbar 参数：activeColor=#FF6699、
- * track=rgba(255,255,255,0.3)、handle=白色。真机放大图量出来轨道 ≈4px、
- * 滑块 ≈12px。我们原来是 10px 粗槽 + 16px 白点 + 一层 16% 白的底 ——
- * 在黑底上是一条明显的"凹槽"，这正是用户说的"你这是挖洞，人家是透明的"。
- * 改成 4px 之后，轨道在黑底上只剩一条淡线，滑块像浮在上面。 */
-.cb-line {
-  flex-grow: 1;
-  flex-shrink: 1;
-  flex-basis: 0px;
-  height: 1.5038vh;
-  flex-direction: row;
-  align-items: center;
-  border-radius: 0.2083vw;
-  background-color: rgba(255, 255, 255, 0.30);
-}
-
-/* 进度条填充与滑块：轨道是 flex 行，填充与滑块自然排列
- * （falcon 上 position:absolute 不可靠）。
- * 【第十六轮】填充从 10px 收到 4px，滑块 16 → 12、颜色纯白 ——
- * 与参考 seekbar 的 track / handle 同值（见 .cb-line 注释）。
- * 12 也要和 play_chrome.SEEK_KNOB_W 一致，seekFillW 用它扣右端余量。 */
-.seek-fill {
-  height: 4px;
-  border-radius: 0.2083vw;
-  background-color: @accent-play;
-}
-
-.seek-knob {
-  width: 12px;
-  height: 12px;
-  border-radius: 0.625vw;
-  background-color: #FFFFFF;
-}
-
-/* 加载动画（B 站那套「小电视 + 三个跳动的点」）。
- * 动画帧由 120ms 的 JS 定时器推进（loadAnim），这里只定外形。 */
-.pl-load {
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-}
-
-.pl-tv {
-  width: 5.4167vw;
-  height: 12.782vh;
-  border-radius: 0.5208vw;
-  border-width: 2px;
-  border-color: @accent;
-  background-color: #161B23;
-  align-items: center;
-  justify-content: center;
-}
-
-.pl-tv-screen {
-  width: 3.9583vw;
-  height: 6.7669vh;
-  border-radius: 0.2083vw;
-  background-color: #0B0E12;
-  align-items: center;
-  justify-content: center;
-}
-
-/* 屏幕里那条来回扫的蓝条（marginLeft 由 loadingFrame().dx 驱动） */
-.pl-tv-bar {
-  width: 1.0417vw;
-  height: 2.2556vh;
-  border-radius: 0.2083vw;
-  background-color: @accent-blue;
-}
-
-.pl-dots {
-  flex-direction: row;
-  align-items: center;
-  margin-top: 2.6316vh;
-}
-
-.pl-dot {
-  width: 0.5208vw;
-  height: 0.5208vw;
-  margin-left: 0.3125vw;
-  margin-right: 0.3125vw;
-  border-radius: 0.3125vw;
+  border-radius: 5px;
   background-color: @progress-track;
 }
 
-.pl-dot-on {
-  background-color: @accent-blue;
+.seek-fill {
+  height: 6px;
+  border-radius: 3px;
+  background-color: @accent;
 }
 
-.pl-load-text {
-  margin-top: 2.2556vh;
-  font-size: 1.1458vw;
-  color: @text-color-dim;
-  lines: 1;
+.seek-knob {
+  width: 10px;
+  height: 10px;
+  border-radius: 5px;
+  background-color: #ffffff;
 }
 
 /* 右列：评论 + 输入框 */
 .pright {
-  width: 28.9583vw;
-  height: 100vh;
+  width: 278px;
+  height: 266px;
   flex-direction: column;
   background-color: @nav-background;
 }
 
 .pright-body {
-  width: 28.9583vw;
-  height: 90.2256vh;
-}
-
-/* ==================== 分P / 合集（右栏页签 + 列表） ====================
- * 右列只有 278x280，没有空间做浮层（falcon 的 position:absolute / z-index 不可靠），
- * 所以沿用评论区那套「整栏替换」：页签一行 + 列表吃掉整列。
- *
- * 高度账（X7：rightBody 253 + 输入框 27 = 280）：
- *   评论：页签 22 + body 231 + 输入框 27 = 280
- *   分P/合集：页签 22 + 列表 258 = 280（这两个页签下没有输入框）
- * 页签高由页面内联下发（EP_TAB_H），这里只管排布与配色。
- * ==================================================================== */
-.ep-tabs {
-  flex-direction: row;
-  align-items: center;
-  background-color: #15181D;
-  padding-left: 0.2083vw;
-  padding-right: 0.2083vw;
-}
-
-/* 【3.5.13】选项框圆角化（用户 m20514 第 4 条要求）。
- * 未选中是淡色圆角胶囊，选中是粉调胶囊。两条规则**各自完整**：
- * falcon 同特异性取先定义的那条，靠 -on 覆盖基类底色会失效（见 .favrow 的教训）。
- * 高度 16px 收在 22px 的 .ep-tabs 行内垂直居中，不撑高右栏预算。 */
-.ep-tab {
-  flex-grow: 1;
-  flex-shrink: 1;
-  flex-basis: 0px;
-  height: 6.015vh;
-  margin-left: 0.2083vw;
-  margin-right: 0.2083vw;
-  border-radius: 0.625vw;
-  align-items: center;
-  justify-content: center;
-  background-color: rgba(255, 255, 255, 0.08);
-}
-
-.ep-tab-on {
-  flex-grow: 1;
-  flex-shrink: 1;
-  flex-basis: 0px;
-  height: 6.015vh;
-  margin-left: 0.2083vw;
-  margin-right: 0.2083vw;
-  border-radius: 0.625vw;
-  align-items: center;
-  justify-content: center;
-  background-color: rgba(251, 114, 153, 0.22);
-}
-
-.ep-tab-t {
-  font-size: 1.0417vw;
-  color: @text-color-dim;
-  text-align: center;
-  lines: 1;
-}
-
-.ep-tab-t-on {
-  color: @accent;
-}
-
-.ep-list {
-  flex-direction: column;
-  background-color: @nav-background;
-}
-
-.ep-head {
-  margin-left: 0.8333vw;
-  margin-top: 1.5038vh;
-  margin-bottom: 0.7519vh;
-  margin-right: 0.8333vw;
-  font-size: 1.0417vw;
-  color: @text-color-dim;
-  lines: 1;
-  text-overflow: ellipsis;
-}
-
-/* 多节合集的分节标题（正片 / 花絮 / 预告…） */
-.ep-sec {
-  margin-left: 0.8333vw;
-  margin-top: 1.5038vh;
-  margin-bottom: 1px;
-  margin-right: 0.8333vw;
-  font-size: 1.0417vw;
-  color: @accent;
-  lines: 1;
-  text-overflow: ellipsis;
-}
-
-/* 一行一个 P / 一集：26 高 = 280 的右列里能看到 9 行，笔尖好点 */
-/* 列表行同理：22px 圆角框 + 4px 缝 = 26px 节距不变（仍 9 行可见）。
- * **不加 border-width**：falcon 盒模型无保证，多一条边会把内容撑出预算高度，
- * 历史上出过「输入框被挤出视口」的事故。 */
-.ep-row {
-  height: 8.2707vh;
-  flex-direction: row;
-  align-items: center;
-  padding-left: 0.625vw;
-  padding-right: 0.625vw;
-  margin-top: 1.5038vh;
-  margin-left: 0.2083vw;
-  margin-right: 0.2083vw;
-  border-radius: 0.625vw;
-  background-color: rgba(255, 255, 255, 0.06);
-}
-
-.ep-row-on {
-  height: 8.2707vh;
-  flex-direction: row;
-  align-items: center;
-  padding-left: 0.625vw;
-  padding-right: 0.625vw;
-  margin-top: 1.5038vh;
-  margin-left: 0.2083vw;
-  margin-right: 0.2083vw;
-  border-radius: 0.625vw;
-  background-color: rgba(251, 114, 153, 0.18);
-}
-
-.ep-idx {
-  width: 2.7083vw;
-  font-size: 1.0417vw;
-  color: @text-color-dim;
-  lines: 1;
-}
-
-.ep-idx-on {
-  color: @accent;
-}
-
-.ep-name {
-  flex-grow: 1;
-  flex-shrink: 1;
-  flex-basis: 0px;
-  font-size: 1.1458vw;
-  color: @text-color;
-  lines: 1;
-  text-overflow: ellipsis;
-}
-
-.ep-name-on {
-  color: @accent;
-}
-
-.ep-dur {
-  width: 3.9583vw;
-  font-size: 0.9375vw;
-  color: @text-color-dim;
-  text-align: right;
-  lines: 1;
-}
-
-.ep-note {
-  margin-left: 0.8333vw;
-  margin-right: 0.8333vw;
-  margin-top: 1.5038vh;
-  margin-bottom: 2.2556vh;
-  font-size: 1.0417vw;
-  color: @text-color-dim;
-  lines: 2;
+  width: 278px;
+  /* 239 经 qjs-style-scale 默认换算 → 350 逻辑 + 输入行 40 = 390，正好一屏；
+     输入行从 26 加到 40 是为了放大后的「未登录，不能评论/发送」不被裁。 */
+  height: 239px;
 }
 
 /* 直播态右列占位：评论区整列隐藏后，用同宽同高同底色的空 div 兜住这 278px。
  * 背景必须不透明（@nav-background，与 .pright 一致）—— holeVisible 时根节点是
  * .page-live（透明背景），没有这层就会把上一屏的 fb 残留像素透出来。 */
 .pright-fill {
-  width: 28.9583vw;
-  height: 100vh;
+  width: 278px;
+  height: 266px;
   background-color: @nav-background;
 }
 
 /* 右下输入框（雾化玻璃）：输入区 + 发送按钮 */
 .pinput {
-  width: 28.9583vw;
-  height: 9.7744vh;
+  width: 278px;
+  height: 40px;
   flex-direction: row;
   align-items: center;
-  padding-left: 0.8333vw;
-  padding-right: 0.8333vw;
+  padding-left: 8px;
+  padding-right: 8px;
 }
 
 .pinput-box {
-  width: 20.4167vw;
-  height: 9.0226vh;
-  border-radius: 0.8333vw;
+  width: 196px;
+  height: 34px;
+  border-radius: 8px;
   border-width: 1px;
   border-color: rgba(255, 255, 255, 0.16);
   background-color: rgba(255, 255, 255, 0.08);
   justify-content: center;
-  padding-left: 0.8333vw;
-  padding-right: 0.625vw;
+  padding-left: 8px;
+  padding-right: 6px;
 }
 
 .pinput-box:active {
@@ -1255,26 +1560,26 @@
 }
 
 .pinput-ph {
-  width: 18.75vw;
-  font-size: 1.0417vw;
+  width: 180px;
+  font-size: 10px;
   color: @text-color-dim;
   lines: 1;
   text-overflow: ellipsis;
 }
 
 .pinput-text {
-  width: 18.75vw;
-  font-size: 1.0417vw;
+  width: 180px;
+  font-size: 10px;
   color: @text-color;
   lines: 1;
   text-overflow: ellipsis;
 }
 
 .pinput-send {
-  width: 6.0417vw;
-  height: 9.0226vh;
-  margin-left: 0.8333vw;
-  border-radius: 0.8333vw;
+  width: 58px;
+  height: 34px;
+  margin-left: 8px;
+  border-radius: 8px;
   border-width: 1px;
   border-color: rgba(255, 255, 255, 0.14);
   background-color: rgba(255, 255, 255, 0.08);
@@ -1283,28 +1588,22 @@
 }
 
 .pinput-send-on {
-  width: 6.0417vw;
-  height: 9.0226vh;
-  margin-left: 0.8333vw;
-  border-radius: 0.8333vw;
+  width: 58px;
+  height: 34px;
+  margin-left: 8px;
+  border-radius: 8px;
   background-color: @accent;
   justify-content: center;
   align-items: center;
 }
 
-/* 【3.5.13 修正】原来是逗号选择器 `.pinput-send:active, .pinput-send-on:active`。
- * falcon 的 styler 只认单选择器，逗号后面那条的属性块会被编译成空的 ——
- * 「已发送态按下没反应」。拆成两条各自独立的规则。 */
-.pinput-send:active {
-  opacity: 0.7;
-}
-
+.pinput-send:active,
 .pinput-send-on:active {
   opacity: 0.7;
 }
 
 .pinput-send-text {
-  font-size: 1.1458vw;
+  font-size: 11px;
   font-weight: 600;
   color: @text-color;
   text-align: center;
@@ -1317,8 +1616,8 @@
    系列（三态标签 + 推荐卡）全部删除。
    v4 手绘布局（m11950）：右列收窄到 278（原 448），下面的子块宽度一并改。 */
 .side {
-  width: 28.9583vw;
-  height: 100vh;
+  width: 278px;
+  height: 266px;
   flex-direction: column;
   background-color: @nav-background;
 }
@@ -1327,24 +1626,24 @@
    磨砂玻璃（用户要求 m06919-6）：半透明白 + 圆角 + 细边框。
    falcon 没有 backdrop-filter，用 rgba 白叠在深底上模拟毛玻璃的「雾面」观感。 */
 .fav-head {
-  width: 27.2917vw;
-  height: 15.0376vh;
-  margin-left: 0.8333vw;
-  margin-top: 2.2556vh;
+  width: 262px;
+  height: 40px;
+  margin-left: 8px;
+  margin-top: 6px;
   flex-direction: row;
   align-items: center;
-  padding-left: 0.625vw;
-  padding-right: 0.625vw;
-  border-radius: 0.8333vw;
+  padding-left: 6px;
+  padding-right: 6px;
+  border-radius: 8px;
   border-width: 1px;
   border-color: rgba(255, 255, 255, 0.18);
   background-color: rgba(255, 255, 255, 0.10);
 }
 
 .fav-exit {
-  width: 7.0833vw;
-  height: 10.5263vh;
-  border-radius: 0.625vw;
+  width: 68px;
+  height: 28px;
+  border-radius: 6px;
   justify-content: center;
   align-items: center;
   border-width: 1px;
@@ -1357,7 +1656,7 @@
 }
 
 .fav-exit-text {
-  font-size: 1.25vw;
+  font-size: 12px;
   color: @text-color;
   text-align: center;
   lines: 1;
@@ -1367,8 +1666,8 @@
   flex-grow: 1;
   flex-shrink: 1;
   flex-basis: 0px;
-  margin-left: 1.0417vw;
-  font-size: 1.3542vw;
+  margin-left: 10px;
+  font-size: 13px;
   font-weight: 600;
   color: @text-color;
   text-align: left;
@@ -1376,14 +1675,14 @@
 }
 
 .side-body {
-  width: 28.9583vw;
-  height: 82.7068vh;
+  width: 278px;
+  height: 220px;
 }
 
 /* 无标签栏时的满高正文（评论区默认态：266 - 底部 feedback 行 24 ≈ 232） */
 .side-body-full {
-  width: 28.9583vw;
-  height: 87.218vh;
+  width: 278px;
+  height: 232px;
 }
 
 /* 收藏夹列表行。
@@ -1394,15 +1693,15 @@
  *    同特异性下 falcon 取**先定义**的那条，背景色永远是 .favrow 的。
  * 所以这里两条规则各自完整、类名互斥，模板里二选一挂（选中态用 .favrow-sel）。 */
 .favrow {
-  width: 27.2917vw;
-  height: 15.7895vh;
-  margin-left: 0.8333vw;
-  margin-top: 3.0075vh;
+  width: 262px;
+  height: 42px;
+  margin-left: 8px;
+  margin-top: 8px;
   flex-direction: row;
   align-items: center;
-  padding-left: 1.25vw;
-  padding-right: 1.25vw;
-  border-radius: 0.8333vw;
+  padding-left: 12px;
+  padding-right: 12px;
+  border-radius: 8px;
   /* 磨砂玻璃（用户要求 m06919-6）：半透明白 + 细边框 */
   border-width: 1px;
   border-color: rgba(255, 255, 255, 0.14);
@@ -1411,15 +1710,15 @@
 
 /* 已加入该收藏夹：整行变品牌粉（用户要求 m09254 的「点击后变粉」反馈） */
 .favrow-sel {
-  width: 27.2917vw;
-  height: 15.7895vh;
-  margin-left: 0.8333vw;
-  margin-top: 3.0075vh;
+  width: 262px;
+  height: 42px;
+  margin-left: 8px;
+  margin-top: 8px;
   flex-direction: row;
   align-items: center;
-  padding-left: 1.25vw;
-  padding-right: 1.25vw;
-  border-radius: 0.8333vw;
+  padding-left: 12px;
+  padding-right: 12px;
+  border-radius: 8px;
   border-width: 1px;
   border-color: @accent;
   background-color: @accent;
@@ -1437,7 +1736,7 @@
   flex-grow: 1;
   flex-shrink: 1;
   flex-basis: 0px;
-  font-size: 1.3542vw;
+  font-size: 13px;
   color: @text-color;
   lines: 1;
   text-overflow: ellipsis;
@@ -1447,28 +1746,28 @@
   flex-grow: 1;
   flex-shrink: 1;
   flex-basis: 0px;
-  font-size: 1.3542vw;
+  font-size: 13px;
   color: #ffffff;
   lines: 1;
   text-overflow: ellipsis;
 }
 
 .favrow-count {
-  font-size: 1.1458vw;
+  font-size: 11px;
   color: @text-color-dim;
 }
 
 .favrow-count-sel {
-  font-size: 1.1458vw;
+  font-size: 11px;
   color: #ffffff;
 }
 
 .side-status {
-  width: 27.2917vw;
-  margin-left: 0.8333vw;
-  margin-top: 3.7594vh;
-  margin-bottom: 3.0075vh;
-  font-size: 1.1458vw;
+  width: 262px;
+  margin-left: 8px;
+  margin-top: 10px;
+  margin-bottom: 8px;
+  font-size: 11px;
   color: @text-color-dim;
   lines: 3;
   text-overflow: ellipsis;
@@ -1477,7 +1776,7 @@
 /* 右栏滚动容器（评论区 / 收藏夹共用）：高度由父容器 flex 撑满，
    因为两态父高不同（收藏夹 220 = 266 − 顶部 46；评论区 232） */
 .side-scroll {
-  width: 28.9583vw;
+  width: 278px;
   flex-grow: 1;
   flex-shrink: 1;
   flex-basis: 0px;
@@ -1485,9 +1784,9 @@
 
 /* 右栏写评论行（比全屏面板窄：448 - 左右 8） */
 .sc-writeline {
-  width: 27.2917vw;
-  margin-left: 0.8333vw;
-  margin-top: 1.5038vh;
+  width: 262px;
+  margin-left: 8px;
+  margin-top: 4px;
   flex-direction: row;
   align-items: center;
 }
@@ -1496,8 +1795,8 @@
   flex-grow: 1;
   flex-shrink: 1;
   flex-basis: 0px;
-  margin-left: 0.8333vw;
-  font-size: 1.0417vw;
+  margin-left: 8px;
+  font-size: 10px;
   color: @text-color-dim;
   lines: 2;
   text-overflow: ellipsis;
@@ -1506,10 +1805,10 @@
 /* 右列底部一行反馈（点赞/投币/收藏结果、播放提示）。
    v4 手绘布局：右列 266 = 评论 226 + 反馈 14 + 输入框 26。 */
 .side-foot {
-  width: 27.2917vw;
-  height: 5.2632vh;
-  margin-left: 0.8333vw;
-  font-size: 0.9375vw;
+  width: 262px;
+  height: 14px;
+  margin-left: 8px;
+  font-size: 9px;
   color: @text-color-dim;
   lines: 1;
   text-overflow: ellipsis;
@@ -1517,35 +1816,35 @@
 
 /* ---------- 图文正文（896 宽）---------- */
 .astage {
-  width: 93.3333vw;
-  height: 100vh;
+  width: 896px;
+  height: 266px;
 }
 
 .art-scroll {
-  width: 93.3333vw;
-  height: 100vh;
-  padding-left: 0.8333vw;
-  padding-right: 0.8333vw;
+  width: 896px;
+  height: 266px;
+  padding-left: 8px;
+  padding-right: 8px;
 }
 
 .art-loading {
-  width: 91.6667vw;
-  height: 100vh;
+  width: 880px;
+  height: 266px;
   justify-content: center;
   align-items: center;
 }
 
 .art-cover {
-  margin-top: 3.0075vh;
-  width: 91.6667vw;
-  height: 60.1504vh;
-  border-radius: 0.8333vw;
+  margin-top: 8px;
+  width: 880px;
+  height: 160px;
+  border-radius: 8px;
   background-color: @card-border-color;
 }
 
 .art-title {
-  margin-top: 3.0075vh;
-  font-size: 1.6667vw;
+  margin-top: 8px;
+  font-size: 16px;
   font-weight: 600;
   color: @text-color;
   lines: 2;
@@ -1553,49 +1852,49 @@
 }
 
 .art-author {
-  margin-top: 1.5038vh;
-  font-size: 1.1458vw;
+  margin-top: 4px;
+  font-size: 11px;
   color: @text-color-dim;
   lines: 1;
 }
 
 .art-p {
-  margin-top: 2.2556vh;
-  font-size: 1.3542vw;
+  margin-top: 6px;
+  font-size: 13px;
   color: @text-color;
   lines: 30;
 }
 
 .art-img {
-  margin-top: 3.0075vh;
-  width: 91.6667vw;
-  height: 90.2256vh;
-  border-radius: 0.8333vw;
+  margin-top: 8px;
+  width: 880px;
+  height: 240px;
+  border-radius: 8px;
   background-color: @card-border-color;
 }
 
 .art-end {
-  margin-top: 4.5113vh;
-  margin-bottom: 5.2632vh;
-  font-size: 1.1458vw;
+  margin-top: 12px;
+  margin-bottom: 14px;
+  font-size: 11px;
   color: @text-color-dim;
   text-align: center;
 }
 
 /* ---------- 评论覆盖面板（896 宽：盖住中列 + 右栏）---------- */
 .comments-col {
-  width: 93.3333vw;
-  height: 100vh;
+  width: 896px;
+  height: 266px;
   flex-direction: column;
-  padding-left: 1.0417vw;
-  padding-right: 1.0417vw;
-  padding-top: 2.2556vh;
+  padding-left: 10px;
+  padding-right: 10px;
+  padding-top: 6px;
   background-color: @background-color;
 }
 
 .comments-head {
-  width: 91.25vw;
-  height: 13.5338vh;
+  width: 876px;
+  height: 36px;
   flex-direction: row;
   align-items: center;
 }
@@ -1604,15 +1903,15 @@
   flex-grow: 1;
   flex-shrink: 1;
   flex-basis: 0px;
-  font-size: 1.4583vw;
+  font-size: 14px;
   font-weight: 600;
   color: @text-color;
   lines: 1;
 }
 
 .comments-close {
-  width: 10.8333vw;
-  height: 12.0301vh;
+  width: 104px;
+  height: 32px;
   margin-top: 0;
 }
 
@@ -1623,7 +1922,7 @@
 }
 
 .reply-writeline {
-  width: 91.25vw;
+  width: 876px;
   flex-direction: row;
   align-items: center;
 }
@@ -1632,17 +1931,17 @@
   flex-grow: 1;
   flex-shrink: 1;
   flex-basis: 0px;
-  margin-left: 0.8333vw;
-  font-size: 1.1458vw;
+  margin-left: 8px;
+  font-size: 11px;
   color: @text-color-dim;
   lines: 2;
   text-overflow: ellipsis;
 }
 
 .reply-write {
-  width: 15.625vw;
-  height: 11.2782vh;
-  border-radius: 0.8333vw;
+  width: 150px;
+  height: 30px;
+  border-radius: 8px;
   background-color: @accent;
   justify-content: center;
   align-items: center;
@@ -1653,16 +1952,16 @@
 }
 
 .reply-write-text {
-  font-size: 1.25vw;
+  font-size: 12px;
   font-weight: 600;
   color: #ffffff;
   text-align: center;
 }
 
 .reply-status {
-  margin-top: 1.5038vh;
-  margin-bottom: 0.7519vh;
-  font-size: 1.1458vw;
+  margin-top: 4px;
+  margin-bottom: 2px;
+  font-size: 11px;
   color: @text-color-dim;
   lines: 2;
   text-overflow: ellipsis;
@@ -1676,108 +1975,114 @@
 
 /* 448 右栏专用：给左右各 8 的留白 */
 .reply-block-n {
-  width: 27.2917vw;
-  margin-left: 0.8333vw;
+  width: 262px;
+  margin-left: 8px;
   flex-direction: column;
 }
 
 .reply-item {
-  margin-top: 3.0075vh;
-  padding: 0.8333vw;
-  border-radius: 1.0417vw;
+  margin-top: 8px;
+  padding: 8px;
+  border-radius: 10px;
   background-color: @card-background-color;
 }
 
 /* 子楼展开区（二级卡片，缩进）——与 .reply-item 是兄弟节点，点击不与父卡片 toggle 冒泡纠缠 */
 .reply-children {
-  margin-top: 1.5038vh;
-  margin-left: 1.25vw;
-  padding: 0.625vw;
-  border-radius: 1.0417vw;
+  margin-top: 4px;
+  margin-left: 12px;
+  padding: 6px;
+  border-radius: 10px;
   background-color: @card-border-color;
 }
 
 .reply-child {
-  margin-top: 1.5038vh;
-  padding: 0.4167vw;
-  border-radius: 0.8333vw;
+  margin-top: 4px;
+  padding: 4px;
+  border-radius: 8px;
   background-color: @background-color;
 }
 
 .reply-sub-status {
-  margin-top: 0.7519vh;
-  margin-bottom: 0.7519vh;
-  font-size: 1.0417vw;
+  margin-top: 2px;
+  margin-bottom: 2px;
+  font-size: 10px;
   color: @text-color-dim;
   lines: 1;
 }
 
 .reply-name {
-  font-size: 1.1458vw;
+  font-size: 11px;
   color: @accent-blue;
   lines: 1;
   text-overflow: ellipsis;
 }
 
 .reply-msg {
-  margin-top: 0.7519vh;
-  font-size: 1.1458vw;
+  margin-top: 2px;
+  font-size: 11px;
   color: @text-color;
   lines: 3;
   text-overflow: ellipsis;
 }
 
 .reply-meta {
-  margin-top: 0.7519vh;
-  font-size: 1.0417vw;
+  margin-top: 2px;
+  font-size: 10px;
   color: @text-color-dim;
   lines: 1;
 }
 
 .reply-more {
-  margin-top: 3.0075vh;
-  margin-bottom: 3.0075vh;
-  height: 9.0226vh;
+  margin-top: 8px;
+  margin-bottom: 8px;
+  height: 24px;
   justify-content: center;
   align-items: center;
-  border-radius: 0.625vw;
-  background-color: rgba(255, 255, 255, 0.08);
 }
 
 .reply-more-text {
-  font-size: 1.1458vw;
+  font-size: 11px;
   color: @accent;
   text-align: center;
 }
 
 /* ---------- 扫码登录 ---------- */
-/* qr-box 228x228（v8 码 49+2×4 quiet ×4px），段宽全由 qr-l-N 静态类驱动（零 inline style） */
+/* v3.9.1 二维码放大 + 整数像素：
+ *   单元 6 设计 px = 4 物理 px（960→640 为 2/3），57 格（v8 49 + 2×4 quiet）= 342 设计
+ *   = 228 物理 px，模块宽高都是整数，手机扫码不再受 2.67px 非整数模块的粗细不匀影响。
+ *   白卡 390×390（390 是 qjs-style-scale 的跳过值，不会被 390/266 二次放大），
+ *   二维码在卡内双向居中，四周各留 24 设计 px quiet zone。 */
 .qr-wrap {
-  width: 92.0833vw;
-  height: 100vh;
+  width: 884px;
+  height: 390px;
   flex-direction: row;
 }
 
 .qr-box {
-  width: 228px;
-  height: 228px;
-  margin-top: 19px; /* (266-228)/2 垂直居中；水平由左右等宽弹力列夹持居中 */
+  width: 390px;
+  height: 390px;
+  /* 内容 57×6=342 在 390 卡内双向居中（各留 24px） */
   flex-direction: column;
-  /* 内容(49+2*4)*4=228 白底 → 双向居中对齐，否则默认左上贴角 */
   align-items: center;
   justify-content: center;
   background-color: #ffffff;
-  border-radius: 0.8333vw;
+  border-radius: 8px;
   overflow: hidden;
+  /* 固定尺寸：绝不被左右弹力列挤压（被挤压会让每行宽度与模块比例失真） */
+  flex-shrink: 0;
+  flex-grow: 0;
 }
 
 .qr-row {
-  height: 4px;
+  height: 6px;
   flex-direction: row;
+  flex-shrink: 0;
 }
 
 .qr-seg {
-  height: 4px;
+  height: 6px;
+  flex-shrink: 0;
 }
 
 .qr-dark {
@@ -1791,9 +2096,9 @@
   flex-shrink: 1;
   flex-basis: 0px;
   flex-direction: column;
-  padding-right: 0.8333vw;
-  padding-top: 6.015vh;
-  padding-bottom: 5.2632vh;
+  padding-right: 8px;
+  padding-top: 16px;
+  padding-bottom: 14px;
 }
 
 .qr-right {
@@ -1803,7 +2108,7 @@
 }
 
 .qr-state {
-  font-size: 1.5625vw;
+  font-size: 15px;
   font-weight: 600;
   color: @text-color;
   lines: 3;
@@ -1811,83 +2116,83 @@
 }
 
 .qr-hint {
-  margin-top: 3.0075vh;
-  font-size: 1.25vw;
+  margin-top: 8px;
+  font-size: 12px;
   color: @text-color-dim;
   lines: 2;
 }
 
 .qr-btn {
-  width: 19.7917vw;
+  width: 190px;
   background-color: @accent;
 }
 
-/* 段宽表 qr-l-1..65（×4px）追加在文件末尾 */
-.qr-l-1 { width: 4px; }
-.qr-l-2 { width: 8px; }
-.qr-l-3 { width: 12px; }
-.qr-l-4 { width: 16px; }
-.qr-l-5 { width: 20px; }
-.qr-l-6 { width: 24px; }
-.qr-l-7 { width: 28px; }
-.qr-l-8 { width: 32px; }
-.qr-l-9 { width: 36px; }
-.qr-l-10 { width: 40px; }
-.qr-l-11 { width: 44px; }
-.qr-l-12 { width: 48px; }
-.qr-l-13 { width: 52px; }
-.qr-l-14 { width: 56px; }
-.qr-l-15 { width: 60px; }
-.qr-l-16 { width: 64px; }
-.qr-l-17 { width: 68px; }
-.qr-l-18 { width: 72px; }
-.qr-l-19 { width: 76px; }
-.qr-l-20 { width: 80px; }
-.qr-l-21 { width: 84px; }
-.qr-l-22 { width: 88px; }
-.qr-l-23 { width: 92px; }
-.qr-l-24 { width: 96px; }
-.qr-l-25 { width: 100px; }
-.qr-l-26 { width: 104px; }
-.qr-l-27 { width: 108px; }
-.qr-l-28 { width: 112px; }
-.qr-l-29 { width: 116px; }
-.qr-l-30 { width: 120px; }
-.qr-l-31 { width: 124px; }
-.qr-l-32 { width: 128px; }
-.qr-l-33 { width: 132px; }
-.qr-l-34 { width: 136px; }
-.qr-l-35 { width: 140px; }
-.qr-l-36 { width: 144px; }
-.qr-l-37 { width: 148px; }
-.qr-l-38 { width: 152px; }
-.qr-l-39 { width: 156px; }
-.qr-l-40 { width: 160px; }
-.qr-l-41 { width: 164px; }
-.qr-l-42 { width: 168px; }
-.qr-l-43 { width: 172px; }
-.qr-l-44 { width: 176px; }
-.qr-l-45 { width: 180px; }
-.qr-l-46 { width: 184px; }
-.qr-l-47 { width: 188px; }
-.qr-l-48 { width: 192px; }
-.qr-l-49 { width: 196px; }
-.qr-l-50 { width: 200px; }
-.qr-l-51 { width: 204px; }
-.qr-l-52 { width: 208px; }
-.qr-l-53 { width: 212px; }
-.qr-l-54 { width: 216px; }
-.qr-l-55 { width: 220px; }
-.qr-l-56 { width: 224px; }
-.qr-l-57 { width: 228px; }
-.qr-l-58 { width: 232px; }
-.qr-l-59 { width: 236px; }
-.qr-l-60 { width: 240px; }
-.qr-l-61 { width: 244px; }
-.qr-l-62 { width: 248px; }
-.qr-l-63 { width: 252px; }
-.qr-l-64 { width: 256px; }
-.qr-l-65 { width: 260px; }
+/* 段宽表 qr-l-1..65（×6px，v3.9.1 起）追加在文件末尾 */
+.qr-l-1 { width: 6px; }
+.qr-l-2 { width: 12px; }
+.qr-l-3 { width: 18px; }
+.qr-l-4 { width: 24px; }
+.qr-l-5 { width: 30px; }
+.qr-l-6 { width: 36px; }
+.qr-l-7 { width: 42px; }
+.qr-l-8 { width: 48px; }
+.qr-l-9 { width: 54px; }
+.qr-l-10 { width: 60px; }
+.qr-l-11 { width: 66px; }
+.qr-l-12 { width: 72px; }
+.qr-l-13 { width: 78px; }
+.qr-l-14 { width: 84px; }
+.qr-l-15 { width: 90px; }
+.qr-l-16 { width: 96px; }
+.qr-l-17 { width: 102px; }
+.qr-l-18 { width: 108px; }
+.qr-l-19 { width: 114px; }
+.qr-l-20 { width: 120px; }
+.qr-l-21 { width: 126px; }
+.qr-l-22 { width: 132px; }
+.qr-l-23 { width: 138px; }
+.qr-l-24 { width: 144px; }
+.qr-l-25 { width: 150px; }
+.qr-l-26 { width: 156px; }
+.qr-l-27 { width: 162px; }
+.qr-l-28 { width: 168px; }
+.qr-l-29 { width: 174px; }
+.qr-l-30 { width: 180px; }
+.qr-l-31 { width: 186px; }
+.qr-l-32 { width: 192px; }
+.qr-l-33 { width: 198px; }
+.qr-l-34 { width: 204px; }
+.qr-l-35 { width: 210px; }
+.qr-l-36 { width: 216px; }
+.qr-l-37 { width: 222px; }
+.qr-l-38 { width: 228px; }
+.qr-l-39 { width: 234px; }
+.qr-l-40 { width: 240px; }
+.qr-l-41 { width: 246px; }
+.qr-l-42 { width: 252px; }
+.qr-l-43 { width: 258px; }
+.qr-l-44 { width: 264px; }
+.qr-l-45 { width: 270px; }
+.qr-l-46 { width: 276px; }
+.qr-l-47 { width: 282px; }
+.qr-l-48 { width: 288px; }
+.qr-l-49 { width: 294px; }
+.qr-l-50 { width: 300px; }
+.qr-l-51 { width: 306px; }
+.qr-l-52 { width: 312px; }
+.qr-l-53 { width: 318px; }
+.qr-l-54 { width: 324px; }
+.qr-l-55 { width: 330px; }
+.qr-l-56 { width: 336px; }
+.qr-l-57 { width: 342px; }
+.qr-l-58 { width: 348px; }
+.qr-l-59 { width: 354px; }
+.qr-l-60 { width: 360px; }
+.qr-l-61 { width: 366px; }
+.qr-l-62 { width: 372px; }
+.qr-l-63 { width: 378px; }
+.qr-l-64 { width: 384px; }
+.qr-l-65 { width: 390px; }
 
 /* 关于区小二维码段宽表 aq-l-1..37（单元 2px；v3 码 29+2×4 quiet = 37 格 = 74px）。
    与 qr-l-N 同一套 gridToRows 逻辑，只是单元更小、单独一套静态 class。 */
@@ -1943,8 +2248,8 @@
  *   右列 280（4 按钮 ×36 + 4×8 间距 = 176 + 提示 2 行 24）= 200 ✓
  */
 .upd {
-  width: 100vw;
-  height: 100vh;
+  width: 960px;
+  height: 266px;
   flex-direction: row;
   align-items: center;
   justify-content: center;
@@ -1953,67 +2258,68 @@
 
 /* 真正的卡片：圆角 + 描边 + 卡片底色（与 .mine-row / .rp-card 同一套视觉） */
 .upd-card {
-  width: 79.1667vw;
-  height: 87.218vh;
+  width: 760px;
+  height: 232px;
   flex-direction: row;
-  border-radius: 1.4583vw;
+  border-radius: 14px;
   background-color: @card-background-color;
   border-width: 1px;
   border-style: solid;
   border-color: @card-border-color;
-  padding-left: 1.6667vw;
-  padding-right: 1.6667vw;
-  padding-top: 6.015vh;
-  padding-bottom: 6.015vh;
+  padding-left: 16px;
+  padding-right: 16px;
+  padding-top: 16px;
+  padding-bottom: 16px;
 }
 
 .upd-left {
-  width: 45vw;
-  height: 75.188vh;
+  width: 432px;
+  height: 200px;
   flex-direction: column;
 }
 
 .upd-right {
-  width: 29.1667vw;
-  height: 75.188vh;
+  width: 280px;
+  height: 200px;
   flex-direction: column;
-  margin-left: 1.6667vw;
+  margin-left: 16px;
 }
 
 /* 标题行：标题 + 版本徽标 + 包大小（三者一行，266 屏纵向寸土寸金） */
 .upd-head {
-  width: 45vw;
-  height: 8.2707vh;
+  width: 432px;
+  height: 22px;
   flex-direction: row;
   align-items: center;
 }
 
 .upd-title {
-  font-size: 1.5625vw;
+  font-size: 15px;
   font-weight: 600;
   color: @text-color;
   lines: 1;
 }
 
 .upd-ver {
-  margin-left: 0.8333vw;
-  font-size: 1.25vw;
+  margin-left: 8px;
+  font-size: 12px;
   color: @accent;
   lines: 1;
 }
 
 .upd-size {
-  margin-left: 0.8333vw;
-  font-size: 1.1458vw;
+  margin-left: 8px;
+  font-size: 11px;
   color: @text-color-dim;
   lines: 1;
 }
 
 .upd-sub {
-  width: 45vw;
-  margin-top: 1.5038vh;
-  height: 6.015vh;
-  font-size: 1.1458vw;
+  width: 432px;
+  margin-top: 4px;
+  /* 16→22：字号物理 14.6 后需要 15px 行高 */
+  height: 22px;
+  font-size: 11px;
   color: @text-color-dim;
   lines: 1;
   text-overflow: ellipsis;
@@ -2023,33 +2329,33 @@
  * 266px 屏只放得下十来行，不给滚动等于只能看到开头两段。
  * 行高 18（字号 12 + 行距），150/18 ≈ 8 行可见。 */
 .upd-scroll {
-  width: 45vw;
-  height: 56.391vh;
-  margin-top: 2.2556vh;
+  width: 432px;
+  height: 150px;
+  margin-top: 6px;
 }
 
 .upd-line {
-  width: 45vw;
-  font-size: 1.25vw;
+  width: 432px;
+  font-size: 12px;
   color: @text-color;
   lines: 3;
 }
 
 /* 空行用 div 撑出来：<text> 内容为空时高度是 0，段落间距就丢了 */
 .upd-gap {
-  width: 45vw;
-  height: 3.0075vh;
+  width: 432px;
+  height: 8px;
 }
 
 /* 按钮：4 个一组（自动检测）/ 2 个一组（手动检测），同一套尺寸 */
 .upd-btn {
-  width: 29.1667vw;
-  height: 13.5338vh;
-  margin-top: 3.0075vh;
+  width: 280px;
+  height: 36px;
+  margin-top: 8px;
   flex-direction: row;
   align-items: center;
   justify-content: center;
-  border-radius: 1.0417vw;
+  border-radius: 10px;
   background-color: @ctrl-background;
 }
 
@@ -2063,13 +2369,13 @@
 }
 
 .upd-btn-t {
-  font-size: 1.3542vw;
+  font-size: 13px;
   color: @text-color;
   lines: 1;
 }
 
 .upd-btn-t-main {
-  font-size: 1.3542vw;
+  font-size: 13px;
   font-weight: 600;
   color: #1A1005;
   lines: 1;
@@ -2077,9 +2383,9 @@
 
 /* 右下角提示：解释"为什么不能点"或"下载到哪儿了"（也用来显示发布页地址） */
 .upd-tip {
-  width: 29.1667vw;
-  margin-top: 3.0075vh;
-  font-size: 1.0417vw;
+  width: 280px;
+  margin-top: 8px;
+  font-size: 10px;
   color: @text-color-dim;
   lines: 2;
   text-overflow: ellipsis;
@@ -2090,182 +2396,7 @@
  * （.upd | .page-body），包裹层如果不撑满宽高并把方向设回 row，
  * 原来的「左导航 + 内容」「左列 + 中列 + 右列」会全部竖排/塌陷。 */
 .page-body {
-  width: 100vw;
-  height: 100vh;
+  width: 960px;
+  height: 266px;
   flex-direction: row;
-}
-
-/* ==================== CC 字幕 / 互动视频选项 ====================
- * 字幕只能占真实的 UI 像素（视频平面在 UI 之上），所以它是一条独立的带子：
- *   · 3.5.6 第十轮：28px 两行，随字幕出现/消失 → 每次都要改矩形；
- *   · 第十一轮~十三轮：改成画在顶栏那 18px 里，视频矩形不动；
- *   · 第十四轮：顶栏删掉，字幕回到独立带子，但只给 **18px 单行** ——
- *     两行要多占 10px 画面，而这个尺寸下每 10px 都是 18px 宽的画面。
- * 开/关字幕仍然会改一次矩形（18px 让进让出），这是低频操作、且 native 会
- * 重建管线让 caps 跟上（见 session.c 的 SET_RECT）。 */
-/* 字幕带：18px 单行，纯黑无缝。
- * 【为什么不查 padding】falcon 的盒模型没有官方保证：如果 width 含 padding
- * （border-box），这条带子的可用宽会比 midW 少 20px；如果不含，整条会宽出
- * 20px 盖到右列上。第九轮的「全屏键消失」就是同一类双算。所以这里 pad 归零，
- * 左右留白改用 .cc-text 的 margin（margin 一定占 flex 空间，两种盒模型都对）。 */
-.cc-bar {
-  flex-direction: row;
-  align-items: center;
-  justify-content: center;
-  background-color: #000000;
-}
-
-/* 单行 13px / 18：整条带子只有 18 高，两行会裁掉下半截。
- * 【第十六轮】12 → 13px、左右留白 8 → 10px：参考系统播放器没有 CC，
- * 它的文字层是弹幕（danmaku-item：12px 纯白、无边框、10px 内边距）。
- * 我们在 18px 带里取 13px 是为了让笔尖距离下仍能看清整句；
- * 长句靠省略号收尾，不换行（换行要 28px，等于把画面再压掉 10px）。 */
-.cc-text {
-  flex-grow: 1;
-  flex-shrink: 1;
-  flex-basis: 0px;
-  margin-left: 1.0417vw;
-  margin-right: 1.0417vw;
-  font-size: 1.3542vw;
-  line-height: 1.875vw;
-  color: #FFFFFF;
-  text-align: center;
-  lines: 1;
-  text-overflow: ellipsis;
-}
-
-/* 互动视频：右栏整栏替换（与收藏夹覆盖层同构，不用 z-index / absolute）。 */
-.ip-head {
-  flex-direction: row;
-  align-items: center;
-  padding-left: 0.8333vw;
-  padding-right: 0.8333vw;
-  border-bottom-width: 1px;
-  border-bottom-color: @card-border-color;
-}
-
-.ip-title {
-  flex-grow: 1;
-  flex-shrink: 1;
-  flex-basis: 0px;
-  font-size: 1.25vw;
-  font-weight: 600;
-  color: @text-color;
-  lines: 1;
-  text-overflow: ellipsis;
-}
-
-.ip-count {
-  width: 5.625vw;
-  font-size: 1.1458vw;
-  color: @accent;
-  text-align: right;
-  lines: 1;
-}
-
-.ip-choice {
-  width: 27.2917vw;
-  min-height: 13.5338vh;
-  margin-left: 0.8333vw;
-  margin-top: 2.2556vh;
-  flex-direction: row;
-  align-items: center;
-  padding-left: 0.8333vw;
-  padding-right: 0.625vw;
-  border-radius: 0.8333vw;
-  border-width: 1px;
-  border-color: rgba(255, 255, 255, 0.14);
-  background-color: rgba(255, 255, 255, 0.07);
-}
-
-/* 两条规则各自完整、类名互斥：falcon 的等价特异性靠源码顺序决胜，
-   同时命中两条时后写的会被先写的盖掉（见 .favrow 的长注释）。 */
-.ip-choice-def {
-  width: 27.2917vw;
-  min-height: 13.5338vh;
-  margin-left: 0.8333vw;
-  margin-top: 2.2556vh;
-  flex-direction: row;
-  align-items: center;
-  padding-left: 0.8333vw;
-  padding-right: 0.625vw;
-  border-radius: 0.8333vw;
-  border-width: 1px;
-  border-color: @accent;
-  background-color: rgba(251, 114, 153, 0.16);
-}
-
-.ip-choice:active {
-  opacity: 0.7;
-}
-
-.ip-choice-def:active {
-  opacity: 0.7;
-}
-
-.ip-choice-idx {
-  width: 1.875vw;
-  font-size: 1.1458vw;
-  color: @accent;
-  lines: 1;
-}
-
-.ip-choice-text {
-  flex-grow: 1;
-  flex-shrink: 1;
-  flex-basis: 0px;
-  font-size: 1.25vw;
-  color: @text-color;
-  lines: 2;
-  text-overflow: ellipsis;
-}
-
-.ip-choice-tag {
-  width: 2.9167vw;
-  font-size: 0.9375vw;
-  color: @accent;
-  text-align: right;
-  lines: 1;
-}
-
-.ip-status {
-  width: 27.2917vw;
-  margin-left: 0.8333vw;
-  margin-top: 3.0075vh;
-  font-size: 1.1458vw;
-  color: @text-color-dim;
-  lines: 3;
-}
-
-.ip-foot {
-  flex-direction: row;
-  align-items: center;
-  padding-left: 0.625vw;
-  padding-right: 0.625vw;
-}
-
-.ip-btn {
-  height: 8.2707vh;
-  flex-grow: 1;
-  flex-shrink: 1;
-  flex-basis: 0px;
-  margin-left: 0.2083vw;
-  margin-right: 0.2083vw;
-  border-radius: 0.625vw;
-  border-width: 1px;
-  border-color: rgba(255, 255, 255, 0.16);
-  background-color: rgba(255, 255, 255, 0.08);
-  justify-content: center;
-  align-items: center;
-}
-
-.ip-btn:active {
-  opacity: 0.7;
-}
-
-.ip-btn-t {
-  font-size: 1.0417vw;
-  color: @text-color;
-  text-align: center;
-  lines: 1;
 }

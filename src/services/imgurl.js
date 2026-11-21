@@ -44,3 +44,28 @@ export function normalizeImageUrl(url) {
   }
   return u;
 }
+
+/**
+ * 封面缩略图：B 站图床支持 `@<w>w_<h>h.jpg` 图片处理后缀（archive.biliimg.com
+ * 实测同样生效，200 + 18KB）。设备 BitmapFactory 对原图有硬限制，真机日志
+ * `image is too too large w=2292,h=1289,bytes=5908776` → 封面直接灰块。
+ * 列表/详情封面显示尺寸只有 ~469x264 逻辑（物理 313x176），取 480x270 足够。
+ * @param {string} url
+ * @param {number} [w] 默认 480
+ * @param {number} [h] 默认 270
+ * @returns {string}
+ */
+export function coverThumbUrl(url, w, h) {
+  const u = normalizeImageUrl(url);
+  if (!u) return '';
+  // 已经带 @ 处理后缀（不要二次拼接）
+  if (/@[^/?#]+(?:[?#].*)?$/.test(u)) return u;
+  // 只处理图片扩展名，避免把视频/接口地址拼坏
+  if (!/\.(jpg|jpeg|png|webp)(?:[?#].*)?$/i.test(u)) return u;
+  const cut = u.search(/[?#]/);
+  const base = cut < 0 ? u : u.slice(0, cut);
+  const tail = cut < 0 ? '' : u.slice(cut);
+  const sw = Math.round(Number(w) || 480);
+  const sh = Math.round(Number(h) || 270);
+  return base + '@' + sw + 'w_' + sh + 'h.jpg' + tail;
+}

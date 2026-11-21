@@ -31,22 +31,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>   /* access() —— installAmr 先查文件是否真存在 */
-#include <dirent.h>   /* listFiles —— 「本地」栏列目录 */
-#include <sys/stat.h> /* listFiles —— 只收普通文件、带 size/mtime */
-
-#define PB2_MAX_LIST 200 /* 一次最多列 200 个文件，防止异常目录把 JS 堆撑爆 */
 
 #include "core/clock.h"
 #include "core/log.h"
 #include "core/queue.h"
 #include "session/cmd.h"
 #include "session/session.h"
-#include "video/dm_overlay.h"
-#include "video/kms_plane.h"
 
-/* 3.6.0：X7 Pro 适配 —— 面板列偏移 / kmssink plane-id 由 open 参数下发，
- *        kmsProbe() 导出 DRM 平面摘要；X6 Pro 缺省行为不变。 */
-#define PB2_VERSION "3.5.6"
+#define PB2_VERSION "3.0.0"
 #define PB2_MODULE_NAME "player2"
 
 /* 与 src/services/player.js 的 JS 侧规则保持一致 */
@@ -161,14 +153,9 @@ static char *dup_or_null(const char *s) {
 
 /*
  * open(input, startMs, durationMs, fps, audio, transpose,
- *      x, y, w, h, audioDevice, userAgent, referer, input2, fpsCap,
- *      isLive, panelOffset, planeId)
+ *      x, y, w, h, audioDevice, userAgent, referer, input2, fpsCap)
  *
- * 18 个位置参数，顺序与 src/services/player.js 的 buildOpenArgs 严格一致。
- * 前 16 个是既有契约；最后两个是【X7 Pro 适配】新增的可选设备参数：
- *   panelOffset  <0 用 X6 Pro 默认 107，>=0 显式面板列偏移；
- *   planeId      0  用 X6 Pro 默认 76，-1 交给 kmssink 自动选平面，>0 显式指定。
- * 老版本 JS 只传 15/16 个参数时行为完全不变（X6 Pro 原样）。
+ * 15 个位置参数，顺序与 src/services/player.js 的 buildOpenArgs 严格一致。
  * 立即返回：只做参数校验 + strdup + 入队，不做任何耗时操作。
  */
 static JSValue js_open(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
@@ -295,40 +282,6 @@ static JSValue js_open(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
      */
     req->isLive = (argc >= 16) ? (int)arg_int(ctx, argc, argv, 15, -1) : -1;
     if (req->isLive != 0 && req->isLive != 1) req->isLive = -1;
-
-    /*
-     * 【X7 Pro 适配】设备显示参数（可选）。缺省值让 X6 Pro 走原来的硬编码：
-     * panelOffset=-1 → native 用 107；planeId=0 → native 用 76。
-     * device_profile.js 在 X7 Pro 上会传 panelOffset=100 / planeId=-1。
-     */
-    req->panelOffset = (argc >= 17) ? (int)arg_int(ctx, argc, argv, 16, -1) : -1;
-    req->planeId = (argc >= 18) ? (int)arg_int(ctx, argc, argv, 17, 0) : 0;
-    /*
-     * 【3.6.3】第 19 个参数 = 软件缩放（0/1）。
-     *
-     * X7 Pro 上 kmssink 的 plane-id 76 不可用（sink 起不来 → set_state
-     * FAILURE → 整片黑）。稳妥做法是 planeId=-1 + videoscale：让 sink 拿到
-     * 与窗口等大的 buffer，挑到没有缩放能力的平面也能 1:1 上屏。
-     * 缺省 0 = 保持 X6 Pro 的硬件缩放，行为逐字节不变。
-     */
-    req->swScale = (argc >= 19) ? (int)arg_int(ctx, argc, argv, 18, 0) : 0;
-    /* 0=硬件缩放 / 1=videoscale 且按 rotate 互换目标 / 2=videoscale 不互换。
-     * 2 是给「mppvideodec 真的把 buffer 转成竖帧」的固件留的免打包回退开关。 */
-    if (req->swScale < 1 || req->swScale > 3) req->swScale = 0;
-    /*
-     * 【3.5.6 第四轮】第 20 个参数 = videoscale 输出倍率（百分比）。
-     * X7 Pro 自选平面疑似只做 1:1 贴 buffer，改 render-rectangle 不影响画面
-     * 大小；只有等比放大送进 sink 的 buffer 才能让画面铺满挖洞区。
-     * 缺省 100 = 与矩形等大（X6 Pro 与所有老调用方行为不变）。
-     */
-    req->bufScale = (argc >= 20) ? (int)arg_int(ctx, argc, argv, 19, 100) : 100;
-    if (req->bufScale < 50 || req->bufScale > 400) req->bufScale = 100;
-    /* 【第二十六轮】第 21/22 位 = 全屏 cover 的左右/上下裁切量（物理像素）。
-     * 0 = 不裁（普通态）。钳到 0..2048，避免异常值把管线撑爆。 */
-    req->cropX = (argc >= 21) ? (int)arg_int(ctx, argc, argv, 20, 0) : 0;
-    req->cropY = (argc >= 22) ? (int)arg_int(ctx, argc, argv, 21, 0) : 0;
-    if (req->cropX < 0 || req->cropX > 2048) req->cropX = 0;
-    if (req->cropY < 0 || req->cropY > 2048) req->cropY = 0;
 
     JS_FreeCString(ctx, input);
     if (audio_dev) JS_FreeCString(ctx, audio_dev);
@@ -491,26 +444,6 @@ static JSValue js_recover(JSContext *ctx, JSValueConst this_val, int argc, JSVal
 }
 
 /*
- * setSound(1)：运行时一键解除全局静音（3.5.6 第五轮）。
- *
- * 背景：调试期曾要求「测试一律静音」，设备上的 /tmp/pb2_mute 或
- * PB2_MUTE=1 会让播放器在每次 OPEN 前把 card0 Playback Path 设成 OFF。
- * 画面正常、音频字节持续增长、自检页也报「音=xxxxx/有」，但扬声器不响。
- * 开发机无 adb，用户没法自己删文件 —— 所以在自检页给一个按钮，
- * 通过命令队列让 worker 去删标志文件并选通输出通路。
- * 老版本 JS 不调它时行为完全不变；v1 没有此接口，player.js 会降级。
- */
-static JSValue js_set_sound(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-    long long on;
-    (void)this_val;
-    on = (argc >= 1) ? arg_int(ctx, argc, argv, 0, 1) : 1;
-    if (pb2_session_cmd(PB2_CMD_SET_SOUND, on, NULL) != 0) {
-        return mk_fail(ctx, "PLAYER_BUSY", "queue full");
-    }
-    return mk_ok(ctx);
-}
-
-/*
  * installAmr(path)：用系统 miniapp_cli 安装本地 .amr。
  *
  * 为什么绕到 native：设备上的 $falcon.jsapi 里**没有 pm 模块**
@@ -592,31 +525,6 @@ static JSValue js_release(JSContext *ctx, JSValueConst this_val, int argc, JSVal
  * status() 只读无锁快照（seqlock），不加锁、不碰 Gst 对象。
  * 每个字段的语义见 docs/design/player2-api.md。
  */
-/* 错误码 → 短名（只用于诊断显示，不参与任何判断逻辑） */
-static const char *pb2_err_name(int code) {
-    switch (code) {
-    case 0: return "none";
-    case 1: return "bad-arg";
-    case 2: return "bad-input";
-    case 3: return "bad-headers";
-    case 4: return "bad-rect";
-    case 5: return "gst-init";
-    case 6: return "pipeline";
-    case 7: return "open-failed";
-    case 8: return "no-stream";
-    case 9: return "busy";
-    case 10: return "seek";
-    case 11: return "eos";
-    case 12: return "plane-lost";
-    case 13: return "timeout";
-    case 14: return "internal";
-    case 15: return "no-first-frame";
-    case 16: return "branch-link";
-    case 17: return "live-reconnect";
-    default: return "unknown";
-    }
-}
-
 static JSValue js_status(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     pb2_stats_t st;
     pb2_probe_t *probe = NULL;
@@ -656,19 +564,7 @@ static JSValue js_status(JSContext *ctx, JSValueConst this_val, int argc, JSValu
     mk_bool(ctx, "seekPending", st.seekPending, res);
     mk_int(ctx, "seekTargetMs", st.seekTargetMs, res);
     mk_int(ctx, "lastError", st.lastError, res);
-    /*
-     * 【3.6.2】错误码永远带名字。
-     *
-     * 真机自检页出现过「播放错误：」后面空无一物 —— 因为部分 patch_error
-     * 只给了码没给文本，而页面只显示文本。这里在文本为空时用码名兜底，
-     * 至少能区分「平面丢了(plane-lost)」「解码/管线错(pipeline)」
-     * 「没首帧(no-first-frame)」「源断了(src-dead)」这几类完全不同的故障。
-     */
-    if (st.lastErrorMsg[0]) {
-        mk_str(ctx, "lastErrorMsg", st.lastErrorMsg, res);
-    } else {
-        mk_str(ctx, "lastErrorMsg", st.lastError ? pb2_err_name(st.lastError) : "", res);
-    }
+    mk_str(ctx, "lastErrorMsg", st.lastErrorMsg, res);
     mk_bool(ctx, "planeActive", st.planeActive, res);
     mk_bool(ctx, "pipelineAlive", st.pipelineAlive, res);
     /*
@@ -759,25 +655,7 @@ static JSValue js_status(JSContext *ctx, JSValueConst this_val, int argc, JSValu
     mk_int(ctx, "audioUnderruns", 0, res);
     mk_int(ctx, "audioWrErrors", 0, res);
     mk_int(ctx, "audioRingDrops", 0, res);
-    /*
-     * audioDead：**不再是常量 0**（2026-11-07 修复）。
-     *
-     * 页面早就有「无声：音频输出被其他应用占用」的提示分支，但 native 一直
-     * 硬编码 0，那条分支永远进不去 —— 用户反馈的「有概率没有声音」既没有
-     * 自愈也没有提示。现在由 session 侧真值给出：
-     *   期望有音轨 + 首帧后 4.5s 仍 0 音频字节 + 已经重建过一次 → 1
-     * check_audio_stall() 会先做最多 2 次原地重建（位置不变）再报这个状态。
-     * audioHeals 是已自愈次数，日志/诊断页用它判断是不是"救过但没救回来"。
-     */
-    mk_bool(ctx, "audioDead", pb2_session_audio_dead() == 1, res);
-    /*
-     * audioOff：因「音频设备被别的进程占着」而主动降级为无声。
-     * 与 audioDead 的区别：audioDead 是「该有声却一个字节都没来」，
-     * audioOff 是「我们主动关了音频以防画面跟着挂」——页面提示要分开写，
-     * 否则用户会以为片子坏了。
-     */
-    mk_bool(ctx, "audioOff", pb2_session_audio_off() == 1, res);
-    mk_int(ctx, "audioHeals", pb2_session_audio_heals(), res);
+    mk_bool(ctx, "audioDead", 0, res);
     /*
      * screenOff：息屏/背光断电时为 true。
      *
@@ -809,70 +687,10 @@ static JSValue js_info(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
     mk_str(ctx, "version", PB2_VERSION, res);
     mk_str(ctx, "gstVersion", pb2_session_gst_version(), res);
     mk_bool(ctx, "registryReady", pb2_session_gst_ready(), res);
-    /* 【X7 Pro 适配】返回本次会话真正生效的值，不再是写死的 76/107 */
-    mk_int(ctx, "planeId", pb2_session_plane_id(), res);
-    mk_int(ctx, "swScale", pb2_session_sw_scale(), res);
-    mk_int(ctx, "bufScale", pb2_session_buf_scale(), res);
-    mk_int(ctx, "panelXOffset", pb2_session_panel_offset(), res);
-    /* 真正生效的渲染矩形 "<x,y,w,h>"（面板坐标，已含 panelOffset） */
-    mk_str(ctx, "rect", pb2_session_rect(), res);
+    mk_int(ctx, "planeId", 76, res);
+    mk_int(ctx, "panelXOffset", 107, res);
     mk_bool(ctx, "logOn", pb2_log_on(), res);
     mk_int(ctx, "rssKb", (long long)pb2_rss_kb(), res);
-    return res;
-}
-
-/*
- * kmsProbe() —— 【X7 Pro 适配】黑屏现场取证。
- *
- * 只读 /sys/kernel/debug/dri/0/summary 并原样返回给 JS（diag 页显示），
- * 用于回答「这台笔上到底有没有 /dev/dri、UI 平面叫什么、视频平面有没有
- * ACTIVE、dst 几何是多少」。X6 Pro 上写死 plane 76 没问题，换机型后必须
- * 先看这份摘要再决定 planeId / panelOffset，不能靠猜。
- *
- * 必须是非阻塞的：只做一次 open/read/close（debugfs 约 200~600us）。
- * 用调用方静态缓冲，不碰 worker 的巡检缓冲。
- */
-static JSValue js_kms_probe(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-    static char summary[16384];
-    int n;
-    JSValue res = JS_NewObject(ctx);
-    (void)this_val;
-    (void)argc;
-    (void)argv;
-    n = pb2_kms_summary(summary, sizeof(summary));
-    mk_bool(ctx, "ok", n >= 0, res);
-    mk_int(ctx, "bytes", n, res);
-    mk_str(ctx, "path", "/sys/kernel/debug/dri/0/summary", res);
-    mk_str(ctx, "summary", n > 0 ? summary : "", res);
-    return res;
-}
-
-/*
- * logTail(maxBytes) —— 把 native 日志尾部返回给 JS（自检页显示）。
- *
- * 为什么需要：真机排障时用户手上不一定有 adb，而「播放错误：」这类空消息
- * 完全无法定位。/tmp/pb2.log 里有 bus error 原文、plane 巡检、音频自愈、
- * seek 耗时，一张截图就能看出是解码错、平面丢、还是源断了。
- *
- * 只读，最多 8KB（约 80 行），不会影响播放线程。
- */
-static JSValue js_log_tail(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-    static char tail[8192];
-    JSValue res = JS_NewObject(ctx);
-    int want;
-    int n;
-    (void)this_val;
-
-    want = (argc >= 1) ? (int)arg_int(ctx, argc, argv, 0, 4096) : 4096;
-    if (want < 256) want = 256;
-    if (want > (int)sizeof(tail)) want = (int)sizeof(tail);
-    n = pb2_log_tail(tail, (unsigned int)want);
-
-    mk_bool(ctx, "ok", 1, res);
-    mk_int(ctx, "bytes", n, res);
-    mk_bool(ctx, "on", pb2_log_on(), res);
-    mk_str(ctx, "path", "/tmp/pb2.log", res);
-    mk_str(ctx, "text", n > 0 ? tail : "", res);
     return res;
 }
 
@@ -888,166 +706,6 @@ static JSValue js_log_tail(JSContext *ctx, JSValueConst this_val, int argc, JSVa
  *     布局变化请重新 open（或将来加 setRect）。
  *   - 新增 info 里的 gstVersion / registryReady / logOn / rssKb 便于诊断。
  */
-/* ==================== 目录读取（3.5.6 第二十二轮，当前 JS 未使用） ====================
- *
- * 平台没有给 JS 任何文件系统接口（$falcon.jsapi 里没有 file/list），所以这里
- * 补了一个通用的 listFiles。它最初是为「本地」栏（播放
- * /userdisk/Favourite:bili 下的视频）写的；**该功能已按用户反馈移除**
- * （2026-11-13），JS 侧不再调用，保留这个导出作为通用能力 —— 它不影响
- * 任何现有行为（不被调用就没有开销），将来要做文件浏览也不用再改 native。
- *
- * 为什么允许它同步执行（本文件其余接口都是非阻塞的）：
- *   · 目录条目数是个位到几十个（用户自己存的视频），opendir/stat 是纯内存
- *     级的元数据操作，实测单次 < 2ms；
- *   · 它不在播放路径上，只在用户点「本地」页签时调一次；
- *   · 走 worker 线程要新增命令类型 + 结果回传缓冲，收益远小于复杂度。
- * 为此加了两道闸：最多返回 PB2_MAX_LIST 条、只接受 / 开头且不含 .. 的目录。
- */
-static JSValue js_list_files(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-    const char *dir;
-    DIR *d;
-    struct dirent *e;
-    JSValue res;
-    JSValue arr;
-    int n = 0;
-    (void)this_val;
-
-    dir = arg_str(ctx, argc, argv, 0);
-    if (!dir || !dir[0]) {
-        if (dir) JS_FreeCString(ctx, dir);
-        return mk_fail(ctx, "PLAYER_BAD_ARG", "listFiles(dir) 需要目录路径");
-    }
-    if (strlen(dir) > 512 || dir[0] != '/' || strstr(dir, "..")) {
-        JS_FreeCString(ctx, dir);
-        return mk_fail(ctx, "PLAYER_BAD_INPUT", "目录必须是绝对路径且不含 ..");
-    }
-    d = opendir(dir);
-    if (!d) {
-        res = mk_fail(ctx, "PLAYER_OPENDIR", "目录不存在或不可读");
-        JS_FreeCString(ctx, dir);
-        return res;
-    }
-    arr = JS_NewArray(ctx);
-    while ((e = readdir(d)) != NULL) {
-        char full[1024];
-        struct stat st;
-        JSValue o;
-        if (e->d_name[0] == '.') continue;
-        if (n >= PB2_MAX_LIST) break;
-        snprintf(full, sizeof(full), "%s/%s", dir, e->d_name);
-        if (stat(full, &st) != 0) continue;
-        /* 两种都收：普通文件 = 视频；目录 = B 站下载器常见的
-         * `<BV号>/video.mp4` 结构。JS 侧只对「名字含 BV 号的目录」再进一层
-         * （见 local_media.listLocalVideos），所以这里给个 dir 标记就够，
-         * 不在 C 里做递归。 */
-        if (!S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode)) continue;
-        o = JS_NewObject(ctx);
-        mk_str(ctx, "name", e->d_name, o);
-        mk_str(ctx, "path", full, o);
-        if (S_ISDIR(st.st_mode)) {
-            mk_bool(ctx, "dir", 1, o);
-        } else {
-            mk_int(ctx, "size", (long long)st.st_size, o);
-        }
-        mk_int(ctx, "mtime", (long long)st.st_mtime, o);
-        JS_SetPropertyUint32(ctx, arr, (uint32_t)n, o);
-        n++;
-    }
-    closedir(d);
-    JS_FreeCString(ctx, dir);
-
-    res = JS_NewObject(ctx);
-    mk_bool(ctx, "ok", 1, res);
-    mk_int(ctx, "count", n, res);
-    JS_SetPropertyStr(ctx, res, "files", arr);
-    return res;
-}
-
-/*
- * ============ 【3.5.14 弹幕】三个 JSAPI 导出 ============
- *
- * 分工写在 queue.h 的 PB2_CMD_DM_* 注释里：JS 负责「解析 protobuf + 去重 +
- * 拼文本」，native 负责「字体位图缓存 + 泳道分配 + NV12 合成」。
- *
- * 【为什么文本用字符串传，而不是二进制 blob】
- * 一片弹幕解析完是 1400 条左右，每条 30~80 字节文本，整片约 60~110KB。
- * QuickJS 侧把一个长字符串交给 JS_ToCString 再 malloc 一次是可接受的
- * （实测 <1ms）；而如果传 ArrayBuffer，native 侧还得再写一层 JS_GetArrayBuffer
- * + 手工游标解析，代码多一倍、收益为零 —— 真正的重活（位图绘制）不在解析。
- *
- * 【为什么 dmMode 是 (mode, fontPx) 两个参数】
- * 打包成一个 i64 传给 worker（mode | fontPx<<8），避免「设了模式还没设字号」
- * 的中间态被 worker 看到。
- */
-
-/* dmFeed(text) —— 喂入一整片弹幕文本，每行 `id|progress|mode|color|fontsize|content`。 */
-static JSValue js_dm_feed(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-    const char *text;
-    char *copy;
-    size_t len;
-    (void)this_val;
-
-    text = arg_str(ctx, argc, argv, 0);
-    if (!text || !text[0]) {
-        if (text) JS_FreeCString(ctx, text);
-        return mk_fail(ctx, "BAD_ARGS", "danmaku text required");
-    }
-    len = strlen(text);
-    /*
-     * 上界 4MB：一片 360 秒正常情况下 100KB 上下，就算遇到「全站最热视频」
-     * 的顶级分片也到不了 1MB。4MB 是防呆 —— 万一 JS 侧把整个视频所有分片
-     * 拼起来传进来，宁可明确拒绝，也不要在 worker 里 malloc 一个几十 MB
-     * 的字符串把 4×A53 的内存压垮。
-     */
-    if (len > (size_t)4 * 1024 * 1024) {
-        JS_FreeCString(ctx, text);
-        return mk_fail(ctx, "TOO_LONG", "danmaku text too long");
-    }
-    /* worker 负责 free，所以这里必须自己 malloc 一份 —— JS_FreeCString 的
-     * 内存归 QuickJS 管，不能跨线程交给 worker 释放。 */
-    copy = (char *)malloc(len + 1);
-    if (!copy) {
-        JS_FreeCString(ctx, text);
-        return mk_fail(ctx, "NO_MEM", "malloc failed");
-    }
-    memcpy(copy, text, len + 1);
-    JS_FreeCString(ctx, text);
-
-    if (pb2_session_cmd(PB2_CMD_DM_FEED, 0, copy) != 0) {
-        /* 队列满：copy 还没交给 worker，这里必须自己 free，否则泄漏。 */
-        free(copy);
-        return mk_fail(ctx, "PLAYER_BUSY", "queue full");
-    }
-    return mk_ok(ctx);
-}
-
-/* dmMode(mode, fontPx) —— mode: 0=关 1=全屏 2=上半 3=上 1/4。 */
-static JSValue js_dm_mode(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-    long long mode, font;
-    long long packed;
-    (void)this_val;
-
-    mode = (argc >= 1) ? arg_int(ctx, argc, argv, 0, 0) : 0;
-    font = (argc >= 2) ? arg_int(ctx, argc, argv, 1, 0) : 0;
-    if (mode < 0 || mode > 3) mode = 0;
-    if (font < 0) font = 0;
-    if (font > 200) font = 200;
-    packed = (mode & 0xff) | ((font & 0xffff) << 8);
-    if (pb2_session_cmd(PB2_CMD_DM_MODE, packed, NULL) != 0) {
-        return mk_fail(ctx, "PLAYER_BUSY", "queue full");
-    }
-    return mk_ok(ctx);
-}
-
-/* dmClear() —— 切集 / 跨分片 seek 时清空已加载的弹幕。 */
-static JSValue js_dm_clear(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-    (void)this_val; (void)argc; (void)argv;
-    if (pb2_session_cmd(PB2_CMD_DM_CLEAR, 0, NULL) != 0) {
-        return mk_fail(ctx, "PLAYER_BUSY", "queue full");
-    }
-    return mk_ok(ctx);
-}
-
 #define PB2_EXPORTS(X) \
     X("open", js_open, 15) \
     X("pause", js_pause, 0) \
@@ -1059,14 +717,7 @@ static JSValue js_dm_clear(JSContext *ctx, JSValueConst this_val, int argc, JSVa
     X("recover", js_recover, 0) \
     X("installAmr", js_install_amr, 1) \
     X("release", js_release, 0) \
-    X("info", js_info, 0) \
-    X("setSound", js_set_sound, 1) \
-    X("kmsProbe", js_kms_probe, 0) \
-    X("logTail", js_log_tail, 1) \
-    X("dmFeed", js_dm_feed, 1) \
-    X("dmMode", js_dm_mode, 2) \
-    X("dmClear", js_dm_clear, 0) \
-    X("listFiles", js_list_files, 1)
+    X("info", js_info, 0)
 
 static int player2_module_init(JSContext *ctx, JSModuleDef *m) {
     JSValue def = JS_NewObject(ctx);

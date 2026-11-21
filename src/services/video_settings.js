@@ -93,11 +93,25 @@ const findById = (list, id, fallback) =>
   list.find((x) => x.id === fallback) ||
   list[0];
 
+/* CV1826 单核 A53：只有 360p 软解能稳定跑；默认锁 360p30，避免用户首次进入
+ * 就拉 720p 导致解码跟不上（详情页/播放页都会卡）。 */
 export const DEFAULT_VIDEO_SETTINGS = {
   version: VIDEO_SETTINGS_VERSION,
-  videoQuality: '720p60',
-  liveQuality: '720p60'
+  videoQuality: '360p30',
+  liveQuality: '480p30',
+  /* 播放页「样式」：smooth=流畅（按当前显示矩形解码，旧行为）；
+   * clear=清晰（按无栏/全屏信箱矩形解码，显示始终等比信箱不裁切；
+   * 带栏播放时由 native 等比缩小，隐藏栏后 1:1 落屏，边缘更锐利）。
+   * 清晰档解码像素更多，native 侧配套智能跳帧（落后时每 2~4 帧贴一屏）。 */
+  playStyle: 'smooth',
+  /* 视频放大开关：开 = 允许双指捏合 1..4x（native 中心裁切放大）。 */
+  videoZoom: true
 };
+
+export const PLAY_STYLES = [
+  { id: 'smooth', label: '流畅（按栏解码）' },
+  { id: 'clear', label: '清晰（无栏解码）' }
+];
 
 /* v1 → v2 迁移：老记录是 videoQuality('auto'|'1080p'|'720p'|'480p'|'360p')
  * + videoFps('auto'|'60'|'30') 两个独立字段，合并成单个画质 id。
@@ -156,7 +170,9 @@ export function normalizeVideoSettings(raw) {
     videoQuality: findById(VIDEO_QUALITY_OPTIONS, src.videoQuality,
                            DEFAULT_VIDEO_SETTINGS.videoQuality).id,
     liveQuality: findById(LIVE_QUALITY_OPTIONS, src.liveQuality,
-                          DEFAULT_VIDEO_SETTINGS.liveQuality).id
+                          DEFAULT_VIDEO_SETTINGS.liveQuality).id,
+    playStyle: src.playStyle === 'clear' ? 'clear' : 'smooth',
+    videoZoom: src.videoZoom !== false
   };
 }
 
@@ -227,4 +243,15 @@ export function liveQualityLabel(settings) {
   const s = normalizeVideoSettings(settings);
   return findById(LIVE_QUALITY_OPTIONS, s.liveQuality,
                  DEFAULT_VIDEO_SETTINGS.liveQuality).label;
+}
+
+/* 播放页「样式」行的展示文字与切换目标 */
+export function playStyleLabel(settings) {
+  const s = normalizeVideoSettings(settings);
+  return s.playStyle === 'clear' ? '清晰（铺满）' : '流畅（信箱）';
+}
+
+export function nextPlayStyle(settings) {
+  const s = normalizeVideoSettings(settings);
+  return s.playStyle === 'clear' ? 'smooth' : 'clear';
 }

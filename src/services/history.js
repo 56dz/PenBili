@@ -1,9 +1,10 @@
-// 播放历史（本地 schema，version 化；给「我的」页用）
+// 播放历史（本地 schema，version 化；给左栏独立「历史」页用）
 import { KEYS, getJson, setJson } from './storage.js';
-import { normalizeImageUrl } from './imgurl.js';
+import { coverThumbUrl } from './imgurl.js';
 
 export const HISTORY_VERSION = 1;
-export const MAX_HISTORY = 10;
+// 用户要求历史单独一页后最多存 20 个（原 10）
+export const MAX_HISTORY = 20;
 const BV_RE = /^BV[0-9A-Za-z]{10}$/;
 
 // 容错：非对象/旧版本/脏条目 → 空或裁剪后的干净列表
@@ -26,9 +27,12 @@ export function normalizeHistory(raw) {
       cid: Number(it.cid) || 0,
       title: typeof it.title === 'string' && it.title ? it.title : '未命名',
       up: typeof it.up === 'string' ? it.up : '',
+      // UP mid：从历史进详情后点蓝色 UP 名要能进 UP 主页。
+      // 旧条目没有这个字段 → 0，详情解析时 fetchView 会兜底补。
+      mid: Number(it.mid) || 0,
       // 历史条目是**旧版本写下的**（v2.9.4 之前的封面还是裸 i0.hdslb.com）：
       // 本机 DNS 解析不到 hdslb，必须过一遍归一化，否则「我的 → 播放历史」永远灰块。
-      cover: normalizeImageUrl(typeof it.cover === 'string' ? it.cover : ''),
+      cover: coverThumbUrl(typeof it.cover === 'string' ? it.cover : '', 480, 270),
       durationSec: Number(it.durationSec) || 0,
       view: Number(it.view) || 0,
       source: 'history',

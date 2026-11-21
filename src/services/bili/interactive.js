@@ -97,7 +97,7 @@ export function hiddenVarsToMap(list) {
   for (let i = 0; i < src.length; i++) {
     const v = src[i];
     if (!v || typeof v !== 'object') continue;
-    const key = String(v.id_v2 || v.id || '').trim();
+    const key = String(v.id_v2 || v.id || '').trim().replace(/^\$/, '');
     const num = Number(v.value);
     if (key && isFinite(num)) out[key] = num;
   }
@@ -117,7 +117,7 @@ export function mergeHiddenVars(vars, list) {
   for (let i = 0; i < src.length; i++) {
     const v = src[i];
     if (!v || typeof v !== 'object') continue;
-    const key = String(v.id_v2 || v.id || '').trim();
+    const key = String(v.id_v2 || v.id || '').trim().replace(/^\$/, '');
     const num = Number(v.value);
     if (!key || !isFinite(num)) continue;
     if (Number(v.type) === 2 || !(key in out)) out[key] = num;
@@ -137,7 +137,7 @@ function tokenize(s) {
       let j = i + 1;
       while (j < str.length && /[A-Za-z0-9_]/.test(str.charAt(j))) j++;
       if (j === i + 1) { out.push({ t: 'bad', v: ch }); i++; continue; }
-      out.push({ t: 'var', v: str.slice(i, j) });
+      out.push({ t: 'var', v: str.slice(i + 1, j) });
       i = j;
       continue;
     }
@@ -176,7 +176,9 @@ function eat(p, v) {
 function valueOf(tok, vars) {
   if (tok.t === 'num') return tok.v;
   if (tok.t === 'var') {
-    const v = vars && vars[tok.v];
+    /* tokenizer 已去掉 `$`；同时兼容旧状态里带 `$` 的键。 */
+    let v = vars ? vars[tok.v] : undefined;
+    if (v === undefined) v = vars ? vars['$' + tok.v] : undefined;
     return isFinite(Number(v)) ? Number(v) : 0;
   }
   throw new Error('bad token');

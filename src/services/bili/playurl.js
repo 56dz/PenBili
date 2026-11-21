@@ -31,8 +31,8 @@ export const QN_LADDER = [16];
  * 真正的档位上限由调用方按 pixelBudgetFor（= 用户所选分辨率档）校验。 */
 export const DASH_QN_LADDER = [116, 80, 74, 32, 16];
 
-// 播放节拍帧率。html5 时代实测源 30fps；v2.5.1 降为 24：带弹幕（drawtext×4 逐帧渲染文字）
-// 的视频在 4×A53 上软解吞吐只有 ~88% 实时（2026-10-01 soak 实测 drift +107ms/s），
+// 播放节拍帧率。html5 时代实测源 30fps；S6 Pro 软解降为 24：360p 视频在 CV1826
+// 单核 A53 上软解吞吐只有 ~88% 实时（2026-10-01 soak 实测 drift +107ms/s），
 // 24fps 把节拍需求降到 80%，余量转正。输出 -r 24 由 ffmpeg CFR 统一，音画对齐不受影响。
 export const HTML5_FPS = 24;
 
@@ -143,11 +143,9 @@ export function parseHtml5Response(res) {
   return {
     ok: true,
     url: url,
-    sizeBytes: typeof d.length === 'number' ? d.length : 0,
-    /* 【互动视频】view 对 stein 稿件常返回 duration=0，只能靠 playurl 的
-     * timelength（毫秒）拿到每个片段的真实时长，否则「末尾判据」永远不触发、
-     * 下一个片段不会连播。 */
-    durationMs: Math.max(0, Math.floor(Number(data.timelength) || 0)),
+    /* 真机实测 durl 条目：size=字节数、length=时长(ms)。旧代码只读 length 会把
+     * 117469（ms）当成文件大小；优先 size，缺失才回退 length（老 fixture 只有 length）。 */
+    sizeBytes: Number(d.size) || Number(d.length) || 0,
     quality: typeof data.quality === 'number' ? data.quality : 0,
     acceptQuality: Array.isArray(data.accept_quality) ? data.accept_quality : []
   };

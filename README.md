@@ -1,518 +1,177 @@
-# PenBili
+# PenBili · S6 Pro 分支
 
-把哔哩哔哩装进有道词典笔。
+把哔哩哔哩装进有道词典笔。这是 [56dz/PenBili](https://github.com/56dz/PenBili) 的 **S6 Pro 分支**：
+在保持上游 3.5.20 功能基线的前提下，把整套播放与布局适配到 **有道词典笔 S6 Pro**（CV1826）。
 
-这是一款跑在有道词典笔上的 B 站客户端，用有道自家的 Falcon 小程序框架（QuickJS + Vue 2 单文件组件）写成。屏幕只有 960×266 点，指甲盖大小，所以我按 iPad 版 B 站的骨架重做了界面，把推荐、搜索、播放、评论、图文、直播全塞进这一个页面里。
+- 上游：`3.5.20`（X6 Pro / X7 Pro，RK3562，aarch64，GStreamer + MPP 硬解）
+- 本分支：`4.0.2`（S6 Pro，CV1826，armv7，640×260，ffmpeg 软解 + fbdev）
+- 本分支**已移除弹幕**：不包含 3.5.14–3.5.20 的 `danmaku.js`、`dm_overlay.c` 与弹幕设置/渲染。
 
-当前版本 `3.5.25`，支持 **X6 Pro / X7 Pro**（RK3562，aarch64）。X5 分支已停止维护。
-X7 Pro 的播放器适配（黑屏修复、设备参数运行时自适应）见 [`docs/x7pro-adaptation.md`](docs/x7pro-adaptation.md)；
-播放页控件（左列控制键 / 右列常驻进度条 / 字幕带分段、单击沉浸、双击暂停、自动收起、加载动画）见
-[`docs/player-chrome.md`](docs/player-chrome.md)；控制条视觉、"点两下画面跑偏"、
-"字幕不出/互动不连播/进度条卡住"这几个真机问题的根因与修法在该文档 §7–§8
-（含 native 运行时改矩形改走 `GstVideoOverlay`，不再依赖 write-only 的 `render-rectangle`）。
-字幕与互动视频见 [`docs/cc-and-interactive.md`](docs/cc-and-interactive.md)，
-分 P / 合集见 [`docs/video-pages-season.md`](docs/video-pages-season.md)，
-双机型（x6/x7/diag）构建见 [`docs/build-variants.md`](docs/build-variants.md)。
-
-![version](https://img.shields.io/badge/version-3.5.25-blue)
+![version](https://img.shields.io/badge/version-4.0.2-blue)
 ![license](https://img.shields.io/badge/license-GPL--3.0-green)
 
-代码与安装包双仓同步：[GitCode](https://gitcode.com/dz56dz/PenBili)（国内推荐）· [GitHub](https://github.com/56dz/PenBili)。
-
 ---
 
-## 为什么值得做
-
-词典笔是个奇怪的目标设备：4 核 A35、1GB 内存、一块 480×960 的竖屏（系统把它旋转 270° 当横屏用）、没有触摸屏只有一块手写板、跑着裁剪过的 Linux 和一套私有小程序运行时。
-
-它能播 B 站，但难点不在"能不能播"，而在**播放质量**。B 站点播是 DASH 分离流（视频 m4s + 音频 m4s），设备上现成的播放器方案要么软解跑不动 720p，要么 seek 一次卡十几秒。所以我把整条播放链路重写了一遍——这才是这个项目的主要工作量。
-
----
-
-## 截图
-
-全部为 X6 Pro 真机采集，960×266。
-
-**推荐流**
-
-![推荐流](docs/screenshots/x6-home.png)
-
-**热门**
-
-![热门](docs/screenshots/x6-hot.png)
-
-**搜索（视频 / 图文 / 直播三栏）**
-
-![搜索](docs/screenshots/x6-search.png)
-
-**播放页** —— 左列信息与互动、中列视频、右列评论
-
-![播放页](docs/screenshots/x6-play.png)
-
-**图文详情**
-
-![图文详情](docs/screenshots/x6-article.png)
-
-**我的**
-
-![我的](docs/screenshots/x6-mine.png)
-
-> 除播放页外，其余都是 `miniapp_cli capture` 原样抓的 Falcon 画布层。视频走 DRM/KMS
-> 硬件平面直出，不在画布里，所以画布截图里视频区是黑的——不是 bug。播放页那张为了
-> 展示真实效果，用 `kmssrc` 单独抓了平面帧，按平面几何（`/sys/kernel/debug/dri/0/summary`
-> 里的 `Esmart1-win0` dst）贴回画布。抓帧必须在暂停后做，否则拿到的是解码器正在写的
-> 缓冲区，全是撕裂条。
-
----
-
-## 功能
-
-**浏览**
-
-- 推荐流、热门、搜索、我的四个 tab，卡片网格 5 列，加载更多按整行裁剪不留半行
-- 搜索分「视频 / 图文 / 直播」三栏，各自独立缓存、独立页码，来回切换零请求
-
-**播放**
-
-- DASH 分离流按 qn 阶梯取最高可用档（`116`=1080P60 → `80`=1080P → `74`=720P60 → `32`=480P → `16`=360P），同档优先 AVC
-- 播放页控件（3.5.13 重排、3.5.14 加弹幕、3.5.15/16 修观感）：左列信息卡下方一排 5 颗等分键（暂停/播放、−10s、+10s、字幕开关、弹幕开关，
-  5 秒无操作自动收起），右列评论区顶部一条常驻进度条（当前时间 / 可拖轨道 / 总时长）；
-  **进度条不随评论滚动、不跟控件一起收起**，它占的是右列的第一行，评论在其下方滚动
-- 单击视频画面：左右两列侧栏一起隐/显（沉浸态）。16:9 在 960×266 这块 3.61:1 的屏上永远高度受限，
-  所以藏侧栏后画面**尺寸不变、只平移 30 像素**，native 认成 `size_same` 走 `GstVideoOverlay`
-  快路径，不重建管线、不黑屏（日志 `SET_RECT ... via overlay [move only, no rebuild] (took 0ms)`）
-- 双击视频画面：暂停 / 继续（与单击共存：260ms 内第二击算双击，否则延时 260ms 后按单击处理）
-- 全屏按钮与全屏面板已在 3.5.13 下线 —— 主播放界面本来就填满了，全屏是纯 UI 换装、没有增益
-- 视频洞占满中列全高（`videoH = H`），中列宽度按 16:9 反算（`mid = round(H * 16 / 9)`），
-  16:9 画面左右不再有信箱黑边
-- 视频加载时播 B 站那套「小电视 + 三个跳动的点」加载动画（falcon 没有可靠的 CSS 动画，帧由 120ms 定时器驱动）
-- 进度条拖动定位（拖动过程中零请求，松手后 250ms 才下发一次）
-- 画质七档：「我的 → 视频调节」，`auto` / `1080p60` / `1080p30` / `720p60` / `720p30` / `480p30` / `360p30`
-- 播放历史（最近 10 条，在「我的」页）
-
-**分P / 合集**
-
-- 多 P 稿件：右栏「评论 / 分P / 合集」页签是圆角胶囊（选中态粉底），点任意一段直接切；
-  当前段高亮，左列标题显示「稿件名 · P2 第二段」
-- 合集：同一位置出现「合集 n」页签，按 UP 主的 `sections` 分组（正片 / 花絮…），
-  每一集是独立的 `bvid`、每行是圆角选项框（节距 26px 未变，仍 9 行一屏），
-  点一下换集；当前集高亮并显示「第 7 / 42 集」
-- 数据与起播共用同一次 `x/web-interface/view` 响应，**不额外请求**；
-  切换复用完整起播流程（重取流 / 重算矩形 / 重拉字幕与互动），不做"轻量 seek"
-- 单 P 且无合集的稿件不显示页签，右栏与以前逐像素相同
-  （细节与坑见 `docs/video-pages-season.md`）
-
-**CC 字幕**
-
-- 上游 `x/player/v2` 取字幕轨道 → 下载 `body[]` 时轴 JSON → 按播放位置插值取当前句
-- 「我的 → CC 字幕」里开关字幕、点击轮转语言；设置持久化在 `bili_cc_settings`
-- 视频是 KMS overlay 平面盖在 UI 之上，字幕因此**不是浮层**：中列被切成
-  「视频洞 / 字幕带」两段（`play_chrome.planBands`），字幕占其中 18px，
-  native 的 `render-rectangle` 与洞同源收缩（3.5.13 起中列不再有控制条段）
-- 沉浸态（侧栏隐藏）下中列宽度换成整屏，字幕带照旧让位
-
-**互动视频**
-
-- 上游 `x/player/v2` 的 `interaction.graph_version` + `x/stein/edgeinfo_v2` 拉每个片段的选项
-- 隐藏变量 `hidden_vars` 与 `condition` 条件表达式求值，只显示当前真正可点分支；
-  点选项后 `native_action` 的变量赋值继续演进到下一片段
-- 题面按上游 `start_time_r` 在片尾前 3 秒出现；`pause_video=1` 的片段播完停住等选择，
-  `type=0` 过渡片段自动连播、不弹空选项；支持「回退上一片段」「重播本段」，结局不自动跳
-- 换片段只重建播放会话（cid 覆盖取流），不回列表、不重进播放页
-
-**互动**
-
-- 点赞、投币（2 币，可同时点赞）、收藏（可挑收藏夹）
-- 评论区：主楼 10 条/页、子楼 20 条/页，点主楼展开；系统输入法发评论
-- 发评论时视频平面会自动隐藏，避免盖住键盘
-
-**直播**
-
-- 直连 B 站 `http_stream/flv/avc` 直链本地解码，不经过任何自建转码服务器
-- 四档画质，下播检测、断流自动重连（退避 0/2/4/6/8 秒，最多 5 次）
-- 直播态自动隐藏评论区、互动按钮和进度条，视频区撑满
-
-**图文**
-
-- 专栏详情按 `opus` 富文本段 → `content.ops` → `content` HTML 三级回退渲染
-- 图片等比缩放，评论走 `type=12`
-
-**登录**
-
-- B 站 TV 协议扫码，二维码纯 CSS 渲染（零 inline style）
-- 登录态持久化，过期前 60 秒判定失效
-
----
-
-## 技术实现
-
-### 播放子系统：为什么不能用现成方案
-
-设备自带 GStreamer 1.22 和 Rockchip MPP 硬解，看起来直接用 `playbin` 就完事了。实际试下来每条路都堵死：
-
-| 方案 | 结果 |
-| --- | --- |
-| `souphttpsrc` 直连 HTTP 播放 | **永远无法 seek**。souphttpsrc 只实现 push 模式的 `create()`、不实现 `pull_range`，qtdemux 在 push 模式下直接丢弃 seek 事件。它报的 `seekable: 1` 是骗人的，只看 `Accept-Ranges` 头 |
-| ffmpeg 软解 + 逐帧贴 fb0 | 720p 只有 0.76x 实时，必卡 |
-| ffmpeg 下载到本地 MP4 再播 | 增长中的 MP4 用 `filesrc` 读会永久卡死——`filesrc` 在打开时就把文件长度快照下来了 |
-| ffmpeg 转 MPEG-TS 边下边播 | 双分支 preroll 永久卡死，且 ffmpeg 输出的时间戳错乱 |
-| ffmpeg 转 fragmented MP4 边下边播 | 视频帧间隔严重超标（`<20ms` 区间 169 帧） |
-
-最终方案是 **ffmpeg → 命名管道 → GStreamer**：
-
-```
-ffmpeg (-ss T, -c copy, -copyts, -f matroska) ──→ FIFO ──→ filesrc
-                                                              │
-                                    ┌─────────────────────────┴──────────────────┐
-                                    │ matroskademux                              │
-                                    ├── video: queue → h264parse → mppvideodec ──┤
-                                    │          → videorate → kmssink(plane 76)   │
-                                    └── audio: queue → aacparse → faad ──────────┤
-                                               → audioresample → alsasink       │
-```
-
-几个关键决策，每一条都是实测撞出来的：
-
-**容器必须是 Matroska。** 只有它逐簇写入、头部写完就能解码、不需要回填索引。MP4 的 moov 在尾部，TS 和 fMP4 各有各的坑。这个结论花了整整一轮实验才确认。
-
-**单 FIFO + 单 demuxer，不是双 FIFO + 双 demuxer。** 早期版本让音视频各走一个 FIFO、各配一个 demuxer，结果 seek 后音频稳定领先视频 1~2 秒。根因是两个 demuxer 各自把 `segment.start` 定成"自己第一条流的 PTS"——视频从关键帧 K 开始（K ≤ T），音频精确从 T 开始，两条分支都在自己的 base_time 起播，于是内容 K 和内容 T 同时播，差 T−K（B 站关键帧间隔 1~2 秒）。改成单 demuxer 后只有一个 segment（start = 全局最小 PTS = K），内容 c 在两路的 PTS 都是 c、running_time 都是 c−K，天然对齐。
-
-**`-copyts` 是 A/V 对齐的必要条件，但它和 `-t` 是致死组合。** `-copyts` 保留原始 PTS，这正是不对齐能修复的原因。但 ffmpeg 4.4.1 在 `-copyts` 下 `-t` 是按**原始时间轴**截断的——我原来的公式 `durationMs − baseMs + 5s` 在 base 较大时会算出小于原始 PTS 的值，于是所有包都被过滤掉，ffmpeg 返回码 0、输出 0 个包、stderr 全空。这个 bug 表现为"第三次 seek 必然起不来"，查了很久才发现。修法是 `-t` 直接用 `durationMs + 5s`。
-
-**`render-rectangle` 是 write-only 的，而且只在 reconfigure 时被读取。** 键盘避让需要动态改视频矩形。播放态直接设属性就生效，但暂停态怎么设都没用——kmssink 只在重新分配 plane 时才读这个属性，PAUSED 下没有新帧流过就不会 reconfigure。所以暂停态改矩形必须**先设属性、再临时脉冲 PLAYING 触发 reconfigure、设完立刻切回 PAUSED**。顺序反了（先脉冲再设）就是 configure 读到旧值，完全无效——我在这里踩过一次，还因为探针设计不当误判成"已修好"。
-
-另外两个坑：`render-rectangle` 只能缩小不能放大（1×1 之后想恢复必须整条管线过一次 READY，走 seek 重启路径）；零宽高不会隐藏平面，kmssink 会回退成"未设置 ⇒ 全屏"，所以隐藏必须用 1×1。
-
-**起播要缓冲门，不能直接 PLAYING。** 直接 PLAYING 时，音频分支先 preroll 完成、管线时钟随即起跑，而视频分支（硬解首帧 + 队列排空）要晚 900~2100ms 才出帧，这批帧相对已经跑起来的时钟全部"迟到 >40ms"，被 `max-lateness` 成批丢弃——用户看到的就是"起播不是从头开始，直接从第 3 秒播"。修法是两段式：先 `set_state(PAUSED)`（时钟不走，没有帧会迟到），轮询等音视频分支都就绪，再切 PLAYING。代价是起播慢 1.7~2.4 秒，换来起播即满帧。
-
-注意这里**不能用 `get_state` 判断 preroll 是否完成**——我们的管线描述里刻意不放任何 sink（分支全靠 `pad-added` 动态建），`set_state(PAUSED)` 会立即返回 SUCCESS，那时一个分支都还没建。
-
-**直播不走 ffmpeg，直连 `souphttpsrc ! flvdemux`。** B 站直播 FLV 的 PTS 是绝对值（实测约 2854014 秒），ffmpeg 转封装后流式 matroskademux 面对"首 PTS 巨大"会永久停在 PREROLLING。同样的流 ffmpeg 先落普通文件再读就正常，所以是"FIFO 上的流式 demux 无法处理巨大起始 PTS"。点播 m4s 的 PTS 从 0 附近开始，所以点播没这个问题。
-
-### 直播闪屏：一个默认值引发的
-
-用户反馈"直播每 2~5 秒部分区域闪白一帧"。查这个 bug 花了很久，因为所有常规怀疑对象都排除了：
-
-- 平面元数据完全稳定（1ms 间隔采样 60 秒，18001 次采样，active/几何/格式/源全无变化）
-- 没有丢帧（`buffer late, dropping` 计数 0）
-- 解码器无错误、kmssink 无错误、dmesg 无异常
-- 帧率正常（30.25fps）、平面几何正常
-
-转折点是把画面录下来逐帧分析。**判定"闪白"的检测器改了三次**：整帧平均亮度会被换镜头误报，条带孤立变亮会被真实运动误报（导出的 PNG 肉眼看全是正常画面）。最后用**交替 A/B**（同一时段两种配置轮流跑，消除内容随时间变化的影响）才拿到可信数据：
-
-```
-ignore-error=true  （mppvideodec 出厂默认）→ 40 秒内 3 组 / 5 组闪白
-ignore-error=false（丢弃坏帧）             → 40 秒内 0 组 / 0 组闪白
-```
-
-另外三组对照排除了网络和显示链路：同一份流录成文件再硬解 0 组、ffmpeg 软解 0 组、直播流直接硬解 4 组。
-
-根因是 `mppvideodec` 的 `ignore-error` **出厂默认 true**——解码出错时不报错、照常输出一帧损坏画面。直播是长连接，丢包导致参考帧缺失时 P 帧会解出"部分区域错位/发白"的坏帧。软解会丢弃坏帧，所以软解干净；本地文件不丢包，所以文件干净。
-
-修法就是 `ignore-error=false max-errors=16`。
-
-### 音画同步与音量
-
-**ts-offset 必须加在 kmssink，不能加在 alsasink。** 蓝牙耳机有 150ms 端到端延迟，需要把视频整体提前。但 alsasink 是管线的时钟提供者（`provide-clock` 默认 true，实测关掉后视频飙到 88~119fps），给它自己的输入加 ts-offset 等于把整条管线时间轴一起平移，视频是 slave、相对关系完全不变——实测三档偏移 `avSkewMs` 毫无变化。补偿必须落在不提供时钟的那一端。
-
-**播放器不拥有音量。** 早期版本每次 open/seek 都把 `Playback Path` 设成 SPK、`Master` 设成 100%，用户抱怨"一会儿有声音一会儿没声音"、"音量默认特别大"。现在只做两件事：读 Master 判断用户是否主动静音（是就不碰任何东西），以及仅在 `Playback Path == OFF` 时切到 SPK。**永不写 Master**——那是用户的音量设置，压 0 会销毁它且无法还原。
-
-**音量的权威源是系统滑杆，不是配置文件。** 这一条踩了三次。
-
-`hal-audio -s N`（控制中心和设置页背后的那个二进制）实测只写两个地方：`card1 Master`（numid 54）**立刻**、`/data/cfg/sys_config.conf` 的 `spk_volume` **约 10~12 秒后**。**它从头到尾不写 bluealsa 的 AVRCP 绝对音量**——早先我以为它写，其实那些写入是播放器自己干的，因果搞反了。
-
-| 位置 | 谁写 | 延迟 | 蓝牙路由下是否影响耳机 |
-| --- | --- | --- | --- |
-| `card1 Master`（numid 54） | `hal-audio -s` | 立刻 | ❌ 这是扬声器功放 |
-| bluealsa AVRCP 绝对音量 | **只有播放器** | 立即 | ✅ 耳机硬件音量 |
-| `sys_config.conf` 的 `spk_volume` | `hal-audio -s` | 约 10~12 秒 | ❌ 只是个记录 |
-
-三次纠错的过程：
-
-1. 最早把 `spk_volume` 当唯一权威。用户"拉大音量 → 立刻点视频"时 conf 里还是上一次的 0，起播读到 0 → 软件增益 0 → 无声。
-2. 改成蓝牙路由读 AVRCP。但 AVRCP 是**耳机硬件音量**，和软件增益是**串联**的两级：都设 76% 听感是 58%，都设 20% 只剩 4%。而且它不跟系统滑杆走。
-3. 现在（正确）：**滑杆意图 = `card1 Master`**（读它，立刻、准确、始终跟随用户）；**蓝牙路由下软件增益固定 1.0**，由 `apply_bt_avrcp_volume()` 把滑杆值**双向镜像**到 AVRCP。听感 = AVRCP = Master，线性无衰减。耳机本体按键调音量会在 1 秒内被拉回滑杆值。
-
-`apply_bt_avrcp_volume()` 曾经有过"只升不降"的保护（防止按读错的值把耳机压成静音）。现在源头换成 Master、不存在读到旧值的前提，那条保护必须去掉——否则系统滑杆向下调完全失效。
-
-### 屏幕保活
-
-设备空闲 30 秒调暗、60 秒熄屏（出厂值）。播放中必须保活，但 `hal-screen keep` 本身只续 30 秒窗口，所以每 20 秒续一次。深熄态（`bl_power=4`）单次调用不够，要连发两次。
-
-`onHide` 必须停保活——应用在后台每 20 秒唤一次屏等于永不熄屏，既烧屏又费电。
-
-### 检查更新
-
-应用启动后检查有没有新版本，有新版本就在页面中央弹一张卡片，更新说明可上下滑动。同一套弹窗也能从「我的 → 检查更新」手动拉起。
-
-**双源：GitCode 主、GitHub 备。** 部分国内网络完全打不开 github.com，所以检测顺序是
-[GitCode](https://gitcode.com/dz56dz/PenBili) → [GitHub](https://github.com/56dz/PenBili)，谁先返回用谁的；
-发布时两边同时发同一个 tag 和同一个 `PenBili.amr`。两个平台的 Release 接口返回体高度相似
-（`tag_name` / `body` / `html_url` / `assets[].name|size|browser_download_url` 同名），一个归一化函数通吃，
-差别只有 GitCode 多一个 `release_status`（`pre` / `latest`）。
-
-五条实测结论（都是真机踩出来的，别按常识改）：
-
-1. **检测必须直连**。`v4.gh-proxy.org` 这类通用反代访问 `api.github.com` 会被共享出口 IP 限流，直接返回 `403 API rate limit exceeded`；它只适合**下载 GitHub 资产**，不能判断版本。
-2. **只用 `/releases/latest`**。两个平台都有这个接口，天然排除 prerelease 与 draft，正好满足「不检测预览版」——不需要拉全量列表再过滤。GitCode 的 `release_status=pre` 再过滤一次。
-3. **两个下载按钮都是直连**。早期版本提供过「使用镜像」（`v4.gh-proxy.org` 前缀 + 原始 URL）的第二个入口，实测收益不稳定、歧义又大（用户分不清哪个按钮更快），已经去掉：界面上只有「立即更新（直连 GitCode）」和「立即更新（直连 GitHub）」。`downloadUrl()` 的镜像分支与 `isMirrorable()` 保留在纯函数层给老客户端兜底，界面不再调用。
-4. **弹窗不是浮层，是整页替换**。Falcon 运行时 `position:absolute` 不可靠、全仓没有可用的 `z-index`，任何「叠在内容上」的做法在真机上直接失效。所以 `upd.visible` 为真时正常视图整块 `v-else` 掉，弹窗自身是 `.upd`（居中容器）+ `.upd-card`（760×232 圆角卡片），视觉上和播放页右栏同一套圆角与底色。
-5. **安装走 native，不走 JSAPI**。设备上的 `$falcon.jsapi` **没有 `pm` 模块**（`libfalcon.so` 的模块名池只有 `http/storage/modal/nvue/updater`），`pm.installPackage` 永远是 `undefined`。所以 `player2` 模块导出了 `installAmr(path)`，内部调 `/bin/miniapp_cli install`——这和 `tools/deploy.ps1` 走的是同一条装机路径，解析输出里的 `"ret": 0` 判成败。
-
-下载落盘目录是 `/userdisk/miniapp/downloaded/`，文件名由 `http.downloadFile` 按 URL 内容的 md5 生成（`saveName` 不生效，但天然去重缓存）。回调参数是 `{"result": "<路径字符串>"}` —— `result` 是**字符串**不是对象，早期按 `result.filePath` 取会一直判「未拿到文件路径」。
-
-自动弹窗有四个按钮：`立即更新（直连 GitCode）` / `立即更新（直连 GitHub）` / `跳过此版本` / `今天内不提示`。第一个按钮的括号里是**本次命中的源名**，第二个是另一个源——两个平台的可达性互补，一个挂了还能换另一个，但**都走直连**。手动弹窗只给「立即更新」和「暂不更新」，源的选择交给内部自动回退：先试当前源，失败换另一个再试一次。换源时会重新向目标平台取同一个 tag，且**只接受不旧于当前包的版本**——两个平台发布顺序不同步时宁可下载失败，也不能把用户降级回旧包。
-
-### 自适应单位
-
-PStore 的开发者规范要求用 `vw` / `vh` 而不是固定 `px`，理由是不同词典笔的视口大小
-不一致（X6 Pro 960×266，X7 Pro 936×280），写死 px 的界面在别的机型上必然溢出或缩得
-看不清。本项目已按这条规范整改完：
-
-- **字号零 px**：`grep -rn "font-size:[^;]*px" src/` 与 `line-height` 同理，现在都是 0 处
-  （整改前 76 处）。换算基准 `1vw = 9.6px`、`1vh = 2.66px`。
-- **布局 354 处 px → vw/vh**：`width` / `margin` / `padding` / `border-radius` 走 vw，
-  竖直方向（`height` / `margin-top` / `padding-top`）走 vh。
-- **刻意保留 px 159 处**，每一类都有不能改的物理原因：
-
-  | 类别 | 处数 | 为什么必须保留 |
-  | --- | --- | --- |
-  | 与 KMS 硬件平面逐像素重合的矩形 | 17 | 视频走 DRM 叠加平面，矩形与 UI 的挖洞必须精确对齐；改成 vw 会亚像素偏移，出现一圈彩边 |
-  | 二维码点阵（`.qr-l-*` / `.aq-l-*`） | 102 | 单格 2~4px 是扫描单元，非整数会糊成一团扫不出来 |
-  | 零值 / 1px hairline | 28 | `flex-basis: 0px` 是零值；1px 描边转 vw 会抖成 0 或 2px |
-
-- **近正方形元素两个方向都用 vw**。混用 `vw` + `vh` 在 960:266 与 936:280 两种视口之间
-  会算成椭圆（例如返回按钮 30×30，宽用 vw 高用 vh，X7 上就变成 29×31）。涉及
-  `.bar-logo` / `.ibtn-icon` / `.avatar` / `.pbtn` / `.pbtn-icon` / `.pback-icon` 等。
-
-设计画布宽本身不是写死的：`src/app.js` 从 `$falcon.env` 读真实视口，交给
-`App.setViewPort(w)`，所以 vw/vh 是相对**当前机型**的视口换算，不是相对 960。
-
-换算细则、保留清单（带 `file:line`）、验收命令见 [`docs/units.md`](docs/units.md)。
-PStore 六条规范的逐条自述见 [`docs/ai-policy.md`](docs/ai-policy.md)（文案）、
-[`docs/device-matrix.md`](docs/device-matrix.md)（兼容性）、
-[`docs/evidence.md`](docs/evidence.md)（真机证据）。
-
-### 代码结构
-
-```
-src/
-  pages/index/index.vue   单页应用：浏览 4 tab + 播放 + 图文（3437 行）
-  services/
-    play_session.js       会话编排：解析流地址 → open → 轮询 → seek/recover/close
-    player.js             native player 模块封装（v2/v1 双实现，16 参数 open 契约）
-    screen.js             屏幕几何纯函数 + 保活 + 进度条几何
-    bili/                 接口层：client / wbi / playurl / live / article / reply / action / qrlogin
-  styles/base.less        全站样式
-native/csrc/              交叉编译的 JSAPI 原生模块（20 个 .c/.h，约 13.5k 行）
-test/run.js               单测（245 条）
-```
-
-页面只有两个（`index` 和 `diag`）。单页应用的理由是 falcon 页面切换开销大，浏览/播放/图文全用 `mode` 状态机在一个页面内切换。
-
-native 侧三个模块：
-
-| 模块 | 职责 |
-| --- | --- |
-| `libjsapi_player2.so` | **主实现**。进程内 GStreamer，worker 线程独占所有 Gst 对象——JS 线程碰不到任何 Gst 调用，所以不需要锁，也不可能阻塞 JS 线程 |
-| `libjsapi_player.so` | 旧实现（fb0 贴帧 + aplay），性能差，仅作回退 |
-| `libjsapi_httpjson.so` | 原始 POST body + 二进制 GET。运行时的 `$falcon.jsapi.http` 会对 data 做二次 JSON 序列化且无法关闭，导致部分服务端返回 422 |
+## 这个分支做了什么
+
+### 设备适配（S6 Pro 专属）
+
+- 逻辑画布 **960×390** → 物理面板 **640×260**（k = 2/3）；构建期必须跑
+  `qjs-style-scale`（高度 ×390/266，字号保持设计值），否则整页只占上半屏。
+- 视频走**自研 native 播放器**（`native/csrc/player.c`，模块 `libjsapi_player.so`）：
+  ffmpeg 软解 → rgb32 rawvideo → `/dev/fb0` 双缓冲；音频独立 pipe → `aplay`。
+  支持 `setRect` 运行期改落点、`setZoom` 视频放大、智能跳帧、音画自愈与 DNS 自愈（`httpjson.c`）。
+- **视频缩放**：播放页菜单 / 「我的 → 视频缩放」开关；开启后双指捏合 1..4x，
+  native 取画面中心 1/zoom 区域放大，不重启解码、不改矩形。使用
+  `libjsapi_picpinch.so`（与文件管理 3.1.9 图片页同一模块）。
+- 全屏 shell 播放器 UI：顶栏 96 + 视频带 216 + 底栏 78；点视频区隐藏/显示栏，
+  双击暂停/继续，控件 5 秒无操作自动收起。
+- 播放页「样式」：流畅（按视频带解码）/ 清晰（按无栏分辨率解码后等比显示，
+  不裁切、不变形）。
+- 离线缓存（`/userdisk/PenBili/`）、独立「下载 / 历史」页、UP 主页、搜索记录、
+  列表滚动位置恢复、返回栈修复等 S6 Pro 侧的长期改动全部保留。
+
+### 从上游 3.5.20 同步的功能
+
+- **3.5.9**：互动视频（`x/stein/edgeinfo_v2`）、CC 字幕（`x/player/v2` + 候选池
+  「时长吻合度」打分）、分P / 合集（`x/web-interface/view` 一次响应）、播放控件重做。
+- **3.5.10**：投币 `-401` 风控（缺 buvid）自动补齐重试；控件自动收起。
+- **3.5.13**：双击暂停、单击沉浸（隐藏顶底栏）、全屏按钮下线。
+- **3.5.14–3.5.20 的弹幕系统：已删除**，不参与构建。
+- 上游 3.5.16 的字幕候选池与偏差判定（`subtitleFit`）保留。
+
+### S6 Pro 上的功能差异
+
+| 能力 | X6/X7 Pro 上游 | S6 Pro 本分支 |
+|---|---|---|
+| 解码 | GStreamer + MPP 硬解 + KMS overlay | ffmpeg 软解 + fbdev 直写 |
+| 最高画质 | 1080P60 | 360p（默认，可切 480p；受 CV1826 性能限制） |
+| 字幕渲染 | 中列字幕带 / 顶栏 | 视频带下方 30px 字幕带（native 帧盖不住 UI） |
+| 互动题面 | 右列面板 | 整页替换 + `pauseRender` |
+| 视频缩放 | 双指 1..4x | 双指 1..4x + 开关（native `setZoom`） |
+| 弹幕 | 3.5.14+ 烧帧渲染 | **无** |
 
 ---
 
 ## 构建
 
-### 环境
+安装包：[Releases · v4.0.2](https://github.com/Noguimc2/PenBili/releases/tag/v4.0.2)
+（`PenBili-4.0.2-s6pro.amr`）；上游旧版见
+[v4.0.0](https://github.com/noguimc/PenBili/releases/tag/v4.0.0)。
 
-| 项 | 要求 |
-| --- | --- |
-| Node.js | 打包器需 **Node 18**（22+ 会报 `No such module: http_parser`）；单测可用任意新版 |
-| aiot-vue-cli | 有道小程序打包器，1.0.32 验证 |
-| Zig | 交叉编译 native 库，0.16.0 验证 |
-| adb | 部署与调试 |
-| Python | 打包字节码与 ELF 校验用 |
+前置：Node 16+、Python 3、adb；重编 native 时另需 zig。
 
-### 命令
+```powershell
+# 1) 首次：准备构建 CLI（aiot-vue-cli 1.0.32）
+npm run setup
 
-```bash
-cd PenBili
-npm ci
-
-# 交叉编译 native（产出三个 .so 到 libs/）
-npm run native
-
-# 打 AMR 包（产出 8002026110200001.3_5_13.amr，约 273 KB）
+# 2) 前端（产出 .falcon_\ 与未缩放的 4_0_2.amr，后者只作第 5 步的底包）
 npm run build
 
-# 单测
-npm test
+# 3) 必做：样式缩放（大字号 + 高度 ×390/266）
+npm run scale
+
+# 4) 可选：重编 native（libs/ 已提交与真机一致的预编译 .so）
+powershell -NoProfile -ExecutionPolicy Bypass -File native/build.ps1
+
+# 5) 重打包：以刚构建的 AMR 为底包，把缩放后的 index.js.bin 与 manifest/cert 一起更新
+python tools\pack_standalone.py 8002026110200001.4_0_2.amr .falcon_ 4.0.2 `
+  8002026110200001.4_0_2_pkg.amr --appid 8002026110200001 --appname PenBili --full
+
+# 6) 装机（装 _pkg.amr，不要装未缩放的 4_0_2.amr）
+adb -s <serial> push 8002026110200001.4_0_2_pkg.amr /tmp/p.amr
+adb -s <serial> shell "miniapp_cli install /tmp/p.amr"
+adb -s <serial> shell "miniapp_cli start 8002026110200001 index"
 ```
 
-**WSL 一键构建（推荐，含 X7 Pro 的 SKU 目录与字节码打包）：**
+`npm run build` **不会**自动跑样式缩放，而且每次 build 都会重新生成未缩放的 `index.js.bin`
+——所以缩放后**不要再次 `npm run build`**，直接用第 5 步的 `pack_standalone.py` 重打包。
+`pack_standalone.py` 默认以第 2 步产出的 AMR 为底包即可，不需要旧版本安装包；
+完整步骤与踩坑说明见 [docs/s6pro.md](docs/s6pro.md)。
 
-```bash
-NODE_BIN=$PWD/node_modules/node/bin/node.exe bash tools/build-wsl.sh
+### aiot-vue-cli（构建 CLI）
+
+- npm 公开包：`aiot-vue-cli@1.0.32`（MIT）：
+  https://www.npmjs.com/package/aiot-vue-cli
+- 获取方式（仓库根目录执行，任选其一）：
+
+```powershell
+npm run setup
+# 等价于：
+npm install --prefix ../env --no-save --no-audit --no-fund aiot-vue-cli@1.0.32
 ```
 
-它等价于 `native/build.ps1` + 打包，但全部在 WSL 里跑：zig 编译 → ELF 校验 →
-把三个 `.so` 铺进 `libs/` 与 SKU 目录（`arm64/`、`arm64-y02_1/`，保证 X7 Pro
-的 PMS 能装载）→ rollup → Linux 版 qjsc 编 `.js.bin` → 重算 cert 组包。
-细节与踩坑见 [`docs/x7pro-adaptation.md`](docs/x7pro-adaptation.md) §5。
+- `package.json` 的 `build` / `build:dev` / `build:prod` 固定读取
+  `../env/node_modules/aiot-vue-cli/src/cli.js`，所以安装到仓库上一级的 `env/`。
+- **固定 1.0.32**：本分支的包与真机验证都基于该版本；升级前先做产物 A/B。
 
-同时出**两个包**（X7 全系全量包 + 只含自检页的测试包）：
+### qjs-style-scale（样式缩放，必做）
 
-```bash
-NODE_BIN=... bash tools/build-variants.sh
-#  8002026110200001.3_5_6_x7.amr    完整 UI（X7P 936x280 / X6P 960x266 写死）
-#  8002026110200001.3_5_6_diag.amr  只有链路自检页，逐台验屏幕/平面/解码
+仓库已内置源码与 Windows 二进制，不依赖外部目录：
+
+| 文件 | 说明 |
+|---|---|
+| `tools/qjsbuild/qjs-style-scale.exe` | Windows x64 可执行文件（直接可用） |
+| `tools/qjsbuild/qjs-style-scale.c` | 源码（改写 QuickJS 字节码里的 style 原子） |
+| `tools/qjsbuild/quickjs.tar.xz` | QuickJS 2020-07-05 源码（编译依赖） |
+
+作用：直接改写 `index.js.bin` 里的样式值——
+
+- `fontSize` ×2.0（同步前的大字号 UI；Falcon 960→640 后物理约 1.33×）；
+- `height >= 70` 按 `390/266` 放大（266→390、240→364、192→282、74→108…）；
+  `390 / 264 / 242 / 96 / 216 / 78` 已是最终设计值，跳过；
+- `width` 与小于 70 的高度不动（图标/进度条保持比例）。
+
+```powershell
+npm run scale          # 大字号（font ×2.0）+ 高度 ×390/266（默认）
+npm run scale:normal   # 原字号：font ×1.0，高度仍 ×390/266
 ```
 
-两个包共用 appid，安装后者会覆盖前者；说明见
-[`docs/build-variants.md`](docs/build-variants.md)。
+> 4.0.2 起恢复同步前的大字号；如果后续觉得太大，可用 `scale:normal` 出原字号包。
 
-`npm run native` 内部是 `powershell -File native/build.ps1`，默认 target 是 `aarch64`。X6 Pro 是 **aarch64 64 位**，装 32 位库会在 `dynamic_load_jsapi` 处直接报 `wrong ELF class: ELFCLASS32`。
+不跑的结果：960×390 设计稿被缩成 640×177，底部 83px 黑屏，登录二维码和播放底栏被裁。
 
-打包时出现下面这条告警是**正常的**：
+从源码重建（PowerShell + zig；MinGW/gcc 同理，需把 4 个 `.c` 一起编译）：
 
-```
-未找到以下模块,可能会导致应用运行时异常(如模块为原生模块请忽略): global,brightness,httpjson
-```
-
-这三个是原生模块，由 `libs/` 里的 `.so` 提供，不是 JS 依赖。
-
-## 安装
-
-```bash
-adb push 8002026110200001.3_5_13.amr /tmp/
-adb shell "miniapp_cli install /tmp/8002026110200001.3_5_13.amr"   # 必须返回 "ret":0
-
-# 冷启动：先切桌面再起目标页，保证重建页面实例
-adb shell "miniapp_cli start 8080222437664451"
-adb shell "miniapp_cli start 8002026110200001 index"
+```powershell
+tar -xf tools\qjsbuild\quickjs.tar.xz -C tools\qjsbuild
+zig cc -O2 -I tools\qjsbuild\quickjs-2020-07-05 `
+  tools\qjsbuild\qjs-style-scale.c `
+  tools\qjsbuild\quickjs-2020-07-05\libregexp.c `
+  tools\qjsbuild\quickjs-2020-07-05\libunicode.c `
+  tools\qjsbuild\quickjs-2020-07-05\cutils.c `
+  -o tools\qjsbuild\qjs-style-scale.exe -lm
 ```
 
-几个容易踩的点：
+### 视频缩放（4.0.2）
 
-- `miniapp_cli start <appid> index` 里的页面名**不带** `--`，写成 `--index` 会报 `could not load module filename '--index.js'`
-- 直接 `start <appid>` 可能复用旧页面实例，改了代码看不到效果，所以要先切一次桌面
-- installer 会给 `.so` 加壳重打包（本地 95KB → 设备上 198KB 是正常的，md5 必然变）
-- 每次 install 会在 `a`/`b` 两个 slot 之间轮换，旧目录被删
-
-自检页只能这样进（主界面没有入口）：
-
-```bash
-adb shell "miniapp_cli start 8002026110200001 diag"
-```
-
-## 调试
-
-日志在 `/userdata/applog/`，`YD_PEN_APP.log` 含二进制字节，**必须 `grep -a`**。
-
-验证视频是否真的上屏，不能用 `miniapp_cli capture`——它抓的是 Falcon 画布，看不到硬件视频平面。要看 KMS 平面：
-
-```bash
-adb shell "grep -a 'Esmart1-win0' -A9 /sys/kernel/debug/dri/0/summary"
-```
-
-`Esmart1-win0` 就是视频平面（plane-id 76），`dst: pos[...] rect[...]` 是它当前的屏幕矩形。
+- **PenBili**：播放页菜单「缩放」与「我的 → 视频缩放」开关，默认开。
+  - 菜单「缩放」：首次点击开启并 1.5x，之后 1.5→2→3→4→1 轮转（不依赖双指）；
+  - 双指捏合 1..4x；捏合期间/结束后 800ms 内的点击不会误开顶底栏；
+  - 关闭时忽略捏合并复位 1x。
+  - 输入：`libjsapi_picpinch.so`（随包提交，读 `/dev/input/event4` 的 ABS_MT_*）；
+  - 显示：native `player.setZoom(1..4)`，取源画面中心 1/zoom 区域最近邻放大，
+    不改目标矩形、不重启解码，**开栏状态下同样有效**。
+- **文件管理 3.1.11**：播放器菜单「缩放」与 PenBili 同样的修复——
+  最新目标队列、捏合结束 800ms 抑制点击、点该行手动轮转 1.5→2→3→4→关；
+  底层仍是 fbplayer 的 zoom 文件。
+- 这是运行期开关，不涉及字节码重建；PenBili 侧需要 `libs/libjsapi_picpinch.so`
+  与带 `setZoom` 导出的 `libjsapi_player.so` 一起打包。
 
 ---
 
 ## 已知限制
 
-- **支持 X6 Pro / X7 Pro**（均为 aarch64）。**3.5.6 第二十四轮起不再做运行时
-  自适应**：视口、面板列偏移、DRM plane、缩放档位全部写死在
-  `src/services/device_profile.js` 的 `X7P` / `X6P` 两张常量表里；
-  `$falcon.env` 与 storage 覆盖一律忽略。换机器改常量表。
-  X5 的 32 位 arm 分支已停止维护并转移到[PenBili-CVI](https://github.com/56dz/PenBili-CVI)
-- **弹幕（3.5.14 起，3.5.15/16/17 修拉丝、字号与入场）**。v2.7.0 曾用 `drawtext×4` 逐帧重排版，占掉 ~20% 解码预算、把吞吐压到 88% 实时，
-  所以被移除；3.5.14 换了一条完全不同的路：**不再依赖 GStreamer 文字元素**（本机根本没有
-  `textoverlay`/`pango`/`cairo` 插件），而是 native 侧 `dlopen` 系统 cairo + freetype，把弹幕画成
-  ARGB 位图后**直接合成进 NV12 视频帧**（YUV 混合 + UV 只在 2×2 采样点写）。因为挂在 kmssink 的
-  sink pad probe 上，弹幕天然压在视频里、不受 UI 层 zpos 影响；关闭时 `dm_render()` 第一条语句就返回，
-  零开销。3.5.15 修了三处观感问题：
-  - **横移一顿一顿**：`last_pos_ms` 由 worker 每 50ms 才 `query_position` 一次（还量化到 33ms 帧），
-    渲染线程看到的是台阶。native 侧加 `dm_smooth_pos()` 插值（只前向对齐、不追已过的时间），
-    暂停/seek/起播时吸附。
-  - **字号偏小/偏大**：JS 给的基准像素在 native 侧按 `缓冲区宽 / 矩形宽` 换算 —— 这个系数与
-    kmssink 的缩放系数正好互为倒数，所以**基准像素 = 屏幕上看到的像素**。档位改成
-    `数字笔 16 / 22 / 26`（小/中/大），放在「我的 → 弹幕字号」，中档即用户认可的旧「大」。
-  - **弹幕多时掉帧**：`g_budget` 自适应 —— 单帧合成 > 12ms 就减 2 条（下限 6），< 4ms 加 1 条（上限 24）。
-  3.5.16 修了两处画质问题：描边由 `use_px/8` 的纯黑一圈改成**两层**（外层 42% 黑、内层 85% 浅灰，
-  线宽 `use_px/10` 与 `use_px/20`）；kmssink 面板 59.88fps 而源 30fps，`videorate` 会把同一帧
-  下推两次 → 同一块已画过弹幕的像素被再画一遍造成**横向拉丝**，用「同一 `GstBuffer` + 40ms 窗口」
-  去重（日志 `dm: probe 5s calls=.. dup=.. skip=..`）。
-  四档切换式开关（关 / 全屏 / 上方 1/2 / 上方 1/4），泳道数随之 0/25/12/6。
-  3.5.17 修了**滚动弹幕半路冒出**：位置公式 `x = lw - elapsed*(lw+bw)/8000` 直接由「本该出现的时刻」算起，只有准点抢到泳道的那条才从右边缘进来。播放中途开弹幕、切显示区域、或泳道排满后重试成功时，`elapsed` 已经是几百毫秒到几秒，`x` 就落在画面中间甚至左侧。现在加 `DM_LATE_MS = 300`：**超过 300ms 直接标记 `DM_LANE_DEAD` 丢弃，本次播放不再重试抢泳道**（判定必须放在抢泳道之前，否则泳道占用表已被写脏）。日志里 `late=` 就是这批被丢掉的数量 —— 宁可少几条，也不半路冒出来。
-  3.5.18 是对这个问题的二次修正：上一版只保证「不半路冒出」，但弹幕密集时主循环按 `t_ms` 升序扫描、**预算判定却在抢泳道之后**，抢到预算的永远是已经飞了五八秒、快到左边的老条目，刚该入场的新条目被饿死，等它终于被画出来时 `elapsed` 已经一两秒。现在把顺序改成**先判迟到 → 再查预算 → 最后抢泳道**：预算用完的条目直接跳过，**不再为它预留泳道**。新增两个计数器直接可观测：`hungry=`（被预算挡在门外的条数）、`mid=`（首次画出时 `elapsed` 已超过 `DM_LATE_ENTRY_MS = 160` 的条数，即「半路冒出」的直接计数）。真机 1478 条的稿子上 `hungry` 每五秒两三百条、`mid` 几乎恒为 0，`vis` 与 `drawn` 从「34 对 6」变成相等，帧率仍然 30fps。
-
-  3.5.19 收了三个默认值：**弹幕默认开启**（之前默认关，装上以为没做弹幕）、**弹幕默认字号小**（`DM_SIZE_DEFAULT = 'small'`，嫌小自己去「我的 → 弹幕字号」调）、**字幕默认关闭**（去掉旧版「首次遇到有轨道的稿子就自动打开」）。设置文件损坏或版本迁移时也回到这组默认值，不再回到「永远没弹幕」。
-  【3.5.20】默认档从全屏改成 **1/4**屏：全屏在密集稿子上每屏十几条、盖住画面主体，而弹幕本来是陪读的东西。嫌少自己切到 1/2 或全屏。
-
-  【3.5.21/3.5.22】字幕对不上的真正原因不在本地。用设备自己的 Cookie 直连
-  `player/v2` 取证：同一 `bvid+cid` 连发 30 次拿到 **20 份互不相同**的 AI 字幕产物，
-  没有一份与本片内容相关（讲蚂蝗、唐僧、刘三少的都有），覆盖率 0.02~2.25 散布。
-  也就是说 B 站把**别的视频的 AI 字幕挂到了这个 cid 上**，换 Referer、加登录 Cookie
-  都改变不了。本地能做的是三件事：① `cc.cid` 绑定 cues 归属，换片瞬间不再拿旧 cues
-  去查新位置（3.5.21）；② 候选池从 4 条扩到 8 条、上游抓取 9 次，命中正确产物的概率
-  显著提高（3.5.22）；③ **候选全都不合格时干脆不出字幕**，而不是硬塞一条错的（3.5.22）。
-
-  【3.5.23】光看「末条结束时间 / 视频时长」还不够 —— 真机撞见过覆盖率 1.11
-  却是一支美食视频的字幕挂在 AI 稿件上。于是加了第二判据：**标题关键词命中率**。
-  把标题拆成英文整词（长度 ≥3）与中文相邻两字（bigram）当关键词，统计字幕全文
-  命中多少，`kw = 命中数 / 关键词数`。7 支稿件实测（只用标题）：
-  正确产物 `kw` = 0.25 / 0.357 / 0.667 / 0.750 / 0.857，错挂产物 ≤ 0.143
-  （多数 0.000~0.053），阈值取 **0.18** 正好分开。标题关键词少于 5 个时判据
-  不可用，一律放行 —— 不能因为标题短就把正确字幕误杀。
-
-  【3.5.24】接着上一版收尾：**字幕键显示「开」却没有字幕，关掉再打开才出来**。
-  开关显示的是用户偏好（跨视频保留，这是对的），画面有没有字幕取决于起播那一轮
-  有没有真的捞到合格产物 —— 而池子是随机分桶的，一轮里全是错挂产物时上一版的
-  判据会正确地「宁缺毋滥」，于是就成了「开着却没有」。用户关开一次恰好等于
-  「再来一轮」，所以又能出了。修法是把「再来一轮」做进流程：起播最多跑 3 轮，
-  每轮换一个池子（首轮复用已经拿到的结果，后续退避 800ms / 1600ms，单轮请求数
-  压到 5 发避免撞风控）。手动关开与切语言、以及首轮 `player/v2` 直接失败这三条
-  路径也走同一套，一次没捞到不该让用户再点一次。
-
-  【3.5.25】上一版的重试反而暴露了关键词判据的误杀：真机撞见一支 83 秒的
-  鬼畜稿（《领域展开！谁是最强狙击手？》），**正确字幕的覆盖率是 0.97、偏差
-  0.03，几乎完美**，但标题是玩梗的（「领域展开」出自咒术回战，正文里根本
-  不会出现），9 个标题关键词只命中 1 个，`kw = 0.111` 被判不合格 —— 三轮
-  重试全被拦下，用户看到的还是「字幕键开着却没有字幕」。同一支稿子里真正
-  错挂的产物覆盖率是 2.67 / 35.39 / 19.36，长度判据本来就挡得住。
-  但「偏差小就放行」同样是错的：另一支 661 秒的稿子
-  （《耗时三年！打造最好用的远程串流软件》）候选池里**一份本片的都没有**，
-  其中 267 条那条覆盖 0.92、偏差 0.08，关键词一个都没命中，开头却是
-  「这位尊敬的委员」—— 完全是别人的字幕。
-  于是判据改成**三档**：① `kw ≥ 0.18` 强证据放行；② 命中至少 1 个关键词
-  **且** 偏差 ≤ `SUBTITLE_FIT_GOOD`（0.10）放行；③ 其余判不合格。关键词少于
-  5 个时判据不可用，一律放行（标题太短不能当证据）。
-  用四支稿件真实候选池回放：玩梗稿的正确字幕从「全部被拦」变成放行，全错挂
-  的那支仍然一条不放，污染稿漏网的 214 条（偏差 0.14、仅命中 1 个）被拦下，
-  Google 送中那支的正确产物照常放行。
-  详见 [`docs/danmaku.md`](docs/danmaku.md)
-- **未登录时 B 站字幕列表恒为空**（CC 字幕/AI 字幕需要 `SESSDATA`）；互动视频节点匿名态
-  `story_list` 只有起始模块，登录后才能用服务端进度回溯，本项目改为本地历史快照回退
-- **无倍速播放**
-- **未登录时服务端最高只给 480P**
-- 起播比"直接开播"慢 1.7~2.4 秒，这是缓冲门的代价（换来起播即满帧，不从第 3 秒开始）
-- 直播延迟约 4 秒（视频队列深度就是延迟下限）
+- S6 Pro 无硬件解码，1080p 软解约 1.05× 实时，默认 360p。
+- 匿名状态下 B 站 `x/player/v2` 不返回字幕地址（`subtitle_url` 为空），
+  CC 字幕需要登录后才有轨道。
+- 视频由 native 直接写 framebuffer，Falcon UI 无法覆盖在画面上：
+  弹幕、浮动控件等「画在视频上面」的形态在本机不可实现（这也是移除弹幕的原因之一）。
 
 ---
 
-## 致谢
+## 致谢与许可
 
-- [SocialSisterYi/bilibili-API-collect](https://github.com/SocialSisterYi/bilibili-API-collect)：基本是照着这份接口文档把点赞、投币、收藏、评论一路接完的，省了大量抓包时间
-- 有道 Falcon 小程序的官方示例与 `falcon-ui` 组件库：布局、样式和触摸事件行为都以它为准
-- [@dpdpdpings](https://github.com/dpdpdpings)：**X7 Pro 适配**的主要贡献者。X7 Pro 的黑屏、画面比例变形与平面选择问题都是他定位的，`device_profile.js`（运行时设备探测）、`layout.js`（按视口弹性布局）以及 native 侧的面板几何参数化（`planeId`/`swScale`/`bufScale`/`panelXOffset` 四个运行时参数、`planeId=-1` 自选平面 + 软件缩放的兜底）均出自他手，[`docs/x7pro-adaptation.md`](docs/x7pro-adaptation.md) 记录了完整的六轮真机迭代过程
-
-## 免责声明
-
-- 本项目为个人学习用途，与哔哩哔哩、有道（网易）均无关联；相关商标归其权利人所有
-- `native/iot-miniapp-sdk/include` 为有道小程序官方 SDK 头文件，仅作为 native 模块的编译依赖随仓库分发；版权归原权利人，不适用于本仓库 GPL-3.0 授权
-- 使用本软件访问服务时请遵守哔哩哔哩用户协议；账号安全责任自负
-- **无任何担保**；详见 LICENSE
-
-## 许可证
-
-[GPL-3.0](LICENSE)
+- 上游与主要作者：[56dz/PenBili](https://github.com/56dz/PenBili)（GPL-3.0）
+- 本分支由 S6 Pro 适配改动构成，同样以 **GPL-3.0** 发布。
+- 第三方客户端，与哔哩哔哩无隶属关系；所有内容版权归原作者及平台所有。

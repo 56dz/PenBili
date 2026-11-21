@@ -12,7 +12,8 @@
 //     规避无 CA 库下 https ImageLoader 的未知风险。
 import { logWarn } from './storage.js';
 import { buildSignedQuery } from './bili/wbi.js';
-import { normalizeImageUrl } from './imgurl.js';
+import { coverThumbUrl } from './imgurl.js';
+import { httpGetTextNative } from './net.js';
 
 export const RCMD_PAGE_SIZE = 20; // 实测上限
 export const POPULAR_PAGE_SIZE = 12;
@@ -29,7 +30,8 @@ const BV_RE = /^BV[0-9A-Za-z]{10}$/;
 //   路径（实测 http/https 均 200，1311x737 JPEG）。
 // 归一逻辑收敛到 services/imgurl.js（feed / article / 头像共用一份）。
 export function normalizeCover(url) {
-  return normalizeImageUrl(url);
+  // 缩略图后缀：设备 BitmapFactory 解不了 >4MB 的原图（真机灰块根因）
+  return coverThumbUrl(url, 480, 270);
 }
 
 // 时长秒 → "mm:ss" / "h:mm:ss"；非正数 → ''
@@ -88,6 +90,8 @@ export function normalizeVideo(raw, source) {
     title: typeof raw.title === 'string' && raw.title ? raw.title : '未命名',
     cover: normalizeCover(raw.pic || raw.cover || ''),
     up: typeof owner.name === 'string' && owner.name ? owner.name : '',
+    // UP mid：详情页「点蓝色 UP 名 → 主页」用；缺失时还可由 view 兜底补齐
+    mid: Number(owner.mid) || 0,
     durationSec: isFinite(dur) && dur > 0 ? Math.floor(dur) : 0,
     view: Number(stat.view) || 0,
     source: source || ''
@@ -111,6 +115,7 @@ export function normalizeSearch(raw) {
     title: stripHtml(raw.title) || '未命名',
     cover: normalizeCover(raw.pic || raw.cover || ''),
     up: stripHtml(raw.author) || '',
+    mid: Number(raw.mid) || 0,
     durationSec: parseDuration(raw.duration),
     view: Number(raw.play) || 0,
     source: 'search'
@@ -224,13 +229,86 @@ export async function fetchPopular(client, pn) {
 
 // 搜索（WBI 签名；mixinKey 由 play_session.ensureMixin 提供会话级缓存）
 // searchType: 'video' | 'article'(图文/专栏) | 'live'(直播间)
+// order: totalrank（默认）| pubdate（UP 主页回退取「最新发布」）
 // → {ok, items, page, noMore, total} | {ok:false, stage, message}
-export function searchBili(client, mixinKey, keyword, page, searchType) {
+export function searchBili(client, mixinKey, keyword, page, searchType, order) {
   const st = searchType === 'article' || searchType === 'live' ? searchType : 'video';
-  return _searchType(client, mixinKey, keyword, page, st);
+  return _searchWithFallback(client, mixinKey, keyword, page, st, order);
 }
 
-function _searchType(client, mixinKey, keyword, page, searchType) {
+/* 两趟传输：先 native libcurl（httpjson.getBinary，同步 ≈0.3~0.5s），失败再回退 jsapi。
+ *
+ * 为什么不用 jsapi 优先：真机日志（2026-11-10 22:25 / 23:24 / 09:59）里每次
+ * 「系统输入法返回后立刻搜索」的第一发都 `NET_TIMEOUT 15000ms`，重试才成功 ——
+ * 15s 的等待就是用户说的「搜索慢」。native 栈不受 jsapi 请求队列/前后台切换影响；
+ * 服务端已明确应答（api/http）时不再换栈重试，避免无意义双请求。 */
+async function _searchWithFallback(client, mixinKey, keyword, page, st, order) {
+  let r = null;
+  try {
+    r = await _searchType(client, mixinKey, keyword, page, st, {
+      get: nativeSearchGet,
+      timeout: SEARCH_TIMEOUT_MS
+    }, order);
+  } catch (e) {
+    r = { ok: false, stage: 'transport', message: (e && e.message) || String(e) };
+  }
+  if (r && r.ok) return r;
+  if (r && (r.stage === 'api' || r.stage === 'http')) return r;
+  if (r && r.stage === 'transport') logWarn('[bili] search native fail → jsapi: ' + r.message);
+  const r2 = await _searchType(client, mixinKey, keyword, page, st, { timeout: SEARCH_TIMEOUT_MS }, order);
+  return r2 && r2.ok ? r2 : (r2 || r);
+}
+
+/* 搜索相关性守卫（v3.8.0，用户反馈「后几个结果与搜索内容不符」）。
+ *
+ * B 站 search/type 在关键词命中少时会用「相关推荐」把每页填满 20 条
+ * （开发机对拍：搜 "PenBili" 只有第 1 条真含关键词，其余是 Apple Pencil /
+ * Epic Pen / 字母积木之类；搜 "原神7.2" 末尾混兑换码广告）。
+ * 这里只裁掉**末尾连续不相关**的条目：
+ *   - 命中率高的关键词（原神/三国演义）一条不丢（末条也命中 → 不动）；
+ *   - 整页都不命中（如「米哈游」，标题里很少出现这三个字）→ 原样保留，
+ *     避免把合理的联想过早裁空；
+ *   - 多词关键词按「所有词都出现」判定（不要求连续），单字/单 token 按整串。
+ * 匹配前两边都去掉空白/标点/符号：标题里的「原神 7.2」「【原神】7.2」都能
+ * 命中「原神7.2」。 */
+export function normalizeForMatch(s) {
+  return String(s == null ? '' : s).toLowerCase().replace(/[^0-9a-z\u4e00-\u9fa5]+/g, '');
+}
+
+export function searchHit(rawTitle, rawExtra, keyword) {
+  const hay = normalizeForMatch(String(rawTitle || '') + String(rawExtra || ''));
+  const whole = normalizeForMatch(keyword);
+  if (!hay || !whole) return false;
+  const parts = String(keyword || '').split(/[\s,，、|/]+/).map(normalizeForMatch).filter((t) => t.length >= 2);
+  if (parts.length > 1) {
+    for (let i = 0; i < parts.length; i++) if (hay.indexOf(parts[i]) < 0) return false;
+    return true;
+  }
+  return hay.indexOf(whole) >= 0;
+}
+
+// 只裁尾部；返回 {items, trimmed, kept}
+export function trimIrrelevantTail(items, hays, keyword) {
+  const list = items || [];
+  if (list.length < 2) return { items: list, trimmed: 0, kept: list.length };
+  let lastHit = -1;
+  for (let i = 0; i < list.length; i++) {
+    if (searchHit('', (hays && hays[i]) || '', keyword)) lastHit = i;
+  }
+  if (lastHit < 0 || lastHit >= list.length - 1) return { items: list, trimmed: 0, kept: list.length };
+  return { items: list.slice(0, lastHit + 1), trimmed: list.length - lastHit - 1, kept: lastHit + 1 };
+}
+
+// 搜索请求超时：jsapi.http 在系统输入法刚返回时会挂满 15s（真机日志
+// 「load search 首次失败(transport) NET_TIMEOUT 15000ms」）；压到 8s 让重试更早发生。
+export const SEARCH_TIMEOUT_MS = 8000;
+
+// native libcurl 文本 GET（httpjson getBinary 同步实现，30KB JSON ≈0.4s）
+function nativeSearchGet(url, o) {
+  return httpGetTextNative(url, { headers: o && o.headers, timeout: (o && o.timeout) || SEARCH_TIMEOUT_MS });
+}
+
+function _searchType(client, mixinKey, keyword, page, searchType, reqOpts, order) {
   const kw = String(keyword == null ? '' : keyword).trim();
   if (!kw) return { ok: false, stage: 'param', message: '关键词为空' };
   if (!/^[0-9a-f]{32}$/.test(String(mixinKey || ''))) {
@@ -240,12 +318,12 @@ function _searchType(client, mixinKey, keyword, page, searchType) {
   const params = {
     search_type: searchType,
     keyword: kw,
-    order: 'totalrank',
+    order: order === 'pubdate' ? 'pubdate' : 'totalrank',
     page: pageNum
   };
   const query = buildSignedQuery(params, mixinKey, Math.floor(Date.now() / 1000));
   return client
-    .request(SEARCH_PATH, query)
+    .request(SEARCH_PATH, query, reqOpts || {})
     .then((res) => {
       if (!res.ok) return failFrom(res);
       const d = res.data || {};
@@ -255,23 +333,36 @@ function _searchType(client, mixinKey, keyword, page, searchType) {
         arr = (searchType === 'live' && arr && arr.live_room) || [];
       }
       const items = [];
+      const hays = [];
       arr.forEach((raw) => {
         let it = null;
         if (searchType === 'article') it = normalizeSearchArticle(raw);
         else if (searchType === 'live') it = normalizeSearchLive(raw);
         else it = normalizeSearch(raw);
-        if (it) items.push(it);
+        if (it) {
+          items.push(it);
+          hays.push(normalizeForMatch([raw.title, raw.description, raw.tag, raw.author, raw.uname].filter(Boolean).join(' ')));
+        }
       });
       if (items.length === 0) {
         return { ok: false, stage: 'parse', message: pageNum > 1 ? '没有更多结果' : '无搜索结果' };
       }
+      /* 相关性裁剪只对视频搜索做：图文/直播的结果标题经常不含关键词（主播自定义
+       * 标题、专栏标题），按标题命中率裁会误删合理结果。 */
+      const rel = searchType === 'video'
+        ? trimIrrelevantTail(items, hays, kw)
+        : { items: items, trimmed: 0, kept: items.length };
+      if (rel.trimmed > 0) {
+        logWarn('[bili] search relevance trim p' + pageNum + ' ' + items.length + '→' + rel.kept + ' (kw=' + kw.length + '字)');
+      }
       const numPages = Number(d.numPages) || 1;
       return {
         ok: true,
-        items: items,
+        items: rel.items,
         page: pageNum,
         noMore: pageNum >= numPages,
-        total: Number(d.numResults) || 0
+        total: Number(d.numResults) || 0,
+        trimmed: rel.trimmed
       };
     });
 }

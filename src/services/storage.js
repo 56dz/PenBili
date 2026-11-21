@@ -12,6 +12,10 @@ export const KEYS = {
   settings: 'bvp_settings',
   // 播放历史（给「我的」页；schema 见 history.js）
   history: 'bili_history',
+  // 搜索记录（给搜索页空态；schema 见 search_history.js）
+  searchHistory: 'bili_search_history',
+  // 离线缓存（给「下载」页；schema 见 downloads.js）
+  downloads: 'bili_downloads',
   // 自检开关（tools/seed_settings.js 预置，真机自动化用）
   autotest: 'bili_autotest',
   // 检查更新：跳过版本 / 今天内不提示（schema 见 updater.js normalizeUpdateState）

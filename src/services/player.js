@@ -33,7 +33,7 @@ export const MAX_REFERER_LEN = 512;
 
 // 实现开关：storage 键 + 缺省值（缺省走新实现；native 未就绪时自动回退 v1）
 export const PLAYER_IMPL_KEY = 'bili_player_impl';
-export const PLAYER_IMPL_DEFAULT = 'v2';
+export const PLAYER_IMPL_DEFAULT = 'v1';
 
 let mod = null;
 let tried = false;
@@ -250,12 +250,13 @@ function callOptional(fnName, args) {
 }
 
 // opts → native open() 位置参数（纯函数，单测覆盖顺序与钳制）
-// opts: { input, input2, startMs, durationMs, fps, audio, transpose, rect, audioDevice, userAgent, referer, fpsCap, isLive }
+// opts: { input, input2, startMs, durationMs, fps, audio, transpose, rect, audioDevice, userAgent, referer, fpsCap, isLive, decode }
 // input2 = DASH 音频轨第二输入 URL（''/缺省 = 单文件）
 // fpsCap = 渲染帧率上限（0/缺省 = 不限；「我的 → 视频调节 / 直播」的帧率设置）
 // isLive = 1 直播 / 0 点播 / 缺省（undefined）→ native 收到 -1，回落严格启发式
+// decode = { width, height } 解码分辨率（清晰样式 = 无栏信箱矩形；缺省/0 = 按显示矩形解码）
 // 注意：前 15 个位置参数的顺序是与 native 的硬契约，任何一位都不能动；
-//       isLive 是第 16 位（追加，老 native 忽略多余实参不受影响）。
+//       isLive 是第 16 位，decodeW/decodeH 是第 17/18 位（追加，老 native 忽略多余实参不受影响）。
 export function buildOpenArgs(opts) {
   const o = opts || {};
   const rect = o.rect || { x: 0, y: 0, width: 0, height: 0 };
@@ -265,6 +266,9 @@ export function buildOpenArgs(opts) {
   let liveFlag = -1;
   if (o.isLive === true) liveFlag = 1;
   else if (o.isLive === false) liveFlag = 0;
+  const dec = o.decode || null;
+  const decW = dec ? Math.max(0, Math.round(Number(dec.width) || 0)) : 0;
+  const decH = dec ? Math.max(0, Math.round(Number(dec.height) || 0)) : 0;
   return [
     o.input,
     Math.max(0, Math.round(o.startMs || 0)),
@@ -281,49 +285,15 @@ export function buildOpenArgs(opts) {
     typeof o.referer === 'string' ? o.referer : '',
     typeof o.input2 === 'string' ? o.input2 : '',
     cap > 0 ? cap : 0,
-    liveFlag
+    liveFlag,
+    /* v3.9.1 第 17/18 位：清晰样式的无栏解码尺寸（0/0 = 按显示矩形解码）。
+     * 老 native 会忽略多余实参，不影响回退。 */
+    decW,
+    decH
   ];
 }
 
-// 【X7 Pro 适配】open 的第 17~20 个位置参数：面板列偏移 / kmssink plane-id /
-// 软件缩放开关 / videoscale 输出倍率。只在真正调 native 时追加，
-// buildOpenArgs 的 16 参契约保持不变（单测逐项断言）。
-// 缺省 -1 / 0 / 0 / 100 = 让 native 回落 X6 Pro 的 107 / 76，且不放大 buffer。
-function intOr(v, dflt) {
-  if (v === undefined || v === null || v === '') return dflt;
-  const n = Math.round(Number(v));
-  return isFinite(n) ? n : dflt;
-}
-
-function deviceArgs(opts) {
-  const o = opts || {};
-  /*
-   * 第 19 位 = swScale（0/1/2）：解码后是否插 videoscale，以及目标宽高是否
-   * 按 rotate 互换。X7 Pro 上 plane-id 76 不可用，自选平面可能没有缩放器，
-   * 所以由 profile 下发 1 或 2，让 sink 拿到尺寸可控的 buffer。
-   * 第 20 位 = bufScale（百分比，100 = 与矩形等大）：3.5.6 第四轮新增。
-   * X7 的 1:1 平面不理会 render-rectangle 的大小，只按 buffer 像素贴屏，
-   * 所以「画面占不满」必须靠放大 buffer 解决，光改矩形无效。
-   */
-  const sw = intOr(o.swScale, 0);
-  const buf = intOr(o.bufScale, 100);
-  /* 第 21/22 位 = 全屏 cover 裁切量（0 = 普通态不裁）。见 session.h 注释。 */
-  const cx = intOr(o.cropX, 0);
-  const cy = intOr(o.cropY, 0);
-  return [
-    intOr(o.panelOffset, -1),
-    intOr(o.planeId, 0),
-    /* 1 = videoscale + lanczos（默认）；2 = 不互换（固件真旋转）；
-     * 3 = videoscale + bilinear（画质回退档，用来隔离「变形是否与 lanczos 有关」）。 */
-    sw >= 1 && sw <= 3 ? sw : 0,
-    buf < 50 ? 50 : buf > 400 ? 400 : buf,
-    cx > 0 && cx <= 2048 ? cx : 0,
-    cy > 0 && cy <= 2048 ? cy : 0
-  ];
-}
-
-// opts: { input, input2, startMs, durationMs, fps, audio, transpose, rect, audioDevice,
-//         userAgent, referer, fpsCap, isLive, panelOffset, planeId, swScale, bufScale, cropX, cropY }
+// opts: { input, input2, startMs, durationMs, fps, audio, transpose, rect, audioDevice, userAgent, referer, fpsCap }
 export async function openSession(opts) {
   const m = await getPlayerModule();
   if (!m) return fail('PLAYER_NATIVE_MISSING', '播放器模块不可用（未随包安装 libjsapi_player2.so / libjsapi_player.so）');
@@ -334,8 +304,7 @@ export async function openSession(opts) {
   if (!isSafeReferer(o.referer)) return fail('PLAYER_BAD_HEADERS', 'Referer 参数不合法');
   const rect = o.rect || null;
   if (!rect || !(rect.width > 0) || !(rect.height > 0)) return fail('PLAYER_BAD_RECT', '视频矩形未计算');
-  // v1(player.c) 只按 argv[0..14] 取参，多出来的参数会被忽略，不影响回退路径。
-  const res = call('open', buildOpenArgs(o).concat(deviceArgs(o)));
+  const res = call('open', buildOpenArgs(o));
   if (res && res.ok === false && !res.code) res.code = 'PLAYER_OPEN_FAILED';
   return res;
 }
@@ -386,49 +355,24 @@ export async function recover() {
  * 调用方需容错（v1 下键盘避让做不了，只能不弹评论框或接受遮挡）。 */
 export async function setVideoRect(x, y, w, h) {
   await getPlayerModule();
-  return callOptional('setRect', [
+  const args = [
     Math.round(Number(x) || 0),
     Math.round(Number(y) || 0),
     Math.round(Number(w) || 0),
     Math.round(Number(h) || 0)
-  ]);
+  ];
+  return callOptional('setRect', args);
 }
 
-/* ---------------- 【3.5.14 弹幕】----------------
- *
- * 为什么弹幕要走 native：视频是 kmssink 直送 DRM 平面，`Esmart1-win0` 的
- * zpos 高于 Falcon UI 层（`Esmart0-win0`），**任何 DOM 都盖不到画面上**。
- * CC 字幕能做 UI 条，是因为它从画面里让出一块高度；弹幕要浮在画面上，
- * 只能把像素烧进视频帧。
- *
- * 三个导出的分工：
- *   dmFeed(text)  喂一整片弹幕文本（JS 已解析好并去重），每行
- *                 `id|progress|mode|color|fontsize|content`
- *   dmMode(m,f)   切换 0=关 / 1=全屏 / 2=上半 / 3=上 1/4，f = 逻辑字号
- *   dmClear()     切集或跨分片 seek 时清空
- *
- * 三者都走 callOptional：v1 播放器没有这些导出，返回 PLAYER_UNSUPPORTED
- * 让页面降级隐藏开关，而不是抛异常打断播放。 */
-
-export async function dmFeed(text) {
+/* 视频放大：1.0 = 原始，最多 4.0（native 取源画面中心 1/zoom 后放大贴屏）。
+ * 只改贴图采样，不重启解码、不改矩形。 */
+export async function setZoom(z) {
   await getPlayerModule();
-  return callOptional('dmFeed', [String(text || '')]);
+  const v = Math.max(1, Math.min(4, Number(z) || 1));
+  return callOptional('setZoom', [v]);
 }
 
-export async function dmMode(mode, fontPx) {
-  await getPlayerModule();
-  return callOptional('dmMode', [
-    Math.round(Number(mode) || 0),
-    Math.round(Number(fontPx) || 0)
-  ]);
-}
-
-export async function dmClear() {
-  await getPlayerModule();
-  return callOptional('dmClear', []);
-}
-
-/* v1 专有：显示权与弹幕泳道（v2 无此概念 → PLAYER_UNSUPPORTED，调用方需容错） */
+/* v1 专有：显示权（评论面板/播放菜单打开时暂停 native 写屏）。 */
 export async function pauseRender() {
   await getPlayerModule();
   return callOptional('pauseRender', []);
@@ -444,35 +388,9 @@ export async function redraw() {
   return callOptional('redraw', []);
 }
 
-/* 读 native 日志尾部（/tmp/pb2.log）。自检页「日志」用它 —— 真机没有 adb 时，
- * 一张截图就能看到 bus error / plane missing / 音频自愈这些关键行。
- * v1 没有这个接口 → callOptional 返回 PLAYER_UNSUPPORTED，页面按「无日志」降级。 */
-export async function logTail(maxBytes) {
-  await getPlayerModule();
-  return callOptional('logTail', [Math.round(Number(maxBytes) || 4096)]);
-}
-
 export async function info() {
   await getPlayerModule();
   return callOptional('info', []);
-}
-
-/* 【X7 Pro 适配】只读 DRM/KMS 平面摘要（player2 才有；v1 返回
- * PLAYER_UNSUPPORTED，诊断页据此显示"不可用"而不是抛异常）。 */
-export async function kmsProbe() {
-  await getPlayerModule();
-  return callOptional('kmsProbe', []);
-}
-
-/* 【3.5.6 第五轮】一键开声：解除全局静音开关、选通输出通路。
- * 真机「画面正常但没声音」多半是 /tmp/pb2_mute 或 PB2_MUTE=1 把
- * Playback Path 设成 OFF；开发机无 adb，只能由页面按钮下发。
- * 只在系统音量为 0 时才给默认音量，用户音量非 0 一律不碰。
- * 老 native 没有此接口 → PLAYER_UNSUPPORTED，页面照常降级。
- * 点一次是进程级/文件级生效，之后首页播放也有声，不必反复点。 */
-export async function setSound(on) {
-  await getPlayerModule();
-  return callOptional('setSound', [on === false ? 0 : 1]);
 }
 
 export function warnUnsupportedOnce(what) {

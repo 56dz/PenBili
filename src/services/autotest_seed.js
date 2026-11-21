@@ -75,6 +75,30 @@ export function readAutotestSeed(at) {
     /* probeUpdate：检查更新全链路自证（检测 → 下载 → 安装）。
      * 为什么需要：http.downloadFile 与 pm.installPackage 的参数形态没有文档，
      * 只能靠真机日志确认；这条探针把三次调用的结论逐行打出来，一条 grep 就能判定。 */
-    probeUpdate: o.probeUpdate === true
+    probeUpdate: o.probeUpdate === true,
+    // probeMenu：起播 3s 后自动打开播放页右侧设置菜单（验证 overlay 可见性与 pauseRender）。
+    probeMenu: o.probeMenu === true,
+    // probeDetail：首屏加载后自动打开第一条视频的详情页（验证三栏布局与字号）。
+    probeDetail: o.probeDetail === true,
+    // probeChrome：起播后自动隐藏/恢复顶底栏（验证全屏切换与 native setRect 链路）。
+    probeChrome: o.probeChrome === true,
+    // probeSearch：用给定关键词跑一次搜索并打点结果数/首尾标题（验证搜索链路与相关性裁剪）。
+    probeSearch: typeof o.probeSearch === 'string' ? o.probeSearch : '',
+    // probeDownload：起播后自动打开播放菜单并点「缓存」（验证离线下载与进度显示）。
+    probeDownload: o.probeDownload === true,
+    // probeLocalPlay：打开「下载」页播第一条缓存（验证本地 mp4 起播链路）。
+    probeLocalPlay: o.probeLocalPlay === true,
+    // probeTab：启动后直接切到指定标签（rcmd/hot/search/mine/downloads），仅用于 UI 取证。
+    probeTab: typeof o.probeTab === 'string' ? o.probeTab : '',
+    // probeQr：切「我的」并自动打开扫码登录（验证二维码尺寸/可扫性，无需触摸注入）。
+    probeQr: o.probeQr === true,
+    // probeStyle：起播后自动切「清晰（无栏解码）」样式（验证解码尺寸与不变形）。
+    probeStyle: o.probeStyle === true,
+    // probeZoom：起播后自动 2x → 1x（验证视频放大与中心裁切）。
+    probeZoom: o.probeZoom === true,
+    // probeUp：打开首条视频详情后点蓝色 UP 名，验证 UP 主页解析（名片 + 投稿列表）。
+    probeUp: o.probeUp === true,
+    // probePlayBackUp：搜索/推荐 → UP 主页 → 视频详情 → 播放 → 返回，断言回到 UP 页（3.9.5）。
+    probePlayBackUp: o.probePlayBackUp === true
   };
 }
