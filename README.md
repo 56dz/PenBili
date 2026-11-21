@@ -55,8 +55,9 @@
 
 ## 构建
 
-安装包：[Releases · v4.0.0](https://github.com/noguimc/PenBili/releases/tag/v4.0.0)（`PenBili.amr`，旧版）；
-v4.0.2 为本地构建（视频缩放 + 原字号），待 GitHub 账号恢复后发布。
+安装包：[Releases · v4.0.2](https://github.com/Noguimc2/PenBili/releases/tag/v4.0.2)
+（`PenBili-4.0.2-s6pro.amr`）；上游旧版见
+[v4.0.0](https://github.com/noguimc/PenBili/releases/tag/v4.0.0)。
 
 前置：Node 16+、Python 3、adb；重编 native 时另需 zig。
 
